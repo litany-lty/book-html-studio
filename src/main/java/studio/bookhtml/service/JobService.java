@@ -8,6 +8,8 @@ import studio.bookhtml.api.ApiException;
 import studio.bookhtml.api.JobRequest;
 import studio.bookhtml.domain.*;
 import studio.bookhtml.store.BookStore;
+import studio.bookhtml.store.CommitActor;
+import studio.bookhtml.store.PageConflictException;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -44,48 +46,68 @@ public class JobService {
             int baselineRev=BookStore.revisionOrZero(old);
             Page baseline=force?strongestBaseline(old,store.readOriginalPage(running.bookId,pageNumber)):old;
             if("READY".equals(old.status())&&!force){completed++;writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",completed,pages.size(),pageNumber,null,List.copyOf(errors)));continue;}
-            Page processing=new Page(old.pageNumber(),old.width(),old.height(),"PROCESSING",provider,old.blocks(),old.warnings(),old.reviewed(),null,old.sourceRecords(),null);store.writePage(running.bookId,processing,false);
+            Page processing=new Page(old.pageNumber(),old.width(),old.height(),"PROCESSING",provider,old.blocks(),old.warnings(),old.reviewed(),null,old.sourceRecords(),null);
+            // R03：PROCESSING 标记同样走条件提交；基线已被并发修改时不覆盖，直接跳过
+            try {
+                store.commitPage(running.bookId,processing,baselineRev,CommitActor.JOB,initial.id());
+            } catch (PageConflictException conflict) {
+                String message="第 "+pageNumber+" 页在识别开始前已被更新，已保留较新版本，跳过本页";
+                errors.add(message);completed++;writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",completed,pages.size(),pageNumber,null,List.copyOf(errors)));continue;
+            }
             try{
                 Page rawNew=processor.process(running.bookId,pageNumber,provider,layout,split,assist,()->running.cancelled||Thread.currentThread().isInterrupted());
                 Page page=mergeUnresolvedIssues(old,rawNew);
                 if(!stillCurrent(running,initial.id()))return;
-                // 阶段1：并发手工保存保护——PROCESSING 写入后 revision 应为 baselineRev+1，否则说明有并发写入
-                Page currentAfterProcess=store.readPage(running.bookId,pageNumber);
-                if(currentAfterProcess!=null&&BookStore.revisionOrZero(currentAfterProcess)!=baselineRev+1){
-                    String message="第 "+pageNumber+" 页在识别期间已被手工保存，已保留手工版本，识别候选另存备查";
-                    errors.add(message);
-                    try{store.writeCandidate(running.bookId,page);}catch(IOException ignored){}
-                    completed++;writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",completed,pages.size(),pageNumber,null,List.copyOf(errors)));
-                    continue;
-                }
                 // 阶段1：零结果与显著缩水保护（不限于 force），失败不覆盖旧可读版本，候选留档
                 if(isSignificantRegression(baseline,page)||isEmptyResult(page)){
                     String message="第 "+pageNumber+" 页重识别来源文字少于旧记录的 60%（或为空），已拒绝覆盖并保留较完整结果";
                     errors.add(message);
                     try{store.writeCandidate(running.bookId,page);}catch(IOException ignored){}
+                    Page fallback;
                     if("READY".equals(baseline.status())){
                         List<String>warnings=new ArrayList<>(baseline.warnings()==null?List.of():baseline.warnings());warnings.add(message);
-                        store.writePage(running.bookId,new Page(baseline.pageNumber(),baseline.width(),baseline.height(),"READY",baseline.provider(),baseline.blocks(),List.copyOf(warnings),baseline.reviewed(),message,baseline.sourceRecords(),null),false);
+                        fallback=new Page(baseline.pageNumber(),baseline.width(),baseline.height(),"READY",baseline.provider(),baseline.blocks(),List.copyOf(warnings),baseline.reviewed(),message,baseline.sourceRecords(),null);
                     }else{
                         List<String>warnings=new ArrayList<>(old.warnings()==null?List.of():old.warnings());warnings.add(message);
-                        store.writePage(running.bookId,new Page(old.pageNumber(),old.width(),old.height(),"FAILED",old.provider(),old.blocks(),List.copyOf(warnings),old.reviewed(),message,old.sourceRecords(),null),false);
+                        fallback=new Page(old.pageNumber(),old.width(),old.height(),"FAILED",old.provider(),old.blocks(),List.copyOf(warnings),old.reviewed(),message,old.sourceRecords(),null);
                     }
-                }else store.writePage(running.bookId,page,true);
+                    try {
+                        store.commitPage(running.bookId,fallback,baselineRev+1,CommitActor.JOB,initial.id());
+                    } catch (PageConflictException conflict) {
+                        errors.add("第 "+pageNumber+" 页在识别期间又被更新，已保留最新版本");
+                    }
+                }else{
+                    try{store.preserveOriginal(running.bookId,page);}catch(IOException ignored){}
+                    try {
+                        store.commitPage(running.bookId,page,baselineRev+1,CommitActor.JOB,initial.id());
+                    } catch (PageConflictException conflict) {
+                        String message="第 "+pageNumber+" 页在识别期间已被手工保存，已保留手工版本，识别候选另存备查";
+                        errors.add(message);
+                        try{store.writeCandidate(running.bookId,page);}catch(IOException ignored){}
+                    }
+                }
             }
             catch(CancelledException e){
                 if(!stillCurrent(running,initial.id()))return;
-                // 恢复旧状态为新版本，不降低可读性
-                store.writePage(running.bookId,new Page(old.pageNumber(),old.width(),old.height(),old.status(),old.provider(),old.blocks(),old.warnings(),old.reviewed(),old.error(),old.sourceRecords(),null),false);throw e;}
+                // 恢复旧状态为新版本，不降低可读性；并发写入优先保留
+                try {
+                    store.commitPage(running.bookId,new Page(old.pageNumber(),old.width(),old.height(),old.status(),old.provider(),old.blocks(),old.warnings(),old.reviewed(),old.error(),old.sourceRecords(),null),baselineRev+1,CommitActor.JOB,initial.id());
+                } catch (PageConflictException ignored) { }
+                throw e;}
             catch(Exception e){
                 if(!stillCurrent(running,initial.id()))return;
                 String detail=safeDetail(e);String message="第 "+pageNumber+" 页处理失败"+(detail==null?"":"："+detail);errors.add(message);
-                // 阶段1：普通失败不降低已有有效页的可读状态——旧 READY 保持 READY，仅追加警告
+                // 阶段1：普通失败不降低已有有效页的可读状态——旧 READY 保持 READY，仅追加警告；并发写入优先保留
+                Page failed;
                 if("READY".equals(old.status())){
                     List<String>warnings=new ArrayList<>(old.warnings()==null?List.of():old.warnings());warnings.add(message);
-                    store.writePage(running.bookId,new Page(old.pageNumber(),old.width(),old.height(),"READY",old.provider(),old.blocks(),List.copyOf(warnings),old.reviewed(),message,old.sourceRecords(),null),false);
+                    failed=new Page(old.pageNumber(),old.width(),old.height(),"READY",old.provider(),old.blocks(),List.copyOf(warnings),old.reviewed(),message,old.sourceRecords(),null);
                 }else{
-                    store.writePage(running.bookId,new Page(old.pageNumber(),old.width(),old.height(),"FAILED",provider,old.blocks(),old.warnings(),old.reviewed(),message,old.sourceRecords(),null),false);
+                    failed=new Page(old.pageNumber(),old.width(),old.height(),"FAILED",provider,old.blocks(),old.warnings(),old.reviewed(),message,old.sourceRecords(),null);
                 }
+                try {
+                    store.commitPage(running.bookId,failed,baselineRev+1,CommitActor.JOB,initial.id());
+                } catch (PageConflictException ignored) { }
             }
             completed++;writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",completed,pages.size(),pageNumber,null,List.copyOf(errors)));
         }

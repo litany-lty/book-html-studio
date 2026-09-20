@@ -9,6 +9,8 @@ import studio.bookhtml.api.PageUpdateRequest;
 import studio.bookhtml.config.AppProperties;
 import studio.bookhtml.domain.*;
 import studio.bookhtml.store.BookStore;
+import studio.bookhtml.store.CommitActor;
+import studio.bookhtml.store.PageConflictException;
 
 import java.io.*;
 import java.nio.file.*;
@@ -41,11 +43,11 @@ public class BookService {
     public Page update(String id,int n,PageUpdateRequest request){Page old=page(id,n);if("PROCESSING".equals(old.status()))throw new ApiException(HttpStatus.CONFLICT,"本页正在识别，请等待完成或先取消任务再校对");
         // 阶段1：活动任务包含本页时拒绝手工保存，避免与后台回写竞争
         try{Job job=store.readJob(id);if(job!=null&&List.of("QUEUED","RUNNING","CANCELLING").contains(job.status())&&job.pages()!=null&&job.pages().contains(n))throw new ApiException(HttpStatus.CONFLICT,"本页正在识别，请等待完成或先取消任务再校对");}catch(ApiException e){throw e;}catch(Exception ignored){}
-        // 阶段1：revision 乐观锁——前端携带版本时必须匹配，否则 409
-        if(request.revision()!=null&&request.revision()!=BookStore.revisionOrZero(old))throw new ApiException(HttpStatus.CONFLICT,"页面已被更新，请刷新后重试");
-        BlockValidator.validate(request.blocks());List<Block> reviewed=request.blocks().stream().map(b->new Block(b.id(),b.type(),b.order(),b.bbox(),b.writingMode(),b.original(),b.simplified(),b.confidence(),b.uncertain(),request.reviewed()||b.reviewed(),b.headingLevel(),"manual",b.sourceIds(),b.suggestion(),b.sourceRect(),b.issues())).toList();Page next=new Page(n,old.width(),old.height(),"READY","manual",reviewed,old.warnings(),request.reviewed(),null,old.sourceRecords(),null);try{store.writePage(id,next,false);touch(id);return store.readPage(id,n);}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"保存校对结果失败");}}
+        // R03：人工保存必须携带版本；缺失 400，冲突 409（含当前版本）
+        if(request.revision()==null)throw new ApiException(HttpStatus.BAD_REQUEST,"缺少 revision，请刷新后重试");
+        BlockValidator.validate(request.blocks());List<Block> reviewed=request.blocks().stream().map(b->new Block(b.id(),b.type(),b.order(),b.bbox(),b.writingMode(),b.original(),b.simplified(),b.confidence(),b.uncertain(),request.reviewed()||b.reviewed(),b.headingLevel(),"manual",b.sourceIds(),b.suggestion(),b.sourceRect(),b.issues())).toList();Page next=new Page(n,old.width(),old.height(),"READY","manual",reviewed,old.warnings(),request.reviewed(),null,old.sourceRecords(),null);try{Page committed=store.commitPage(id,next,request.revision(),CommitActor.MANUAL,null);touch(id);return committed;}catch(PageConflictException e){throw e;}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"保存校对结果失败");}}
     public List<Integer> revisions(String id,int n){page(id,n);return store.listRevisions(id,n);}
-    public Page revert(String id,int n,int revision){page(id,n);try{Page next=store.revertPage(id,n,revision);touch(id);return next;}catch(ApiException e){throw e;}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"回退版本失败");}}
+    public Page revert(String id,int n,int targetRevision,int expectedRevision){page(id,n);try{Page next=store.revertPage(id,n,targetRevision,expectedRevision);touch(id);return next;}catch(ApiException e){throw e;}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"回退版本失败");}}
     public List<Map<String,Object>> search(String id,String query){Book b=store.readBook(id);String q=query==null?"":query.strip();if(q.isEmpty())return List.of();if(q.length()>200)throw new ApiException(HttpStatus.BAD_REQUEST,"搜索词过长");List<Map<String,Object>> result=new ArrayList<>();for(int n=1;n<=b.totalPages()&&result.size()<500;n++){Page p=requirePage(id,n);for(Block block:p.blocks()){if(contains(block.original(),q)||contains(block.simplified(),q))result.add(Map.of("pageNumber",n,"blockId",block.id(),"text",Optional.ofNullable(block.simplified()).orElse(block.original())));}}return result;}
     public byte[] image(String id,int n,int width){page(id,n);java.awt.image.BufferedImage image=null;try{image=pdf.render(store.pdf(id),n,width);return pdf.png(image);}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"页面图片生成失败");}finally{if(image!=null)image.flush();}}
     public byte[] figure(String id,int n,String blockId){Page p=page(id,n);Block b=p.blocks().stream().filter(x->x.id().equals(blockId)).findFirst().orElseThrow(()->new ApiException(HttpStatus.NOT_FOUND,"未找到该内容块"));try{return pdf.cropPng(store.pdf(id),n,config.maxImageWidth(),b.bbox());}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"内容块图片生成失败");}}

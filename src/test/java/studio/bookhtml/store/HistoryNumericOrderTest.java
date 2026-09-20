@@ -80,7 +80,7 @@ class HistoryNumericOrderTest {
         String id = book(store);
         for (int i = 0; i < 4; i++) store.writePage(id, ready(1, "v" + i), false);
         int before = BookStore.revisionOrZero(store.readPage(id, 1));
-        store.revertPage(id, 1, 1);
+        store.revertPage(id, 1, 1, before);
         int after = BookStore.revisionOrZero(store.readPage(id, 1));
         assertTrue(after > before, "回退必须生成更高的新 revision");
         assertTrue(store.listRevisions(id, 1).contains(before), "回退前的当前版本必须保留在历史中");

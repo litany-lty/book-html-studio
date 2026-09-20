@@ -146,10 +146,10 @@ class JobPhase1SafetyTest {
         // 旧版本重试应 409
         try{service.update(id,1,new PageUpdateRequest(List.of(b),true,rev));fail("应返回 409");}
         catch(ApiException e){assertEquals(HttpStatus.CONFLICT,e.status());}
-        // 回退到旧版本
+        // 回退到旧版本（携带当前版本，成功生成新 revision）
         List<Integer> revs=service.revisions(id,1);
         assertTrue(revs.contains(rev));
-        Page reverted=service.revert(id,1,rev);
+        Page reverted=service.revert(id,1,rev,rev+1);
         assertTrue(reverted.warnings().stream().anyMatch(w->w.contains("回退")));
     }
 

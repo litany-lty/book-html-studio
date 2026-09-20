@@ -16,7 +16,12 @@ import java.util.Map;
 @RestControllerAdvice
 public class ApiErrorHandler {
     @ExceptionHandler(ApiException.class)
-    ResponseEntity<Map<String,String>> api(ApiException e) { return ResponseEntity.status(e.status()).body(Map.of("message", e.getMessage())); }
+    ResponseEntity<Map<String,Object>> api(ApiException e) {
+        if (e instanceof studio.bookhtml.store.PageConflictException conflict) {
+            return ResponseEntity.status(e.status()).body(Map.of("message", e.getMessage(), "currentRevision", conflict.currentRevision()));
+        }
+        return ResponseEntity.status(e.status()).body(Map.of("message", e.getMessage()));
+    }
     @ExceptionHandler({MethodArgumentNotValidException.class, ConstraintViolationException.class, HttpMessageNotReadableException.class, MissingServletRequestParameterException.class, MethodArgumentTypeMismatchException.class})
     ResponseEntity<Map<String,String>> validation(Exception e) { return ResponseEntity.badRequest().body(Map.of("message", "请求参数无效")); }
     @ExceptionHandler(MaxUploadSizeExceededException.class)
