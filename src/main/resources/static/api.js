@@ -29,7 +29,12 @@ async function request(path, options = {}, timeout = 30000) {
       stale.name = 'StaleRequest';
       throw stale;
     }
-    if (error.name === 'AbortError') throw new Error('请求超时，请检查服务状态后重试。');
+    if (error.name === 'AbortError') {
+      // A1-S06：超时需要调用方核实服务端是否已保存，保留可识别的错误身份
+      const timeout = new Error('请求超时，请检查服务状态后重试。');
+      timeout.name = 'TimeoutError';
+      throw timeout;
+    }
     throw error;
   } finally {
     window.clearTimeout(timer);
@@ -55,7 +60,7 @@ export const api = {
   startJob: (id, body) => request(`/books/${encodeURIComponent(id)}/jobs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   job: id => request(`/books/${encodeURIComponent(id)}/job`),
   cancelJob: id => request(`/books/${encodeURIComponent(id)}/job/cancel`, { method: 'POST' }),
-  savePage: (id, n, body) => request(`/books/${encodeURIComponent(id)}/pages/${n}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  savePage: (id, n, body, timeoutMs) => request(`/books/${encodeURIComponent(id)}/pages/${n}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, timeoutMs ?? 30000),
   revisions: (id, n) => request(`/books/${encodeURIComponent(id)}/pages/${n}/revisions`),
   revertPage: (id, n, revision, expectedRevision) => request(`/books/${encodeURIComponent(id)}/pages/${n}/revert`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(expectedRevision == null ? { revision } : { revision, expectedRevision }) }),
   search: (id, query) => request(`/books/${encodeURIComponent(id)}/search?q=${encodeURIComponent(query)}`),

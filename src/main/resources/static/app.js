@@ -1,5 +1,5 @@
 import { api } from './api.js';
-import { state, loadPreferences, savePreferences, getBookmarks, setBookmarks, cloneBlocks } from './store.js';
+import { state, loadPreferences, savePreferences, getBookmarks, setBookmarks, cloneBlocks, isSameSession, canonicalJson } from './store.js';
 import { renderPaper, qualityOf } from './reader.js';
 import { renderEditor, renderIssueWorkbench, issueReferences, createOverlay, enableDrawing } from './editor.js';
 
@@ -323,6 +323,7 @@ function renderReview() {
   $('#review-empty').hidden = available;
   $('#review-content').hidden = !available;
   if (!available) return;
+  renderConflictBar();
   const reviewImage = $('#review-original');
   const imageUrl = api.pageImage(state.book.id, state.currentPage, 900);
   if (reviewImage.getAttribute('src') !== imageUrl) reviewImage.src = imageUrl;
@@ -370,6 +371,75 @@ function markDirty() {
   editVersion++;
   state.dirty = true;
   $('#save-page').disabled = false;
+}
+
+// A1-01：编辑会话快照与身份判断。相同页号不代表相同会话。
+let saveRequestSeq = 0;
+function editSessionMatches(snap) {
+  return isSameSession(
+    state.book ? { bookId: state.book.id, page: state.currentPage, epoch: state.editorEpoch } : null, snap);
+}
+// A1-S06：不确定是否落盘的保存，向服务端读回核实。
+// saved=读回与提交快照一致；mismatch=不一致；unknown=读回失败。
+async function verifyUncertainSave(snapshot) {
+  try {
+    const remote = await api.page(snapshot.bookId, snapshot.page);
+    const same = canonicalJson(remote.blocks) === canonicalJson(snapshot.blocks)
+      && Boolean(remote.reviewed) === Boolean(snapshot.reviewed);
+    return same ? { outcome: 'saved', remote } : { outcome: 'mismatch', remote };
+  } catch (_) {
+    return { outcome: 'unknown', remote: null };
+  }
+}
+function downloadJson(filename, payload) {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
+  const a = document.createElement('a'); a.href = url; a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+// A1-01：真冲突常驻比较栏（4 秒 toast 会消失，不能作为冲突载体）。
+function renderConflictBar() {
+  let bar = $('#conflict-bar');
+  const c = state.conflict;
+  const show = c && state.book?.id === c.bookId && state.currentPage === c.page;
+  if (!show) { bar?.remove(); return; }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'conflict-bar'; bar.className = 'conflict-bar'; bar.setAttribute('role', 'alert');
+    $('#review-content').prepend(bar);
+  }
+  bar.replaceChildren();
+  const title = document.createElement('strong');
+  title.textContent = `保存冲突：远端已到版本 ${c.remoteRevision ?? '未知'}，本地基于版本 ${c.baseRevision ?? '未知'}。本地草稿已保留，未写入服务端。`;
+  const detail = document.createElement('div'); detail.className = 'conflict-detail';
+  detail.textContent = c.remote
+    ? `远端：${c.remote.blocks?.length ?? '?'} 个块${c.remote.reviewed ? '（已校对）' : ''}。`
+    : (c.note || '');
+  const actions = document.createElement('div'); actions.className = 'conflict-actions';
+  const mkButton = (text, onClick) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'button'; b.textContent = text; b.addEventListener('click', onClick); return b; };
+  actions.append(
+    mkButton('查看远端版本', async () => {
+      try {
+        const remote = await api.page(c.bookId, c.page);
+        if (state.conflict === c) { c.remote = remote; c.remoteRevision = remote?.revision ?? c.remoteRevision; renderConflictBar(); }
+      } catch (error) { showError(error); }
+    }),
+    mkButton('下载本地草稿', () => {
+      downloadJson(`草稿-${c.bookId.slice(0, 8)}-第${c.page}页.json`,
+        { bookId: c.bookId, page: c.page, baseRevision: c.baseRevision, blocks: state.blocks, reviewed: $('#mark-reviewed').checked });
+    }),
+    mkButton('放弃本地并加载远端', async () => {
+      if (!window.confirm('确定放弃本地草稿并加载远端版本吗？本地未保存的修改将丢失。')) return;
+      try {
+        const remote = await api.page(c.bookId, c.page);
+        if (state.book?.id !== c.bookId || state.currentPage !== c.page) { toast('已不在冲突页面，未切换。'); return; }
+        state.page = remote; state.blocks = cloneBlocks(remote.blocks); state.reviewedDraft = Boolean(remote.reviewed);
+        state.dirty = false; state.conflict = null; state.pageCache.set(c.page, remote);
+        renderCurrent(); toast('已加载远端版本。', 'success');
+      } catch (error) { showError(error); }
+    }),
+    mkButton('继续保留草稿', () => { if (state.conflict === c) state.conflict = null; renderConflictBar(); })
+  );
+  bar.append(title, detail, actions);
 }
 
 function syncOverlays() {
@@ -435,10 +505,12 @@ async function goToPage(n, options = {}) {
   const previousScrollTop = $('#reader').scrollTop;
   const previous = { currentPage: state.currentPage, page: state.page, blocks: state.blocks, selectedBlockId: state.selectedBlockId,
     selectedIssueId: state.selectedIssueId, reviewedDraft: state.reviewedDraft, dirty: state.dirty,
-    activeOutlineBlockId: state.activeOutlineBlockId };
+    activeOutlineBlockId: state.activeOutlineBlockId, editorEpoch: state.editorEpoch, conflict: state.conflict };
   cancelDrawing?.(); cancelDrawing = null; state.drawType = null; $('#draw-hint').hidden = true;
   if (!options.skipSavePosition) saveReadingPosition();
   state.currentPage = n; state.page = null; state.blocks = []; state.selectedBlockId = null; state.selectedIssueId = null; state.dirty = false; state.activeOutlineBlockId = options.outlineBlockId || null;
+  // A1-01：进入新页面即开启新编辑会话，旧保存响应不得回写
+  state.editorEpoch++; state.conflict = null;
   const requestId = ++pageRequest, bookId = state.book.id;
   // 阶段2：取消上一次未完成的正文请求，后端仍以自身预算为准继续或终止解码
   pageFetchController?.abort();
@@ -475,6 +547,8 @@ async function selectBook(id) {
   ++pageRequest;
   pageFetchController?.abort();
   clearPolling(); ++outlineRequest; state.pageCache.clear(); state.page = null; state.blocks = []; state.selectedIssueId = null; state.dirty = false; state.outline = []; state.outlineStatus = 'idle'; state.activeOutlineBlockId = null;
+  // A1-01：切书开启新编辑会话并清空冲突栏
+  state.editorEpoch++; state.conflict = null; state.saveInFlight = null;
   if (!id) {
     state.book = null; state.summaries = []; state.focus = false; document.body.classList.remove('focus-reading'); $('#workspace').classList.add('is-empty'); $('#empty-state').hidden = false; $('#reader-shell').hidden = true; renderBookMeta(); renderToc(); return;
   }
@@ -654,24 +728,38 @@ $('#search-form').addEventListener('submit', async event => {
 $('#uncertain-only').addEventListener('change', renderReview); $('#add-text').addEventListener('click', () => startDrawing('text')); $('#add-figure').addEventListener('click', () => startDrawing('figure'));
 $('#mark-reviewed').addEventListener('change', event => { state.reviewedDraft = event.target.checked; markDirty(); });
 $('#save-page').addEventListener('click', async () => {
-  if (!state.book || !state.page) return; const button = $('#save-page'); setBusy(button, true, '保存中…');
-  // R07：提交时捕获快照与序号；2xx 后即使草稿已推进，也更新已确认 revision，下次用新基线提交
-  const savedBookId = state.book.id, savedPage = state.currentPage, submittedVersion = editVersion;
-  const submittedRevision = state.page?.revision ?? null;
+  if (!state.book || !state.page) return;
+  // A1-01：单会话最多一个在途保存；Ctrl+S 走同一入口，同样受 guard 约束
+  if (state.saveInFlight && state.saveInFlight.bookId === state.book.id
+      && state.saveInFlight.page === state.currentPage && state.saveInFlight.epoch === state.editorEpoch) {
+    toast('已有保存正在进行，请稍候。');
+    return;
+  }
+  const button = $('#save-page'); setBusy(button, true, '保存中…');
+  // A1-01：提交快照——等待期间的对象变化不得改变本次含义
+  const snapshot = {
+    requestId: ++saveRequestSeq,
+    bookId: state.book.id, page: state.currentPage, epoch: state.editorEpoch,
+    baseRevision: state.page?.revision ?? null,
+    draftVersion: editVersion,
+    blocks: cloneBlocks(state.blocks),
+    reviewed: $('#mark-reviewed').checked,
+  };
+  state.saveInFlight = { requestId: snapshot.requestId, bookId: snapshot.bookId, page: snapshot.page, epoch: snapshot.epoch };
+  const clearFlight = () => { if (state.saveInFlight?.requestId === snapshot.requestId) state.saveInFlight = null; };
   try {
     const wasReviewed = Boolean(state.page.reviewed);
-    const page = await api.savePage(savedBookId, savedPage, { blocks: state.blocks, reviewed: $('#mark-reviewed').checked, revision: submittedRevision });
-    void refreshOutline(savedBookId);
-    if (state.book?.id !== savedBookId || state.currentPage !== savedPage) {
-      // 切书后到达的响应：只更新原书缓存，不渲染到当前书
-      state.pageCache.set(savedPage, page);
-      toast('原页面的校对已保存。', 'success');
-      return;
-    }
-    // 本次提交已确认：无论草稿是否推进，先采用新的服务端基线
-    state.pageCache.set(savedPage, page);
+    // A1-S06 测试钩子：默认 30s；浏览器测试可经 window.__saveTimeoutMs 缩短以验证超时核实路径
+    const timeoutMs = typeof window.__saveTimeoutMs === 'number' ? window.__saveTimeoutMs : 30000;
+    const page = await api.savePage(snapshot.bookId, snapshot.page,
+      { blocks: snapshot.blocks, reviewed: snapshot.reviewed, revision: snapshot.baseRevision }, timeoutMs);
+    // A1-01：过期响应（切书/翻页/重进）直接丢弃，不写当前缓存、不碰当前 UI
+    if (!editSessionMatches(snapshot)) return;
+    if (snapshot.bookId === state.book?.id) void refreshOutline(snapshot.bookId);
+    // 本次提交已确认：无论草稿是否推进，先采用新的服务端基线（版本与正文来自同一快照）
+    state.pageCache.set(snapshot.page, page);
     if (state.page) state.page.revision = page.revision;
-    if (editVersion !== submittedVersion) {
+    if (editVersion !== snapshot.draftVersion) {
       // 保存期间的新草稿保留，仍标记未保存；下一次用新 revision 提交
       state.dirty = true;
       $('#save-page').disabled = false;
@@ -679,25 +767,60 @@ $('#save-page').addEventListener('click', async () => {
       return;
     }
     state.page = page; state.blocks = cloneBlocks(page.blocks); state.dirty = false; state.reviewedDraft = Boolean(page.reviewed);
+    state.conflict = null;
     if (wasReviewed !== Boolean(page.reviewed)) state.book.reviewedPages = Math.max(0, Number(state.book.reviewedPages || 0) + (page.reviewed ? 1 : -1));
     const summary = summaryFor(state.currentPage); if (summary) { summary.status = page.status; summary.blockCount = page.blocks.length; summary.uncertainCount = page.blocks.filter(b => b.uncertain).length; summary.reviewed = page.reviewed; summary.title = pageTitle(page); }
     state.books = state.books.map(book => book.id === state.book.id ? state.book : book);
     renderBooks(); renderBookMeta(); renderCurrent(); toast('整页校对已保存，搜索与目录将使用新内容。', 'success');
   } catch (error) {
+    // 被更快导航取代的请求静默丢弃
+    if (error?.name === 'StaleRequest') return;
+    // A1-01：过期会话的失败同样直接丢弃
+    if (!editSessionMatches(snapshot)) return;
     if (error?.status === 409) {
-      // 真冲突：保留本地草稿不覆盖，把远端版本取回供比较，不擅自加一重试
-      try {
-        const remote = await api.page(savedBookId, savedPage);
-        state.pageCache.set(savedPage, remote);
-        showError(new Error(`${error.message}（远端已到版本 ${remote?.revision ?? '未知'}）。本地草稿已保留，请刷新对比后再保存。`));
-      } catch (_) {
-        showError(error);
-      }
+      // 真冲突：保留本地草稿与原基线，常驻比较栏；不自动加 revision 重发
+      state.conflict = {
+        bookId: snapshot.bookId, page: snapshot.page, epoch: snapshot.epoch,
+        baseRevision: snapshot.baseRevision, remoteRevision: error?.body?.currentRevision ?? null,
+        remote: null, note: error.message || '远端已被更新。',
+      };
+      renderConflictBar();
+      showError(new Error(`${error.message}（远端已到版本 ${error?.body?.currentRevision ?? '未知'}）。本地草稿已保留，请在校对栏冲突条中处理。`));
       return;
+    }
+    // A1-S06：超时或网络中断不能断言服务端未保存——读回核实后再分类，不盲目重发。
+    // 超时走完整比较（含冲突栏）；其他网络错误仅在可证明一致时认领，否则原样报错。
+    if (error?.name === 'TimeoutError' || error?.name === 'TypeError') {
+      const verify = await verifyUncertainSave(snapshot);
+      if (!editSessionMatches(snapshot)) return;
+      if (verify.outcome === 'saved' && verify.remote) {
+        const remote = verify.remote;
+        state.pageCache.set(snapshot.page, remote);
+        if (state.page) state.page.revision = remote.revision;
+        if (editVersion !== snapshot.draftVersion) { state.dirty = true; $('#save-page').disabled = false; }
+        else { state.page = remote; state.blocks = cloneBlocks(remote.blocks); state.dirty = false; state.reviewedDraft = Boolean(remote.reviewed); renderCurrent(); }
+        toast(`服务端已确认保存（版本 ${remote.revision ?? '最新'}，中断后核实一致）。`, 'success');
+        return;
+      }
+      if (verify.outcome === 'mismatch' && error?.name === 'TimeoutError') {
+        state.conflict = {
+          bookId: snapshot.bookId, page: snapshot.page, epoch: snapshot.epoch,
+          baseRevision: snapshot.baseRevision, remoteRevision: verify.remote?.revision ?? null,
+          remote: verify.remote, note: '请求超时，服务端版本与本次提交不一致，请核对后再保存。',
+        };
+        renderConflictBar();
+        showError(new Error('请求超时，服务端版本与本次提交不一致。本地草稿已保留，请在校对栏冲突条中处理。'));
+        return;
+      }
     }
     showError(error);
   }
-  finally { setBusy(button, false); button.disabled = !state.dirty; }
+  finally {
+    clearFlight();
+    setBusy(button, false);
+    // A1-01：按钮是全局元素，恢复时必须按当前会话的 dirty  state，不能沿用旧会话状态
+    button.disabled = !state.dirty;
+  }
 });
 
 $('#export-button').addEventListener('click', () => {

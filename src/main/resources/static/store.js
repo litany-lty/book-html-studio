@@ -52,6 +52,12 @@ export const state = {
   dirty: false,
   drawType: null,
   pollTimer: null,
+  // A1-01：编辑会话代次——相同页号不代表相同会话；旧保存响应不得写入新会话
+  editorEpoch: 0,
+  // A1-01：单会话在途保存（跨书/跨页可各自有一个，同会话最多一个）
+  saveInFlight: null,
+  // A1-01：真冲突比较栏（与当前书页绑定）
+  conflict: null,
   // 阶段2：已读页有限 LRU（默认 8 页，可调整的暂定参数）；当前页不得淘汰
   pageCache: new LruPageCache(PAGE_CACHE_LIMIT, key => key === state.currentPage)
 };
@@ -86,4 +92,18 @@ export function cloneBlocks(blocks = []) {
     sourceIds: Array.isArray(block.sourceIds) ? [...block.sourceIds] : block.sourceIds,
     issues: Array.isArray(block.issues) ? block.issues.map(issue => ({ ...issue })) : []
   }));
+}
+
+// A1-01：编辑会话身份判断（纯函数）。相同页号不代表相同会话；
+// bookId/page/epoch 任一不同即为过期响应，不得写入当前缓存与 UI。
+export function isSameSession(current, snap) {
+  return !!snap && !!current
+    && current.bookId === snap.bookId && current.page === snap.page && current.epoch === snap.epoch;
+}
+
+// A1-S06：键序无关的规范 JSON，用于比对“服务端已存”与“本次提交”。
+export function canonicalJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
 }

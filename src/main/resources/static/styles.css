@@ -352,3 +352,9 @@ progress::-moz-progress-bar { background: var(--blue); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
 }
+
+/* A1-01：保存冲突常驻比较栏（不随 toast 消失） */
+.conflict-bar { border: 2px solid #a56912; background: #fdf6e7; border-radius: 8px; padding: 10px 12px; margin: 0 0 12px; }
+.conflict-bar strong { display: block; margin-bottom: 6px; }
+.conflict-detail { font-size: 13px; color: #5b4a1e; margin-bottom: 8px; }
+.conflict-actions { display: flex; flex-wrap: wrap; gap: 8px; }
