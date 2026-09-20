@@ -1,0 +1,10 @@
+/target/
+/data/
+/verification/
+/.env
+/TASK.md
+/.run.lock/
+*.log
+.DS_Store
+.idea/
+*.iml

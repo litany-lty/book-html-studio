@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>纸页工坊</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#reader">跳到正文</a>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">页</span>
+      <div><strong>纸页工坊</strong><small>PDF 转可校对 HTML</small></div>
+    </div>
+    <div class="library-tools">
+      <label class="field compact"><span>书架</span><select id="book-select" aria-label="选择已导入书籍"><option value="">选择书籍</option></select></label>
+      <label class="upload-button" for="pdf-upload">导入 PDF<input id="pdf-upload" type="file" accept="application/pdf,.pdf"></label>
+      <button id="export-button" class="button primary" type="button" disabled>导出离线书</button>
+    </div>
+  </header>
+
+  <section id="job-panel" class="job-panel" aria-labelledby="job-heading">
+    <div class="job-title"><div><h1 id="job-heading">开始转换</h1><p id="book-summary">先导入一本 PDF，原稿会始终保留。</p></div><button id="job-toggle" class="button quiet" type="button" aria-expanded="false">处理设置</button></div>
+    <form id="job-form" class="job-form" hidden>
+      <label class="field"><span>页码范围</span><input id="page-range" name="pages" value="1-20" placeholder="例如 1-20 或 1,3,25" required><small>默认先自动处理前 20 页；必须主动选择才会处理全书，结果可直接阅读并按需抽查。</small></label>
+      <label class="check full-book"><input id="all-pages" type="checkbox"><span>处理全部页面</span></label>
+      <fieldset><legend>识别通道</legend><div id="provider-options" class="provider-options"></div><p id="provider-note" class="field-note">正在读取服务端识别配置…</p></fieldset>
+      <label id="qwen-assist-label" class="check assist-check"><input id="qwen-assist" name="assist" type="checkbox"><span>启用 Qwen3.8-Max 结构整理与疑点建议<small id="qwen-assist-note">会额外调用阿里云服务，建议不会自动覆盖 OCR 原文。</small></span></label>
+      <label class="field"><span>版面方向</span><select name="layout"><option value="auto">自动判断</option><option value="vertical">竖排</option><option value="horizontal">横排</option></select></label>
+      <label id="split-spreads-label" class="check"><input id="split-spreads" name="splitSpreads" type="checkbox" checked><span>尝试拆分跨页扫描<small id="split-spreads-note">仅用于支持分区识别的提供商。</small></span></label>
+      <label class="check danger-check"><input id="force-processing" name="force" type="checkbox"><span>覆盖已有识别与校对结果</span><small>包括手工修改；默认不覆盖，勾选后需再次确认。</small></label>
+      <div class="job-actions"><button class="button primary" type="submit">开始处理</button><button id="cancel-job" class="button danger" type="button" hidden>取消任务</button></div>
+    </form>
+    <div id="job-progress" class="progress-area" hidden>
+      <div class="progress-copy"><strong id="progress-label">准备中</strong><span id="progress-count"></span></div>
+      <progress id="progress-bar" max="1" value="0"></progress>
+      <p id="job-errors" class="inline-message"></p>
+    </div>
+  </section>
+
+  <div class="mobile-bar" aria-label="移动端面板切换">
+    <button id="toc-toggle" class="button quiet" type="button" aria-expanded="false">目录</button>
+    <span id="mobile-page-label">未选书籍</span>
+    <button id="review-toggle" class="button quiet" type="button" aria-expanded="false">校对</button>
+  </div>
+
+  <main id="workspace" class="workspace is-empty">
+    <aside id="toc-panel" class="sidebar toc-panel" aria-label="书籍导航">
+      <div class="panel-tabs" role="tablist" aria-label="导航方式">
+        <button class="tab active" data-left-tab="contents" role="tab" aria-selected="true">目录</button>
+        <button class="tab" data-left-tab="search" role="tab" aria-selected="false">搜索</button>
+        <button class="tab" data-left-tab="bookmarks" role="tab" aria-selected="false">书签</button>
+      </div>
+      <section data-left-panel="contents"><div class="side-heading"><h2>正文标题</h2><span id="toc-count"></span></div><nav id="toc-list" class="toc-list" aria-label="正文标题目录"></nav></section>
+      <section data-left-panel="search" hidden><form id="search-form" class="search-form"><label for="search-input">在繁体与简体中搜索</label><div><input id="search-input" type="search" autocomplete="off" required><button class="button" type="submit">搜索</button></div></form><p id="search-status" class="muted"></p><ol id="search-results" class="search-results"></ol></section>
+      <section data-left-panel="bookmarks" hidden><div class="side-heading"><h2>本地书签</h2></div><div id="bookmark-list" class="toc-list"></div></section>
+    </aside>
+
+    <section id="reader" class="reader" tabindex="-1">
+      <div id="empty-state" class="empty-state"><div class="empty-sheet"><span aria-hidden="true">原</span></div><div><h2>从一份 PDF 开始</h2><p>导入后先查看原稿，再挑选少量页面识别。没有识别结果的页面仍会诚实地显示原图。</p><label class="upload-button large" for="pdf-upload">选择 PDF</label></div></div>
+      <div id="reader-shell" hidden>
+        <div class="reader-toolbar" aria-label="阅读工具">
+          <div class="view-switch" role="group" aria-label="显示方式"><button class="segmented" data-view="original" type="button">原稿</button><button class="segmented" data-view="facsimile" type="button">原貌 HTML</button><button class="segmented active" data-view="reading" type="button">横排阅读</button></div>
+          <div class="reader-settings">
+            <button id="focus-toggle" class="button quiet" type="button" aria-pressed="false">专注阅读</button>
+            <button id="script-toggle" class="button quiet" type="button">显示：简体</button>
+            <label>字号 <input id="font-size" type="range" min="15" max="30" value="20"><output id="font-output">20</output></label>
+            <label>行距 <input id="line-height" type="range" min="1.4" max="2.2" step="0.1" value="1.8"><output id="line-output">1.8</output></label>
+          </div>
+        </div>
+        <div class="page-head">
+          <div><span id="quality-badge" class="quality-badge">等待处理</span><span id="quality-detail"></span></div>
+          <button id="bookmark-button" class="button quiet" type="button" aria-pressed="false">加入书签</button>
+        </div>
+        <div id="page-message" class="page-message" role="status" hidden></div>
+        <article id="paper" class="paper" aria-live="polite"></article>
+        <nav class="pagination" aria-label="翻页">
+          <button id="prev-page" class="button" type="button">上一页</button>
+          <form id="jump-form"><label for="page-jump">第</label><input id="page-jump" type="number" min="1"><span id="total-pages">/ 0 页</span></form>
+          <button id="next-page" class="button" type="button">下一页</button>
+        </nav>
+        <div id="reading-progress" class="reading-progress" aria-label="阅读进度">
+          <div class="reading-progress-copy"><span>阅读进度</span><output id="reading-progress-output" for="reading-progress-range">0 / 0 页</output></div>
+          <input id="reading-progress-range" type="range" min="1" max="1" value="1" disabled aria-label="拖动选择目标页">
+        </div>
+      </div>
+    </section>
+
+    <aside id="review-panel" class="sidebar review-panel" aria-label="逐块校对">
+      <div class="review-heading"><div><h2>逐块校对</h2><p>先选中原稿框，再修改文字或版面。</p></div><button id="close-review" class="drawer-close" type="button" aria-label="关闭校对栏">×</button></div>
+      <div id="review-empty" class="side-empty">选择一本书和页面后开始校对。</div>
+      <div id="review-content" hidden>
+        <figure class="review-reference"><img id="review-original" alt="当前页原稿缩略图"><figcaption>原稿依据 · 修改不会覆盖原始图片</figcaption></figure>
+        <section id="issue-workbench" class="issue-workbench" aria-label="当前页内容疑点" hidden></section>
+        <div class="review-actions"><label class="check"><input id="uncertain-only" type="checkbox"><span>只看疑字</span></label><div><button id="add-text" class="button" type="button">框选文字</button><button id="add-figure" class="button" type="button">框选插图</button></div></div>
+        <div id="draw-hint" class="inline-message" hidden>请在原稿上拖出一个矩形，按 Esc 取消。</div>
+        <div id="review-list" class="review-list"></div>
+        <div class="save-dock"><label class="check"><input id="mark-reviewed" type="checkbox"><span>保存后标为已校对</span></label><button id="save-page" class="button primary" type="button" disabled>保存整页</button></div>
+      </div>
+    </aside>
+  </main>
+  <div id="drawer-scrim" class="drawer-scrim" hidden></div>
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <script src="/reader-navigation.js"></script>
+  <script src="/reading-layout.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

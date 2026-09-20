@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check scripts
+        shell: bash
+        run: |
+          bash -n run.sh
+          for file in src/main/resources/static/*.js src/main/resources/export/*.js scripts/*.mjs; do
+            node --check "$file"
+          done
+      - name: Test and package
+        run: mvn --batch-mode verify
