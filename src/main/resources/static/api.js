@@ -13,8 +13,13 @@ async function request(path, options = {}, timeout = 30000) {
     const response = await fetch(`${API_ROOT}${path}`, { ...fetchOptions, signal: controller.signal });
     if (!response.ok) {
       let message = `请求失败（${response.status}）`;
-      try { message = (await response.json()).message || message; } catch (_) { /* non-JSON error */ }
-      throw new Error(message);
+      let body = null;
+      try { body = await response.json(); message = body.message || message; } catch (_) { /* non-JSON error */ }
+      // R07：把状态码与响应体挂在错误上，调用方可区分 409 冲突等情况
+      const failure = new Error(message);
+      failure.status = response.status;
+      failure.body = body;
+      throw failure;
     }
     return response.status === 204 ? null : response.json();
   } catch (error) {
@@ -52,7 +57,7 @@ export const api = {
   cancelJob: id => request(`/books/${encodeURIComponent(id)}/job/cancel`, { method: 'POST' }),
   savePage: (id, n, body) => request(`/books/${encodeURIComponent(id)}/pages/${n}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   revisions: (id, n) => request(`/books/${encodeURIComponent(id)}/pages/${n}/revisions`),
-  revertPage: (id, n, revision) => request(`/books/${encodeURIComponent(id)}/pages/${n}/revert`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision }) }),
+  revertPage: (id, n, revision, expectedRevision) => request(`/books/${encodeURIComponent(id)}/pages/${n}/revert`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(expectedRevision == null ? { revision } : { revision, expectedRevision }) }),
   search: (id, query) => request(`/books/${encodeURIComponent(id)}/search?q=${encodeURIComponent(query)}`),
   exportUrl: id => `${API_ROOT}/books/${encodeURIComponent(id)}/export`
 };

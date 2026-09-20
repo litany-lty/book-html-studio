@@ -655,23 +655,48 @@ $('#uncertain-only').addEventListener('change', renderReview); $('#add-text').ad
 $('#mark-reviewed').addEventListener('change', event => { state.reviewedDraft = event.target.checked; markDirty(); });
 $('#save-page').addEventListener('click', async () => {
   if (!state.book || !state.page) return; const button = $('#save-page'); setBusy(button, true, '保存中…');
+  // R07：提交时捕获快照与序号；2xx 后即使草稿已推进，也更新已确认 revision，下次用新基线提交
   const savedBookId = state.book.id, savedPage = state.currentPage, submittedVersion = editVersion;
+  const submittedRevision = state.page?.revision ?? null;
   try {
     const wasReviewed = Boolean(state.page.reviewed);
-    const page = await api.savePage(savedBookId, savedPage, { blocks: state.blocks, reviewed: $('#mark-reviewed').checked, revision: state.page?.revision ?? null });
+    const page = await api.savePage(savedBookId, savedPage, { blocks: state.blocks, reviewed: $('#mark-reviewed').checked, revision: submittedRevision });
     void refreshOutline(savedBookId);
-    if (state.book?.id !== savedBookId || state.currentPage !== savedPage) { toast('原页面的校对已保存。', 'success'); return; }
-    if (editVersion !== submittedVersion) {
+    if (state.book?.id !== savedBookId || state.currentPage !== savedPage) {
+      // 切书后到达的响应：只更新原书缓存，不渲染到当前书
       state.pageCache.set(savedPage, page);
-      toast('提交时的版本已保存；保存期间的新修改仍保留，请再次保存。');
+      toast('原页面的校对已保存。', 'success');
       return;
     }
-    state.page = page; state.blocks = cloneBlocks(page.blocks); state.pageCache.set(state.currentPage, page); state.dirty = false; state.reviewedDraft = Boolean(page.reviewed);
+    // 本次提交已确认：无论草稿是否推进，先采用新的服务端基线
+    state.pageCache.set(savedPage, page);
+    if (state.page) state.page.revision = page.revision;
+    if (editVersion !== submittedVersion) {
+      // 保存期间的新草稿保留，仍标记未保存；下一次用新 revision 提交
+      state.dirty = true;
+      $('#save-page').disabled = false;
+      toast(`已保存到版本 ${page.revision ?? '最新'}；保存期间的新修改仍保留，请再次保存。`);
+      return;
+    }
+    state.page = page; state.blocks = cloneBlocks(page.blocks); state.dirty = false; state.reviewedDraft = Boolean(page.reviewed);
     if (wasReviewed !== Boolean(page.reviewed)) state.book.reviewedPages = Math.max(0, Number(state.book.reviewedPages || 0) + (page.reviewed ? 1 : -1));
     const summary = summaryFor(state.currentPage); if (summary) { summary.status = page.status; summary.blockCount = page.blocks.length; summary.uncertainCount = page.blocks.filter(b => b.uncertain).length; summary.reviewed = page.reviewed; summary.title = pageTitle(page); }
     state.books = state.books.map(book => book.id === state.book.id ? state.book : book);
     renderBooks(); renderBookMeta(); renderCurrent(); toast('整页校对已保存，搜索与目录将使用新内容。', 'success');
-  } catch (error) { showError(error); }
+  } catch (error) {
+    if (error?.status === 409) {
+      // 真冲突：保留本地草稿不覆盖，把远端版本取回供比较，不擅自加一重试
+      try {
+        const remote = await api.page(savedBookId, savedPage);
+        state.pageCache.set(savedPage, remote);
+        showError(new Error(`${error.message}（远端已到版本 ${remote?.revision ?? '未知'}）。本地草稿已保留，请刷新对比后再保存。`));
+      } catch (_) {
+        showError(error);
+      }
+      return;
+    }
+    showError(error);
+  }
   finally { setBusy(button, false); button.disabled = !state.dirty; }
 });
 
