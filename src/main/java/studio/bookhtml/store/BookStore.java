@@ -116,15 +116,16 @@ public class BookStore {
     }
     public Path historyDir(String id, int page) { return bookDir(id).resolve("pages").resolve("history").resolve(String.valueOf(page)); }
     public Path candidatePath(String id, int page) { return bookDir(id).resolve("pages").resolve(page + ".candidate.json"); }
-    private synchronized void archiveHistory(String id, Page existing) throws IOException {
+    private static final java.util.regex.Pattern HISTORY_FILE = java.util.regex.Pattern.compile("^rev-(\\d+)\\.json$");
+    private void archiveHistory(String id, Page existing) throws IOException {
         Path dir = historyDir(id, existing.pageNumber());
         Files.createDirectories(dir);
         Path target = dir.resolve("rev-" + revisionOrZero(existing) + ".json");
         if (!Files.exists(target)) atomic(target, existing);
-        // 保留最近 5 个版本
+        // R04：按数值保留最新 5 个有效历史版本；异常命名文件不参与排序、不被清理
         try (Stream<Path> files = Files.list(dir)) {
-            List<Path> revs = files.filter(p -> p.getFileName().toString().startsWith("rev-") && p.toString().endsWith(".json"))
-                .sorted(Comparator.comparing(p -> p.getFileName().toString())).toList();
+            List<Path> revs = files.filter(p -> HISTORY_FILE.matcher(p.getFileName().toString()).matches())
+                .sorted(Comparator.comparingInt(p -> Integer.parseInt(HISTORY_FILE.matcher(p.getFileName().toString()).replaceFirst("$1")))).toList();
             for (int i = 0; i + 5 < revs.size(); i++) Files.deleteIfExists(revs.get(i));
         } catch (IOException ignored) { }
     }
