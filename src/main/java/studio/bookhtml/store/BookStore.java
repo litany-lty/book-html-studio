@@ -82,6 +82,19 @@ public class BookStore {
     }
     public Path pdf(String id) { return bookDir(id).resolve("source.pdf"); }
     public Path tmpDir() {
+        return tmpRoot();
+    }
+    /** R05：临时文件按用途隔离，各清理器只能操作自己的根目录。 */
+    public Path renderTmpDir() {
+        return tmpRoot().resolve("render");
+    }
+    public Path exportTmpDir() {
+        return tmpRoot().resolve("export");
+    }
+    public Path ocrTmpDir() {
+        return tmpRoot().resolve("ocr");
+    }
+    private Path tmpRoot() {
         Path dir = booksRoot.getParent() == null ? Path.of("tmp") : booksRoot.getParent().resolve("tmp");
         try { Files.createDirectories(dir); } catch (IOException ignored) { }
         return dir;

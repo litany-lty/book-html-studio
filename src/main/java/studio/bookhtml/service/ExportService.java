@@ -53,6 +53,26 @@ public class ExportService {
         this.issueImages = issueImages;
     }
 
+    /**
+     * R05：启动时回收上次崩溃遗留的导出暂存（单写锁保证无活跃导出）。
+     * 只处理自有目录的 export-*.zip.part，不碰其他用途文件。
+     */
+    @jakarta.annotation.PostConstruct
+    public void reclaimOrphanedStaging() {
+        Path dir;
+        try {
+            dir = store.exportTmpDir();
+        } catch (Exception e) {
+            return;
+        }
+        if (dir == null || !Files.isDirectory(dir)) return;
+        try (var stream = Files.newDirectoryStream(dir, "export-*.zip.part")) {
+            for (Path p : stream) {
+                try { Files.deleteIfExists(p); } catch (IOException ignored) { }
+            }
+        } catch (IOException ignored) { }
+    }
+
     public void writeZip(String bookId, OutputStream output) throws IOException {
         writeZip(bookId, output, null);
     }
@@ -62,7 +82,9 @@ public class ExportService {
         Path sourcePdf = store.pdf(bookId);
         List<Integer> selected = PageRanges.parse(pageRange == null ? "all" : pageRange, book.totalPages());
         // 阶段2：先写临时文件，失败不向客户端发送残缺 ZIP；同时做磁盘空间预检
-        Path tmpDir = store.tmpDir();
+        // R05：导出暂存使用自有子目录，不与渲染清理器共享
+        Path tmpDir = store.exportTmpDir();
+        if (tmpDir == null) tmpDir = store.tmpDir();
         if (tmpDir == null) tmpDir = Path.of(System.getProperty("java.io.tmpdir", "."));
         Files.createDirectories(tmpDir);
         long need = 10L * 1024 * 1024;

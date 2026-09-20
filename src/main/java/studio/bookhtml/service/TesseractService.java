@@ -18,7 +18,16 @@ import java.util.function.BooleanSupplier;
 public class TesseractService {
     private final String command;
     private final TraditionalConverter converter;
-    public TesseractService(AppProperties properties, TraditionalConverter converter) { this.command = properties.tesseractCommand(); this.converter = converter; }
+    private final Path ocrTmpRoot;
+    @org.springframework.beans.factory.annotation.Autowired
+    public TesseractService(AppProperties properties, TraditionalConverter converter) { this(properties.tesseractCommand(), converter, properties.dataDir()); }
+    TesseractService(String command, TraditionalConverter converter, Path dataDir) {
+        this.command = command;
+        this.converter = converter;
+        Path root = dataDir == null ? Path.of(System.getProperty("java.io.tmpdir", ".")) : dataDir.toAbsolutePath().normalize().resolve("tmp").resolve("ocr");
+        try { Files.createDirectories(root); } catch (IOException ignored) { }
+        this.ocrTmpRoot = root;
+    }
 
     public List<Block> recognize(BufferedImage full, String layout, boolean splitSpreads, BooleanSupplier cancelled) throws OcrException {
         if ("auto".equals(layout)) {
@@ -47,7 +56,8 @@ public class TesseractService {
     private List<WordLine> run(BufferedImage image, String layout, BooleanSupplier cancelled) throws OcrException {
         Path dir = null;
         try {
-            dir = Files.createTempDirectory("book-html-ocr-").toRealPath();
+            // R05：本地 OCR 临时文件进入自有 data/tmp/ocr 目录，用完即删
+            dir = Files.createTempDirectory(ocrTmpRoot, "ocr-").toRealPath();
             Path input = dir.resolve("page.png"), output = dir.resolve("result.tsv"), error = dir.resolve("error.txt");
             ImageIO.write(image, "png", input.toFile());
             String language = "vertical".equals(layout) ? "chi_tra_vert" : "chi_tra+chi_sim+eng";

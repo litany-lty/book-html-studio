@@ -20,7 +20,7 @@ import javax.imageio.ImageIO;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import studio.bookhtml.api.ApiException;
-import studio.bookhtml.config.AppProperties;
+import studio.bookhtml.store.BookStore;
 
 /**
  * 阶段2：受限解码工作进程（父进程侧）。
@@ -44,21 +44,41 @@ public class IsolatedPdfRender {
     private final long timeoutSeconds;
     private final String javaBin;
     private final String classPath;
+    private final long tmpMaxBytes;
 
     @org.springframework.beans.factory.annotation.Autowired
-    public IsolatedPdfRender(AppProperties properties, RenderBudget budget) {
-        this(properties.dataDir().toAbsolutePath().normalize().resolve("tmp"), budget,
+    public IsolatedPdfRender(BookStore store, RenderBudget budget) {
+        this(store.renderTmpDir(), budget,
              envLong("RENDER_WORKER_TIMEOUT_S", 120),
              System.getProperty("java.home") + File.separator + "bin" + File.separator + "java",
-             System.getProperty("java.class.path", ""));
+             System.getProperty("java.class.path", ""), TMP_MAX_BYTES);
     }
 
     IsolatedPdfRender(Path tmpDir, RenderBudget budget, long timeoutSeconds, String javaBin, String classPath) {
+        this(tmpDir, budget, timeoutSeconds, javaBin, classPath, TMP_MAX_BYTES);
+    }
+
+    IsolatedPdfRender(Path tmpDir, RenderBudget budget, long timeoutSeconds, String javaBin, String classPath, long tmpMaxBytes) {
         this.tmpDir = tmpDir;
         this.budget = budget;
         this.timeoutSeconds = Math.max(5, timeoutSeconds);
         this.javaBin = javaBin;
         this.classPath = classPath;
+        this.tmpMaxBytes = tmpMaxBytes;
+    }
+
+    /**
+     * R05：启动时回收上次崩溃遗留的渲染输出（uuid 输出文件永不跨重启复用）。
+     * 只处理本目录的 render-*.png，不碰其他用途文件。
+     */
+    @jakarta.annotation.PostConstruct
+    public void reclaimOrphanedOutputs() {
+        if (tmpDir == null || !Files.isDirectory(tmpDir)) return;
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(tmpDir, "render-*.png")) {
+            for (Path p : stream) {
+                try { Files.deleteIfExists(p); } catch (IOException ignored) { }
+            }
+        } catch (IOException ignored) { }
     }
 
     /** 风险分级只是启发式：大文件、高像素、历史超时页走隔离；不能识别全部恶意 PDF。 */
@@ -199,9 +219,14 @@ public class IsolatedPdfRender {
     }
 
     private void enforceTmpCap(Path keep) throws IOException {
-        if (!Files.isDirectory(tmpDir)) return;
+        enforceTmpCap(tmpDir, tmpMaxBytes, keep);
+    }
+
+    /** R05：配额清理只作用于传入的自有目录；全局磁盘不足只拒绝新任务，不删活跃文件。 */
+    static void enforceTmpCap(Path dir, long maxBytes, Path keep) throws IOException {
+        if (dir == null || !Files.isDirectory(dir)) return;
         List<Path> files = new ArrayList<>();
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(tmpDir)) {
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir)) {
             for (Path p : stream) {
                 if (keep != null && p.equals(keep)) continue;
                 if (Files.isRegularFile(p)) files.add(p);
@@ -213,7 +238,7 @@ public class IsolatedPdfRender {
         long total = 0;
         for (Path p : files) { try { total += Files.size(p); } catch (IOException ignored) { } }
         for (Path p : files) {
-            if (total <= TMP_MAX_BYTES) break;
+            if (total <= maxBytes) break;
             try {
                 long size = Files.size(p);
                 Files.deleteIfExists(p);
