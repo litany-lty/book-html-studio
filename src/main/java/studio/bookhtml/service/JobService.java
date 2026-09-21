@@ -56,11 +56,14 @@ public class JobService {
                 errors.add(message);completed++;writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",completed,pages.size(),pageNumber,null,List.copyOf(errors)));continue;
             }
             try{
-                Page rawNew=processor.process(running.bookId,pageNumber,provider,layout,split,assist,()->running.cancelled||Thread.currentThread().isInterrupted());
-                Page page=mergeUnresolvedIssues(old,rawNew);
+                ProcessingResult result=processor.process(running.bookId,pageNumber,provider,layout,split,assist,()->running.cancelled||Thread.currentThread().isInterrupted());
+                Page page=mergeUnresolvedIssues(old,result.page());
                 if(!stillCurrent(running,initial.id()))return;
+                // F03/R08：有证据的空白/纯视觉页直接成功；显著缩水仍拒绝；其他空结果仍失败
+                boolean confirmedNoText=result.category()==ProcessingResult.Category.BLANK_CONFIRMED
+                        ||result.category()==ProcessingResult.Category.VISUAL_ONLY;
                 // 阶段1：零结果与显著缩水保护（不限于 force），失败不覆盖旧可读版本，候选留档
-                if(isSignificantRegression(baseline,page)||isEmptyResult(page)){
+                if(isSignificantRegression(baseline,page)||(!confirmedNoText&&isEmptyResult(page))){
                     String message="第 "+pageNumber+" 页重识别来源文字少于旧记录的 60%（或为空），已拒绝覆盖并保留较完整结果";
                     errors.add(message);
                     try{store.writeCandidate(running.bookId,page);}catch(IOException ignored){}

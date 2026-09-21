@@ -74,7 +74,10 @@ public class QwenTocRecoveryService {
     static TocPreflight preflight(BufferedImage image,List<Block>blocks){
         if(image==null||image.getWidth()<40||image.getHeight()<40)return TocPreflight.none();
         if(isCandidate(blocks)){Optional<PageSplits>splits=findHorizontalDividers(image);if(splits.isPresent())return new TocPreflight(FOUR_REGION,0,regionBoxes(image,splits.get()));}
-        List<Integer>columns=findVerticalLeaderColumns(image);if(columns.size()<3||!singlePageSourceCandidate(blocks))return TocPreflight.none();
+        List<Integer>columns=findVerticalLeaderColumns(image);if(columns.size()<3)return TocPreflight.none();
+        // F03/E08e：OCR 为空但图像有点引线证据时仍尝试单页恢复；后续解析失败则回退，不伪造
+        if(blocks==null||blocks.isEmpty())return new TocPreflight(SINGLE_VERTICAL,columns.size(),verticalBandBoxes(image,columns));
+        if(!singlePageSourceCandidate(blocks))return TocPreflight.none();
         return new TocPreflight(SINGLE_VERTICAL,columns.size(),verticalBandBoxes(image,columns));
     }
 

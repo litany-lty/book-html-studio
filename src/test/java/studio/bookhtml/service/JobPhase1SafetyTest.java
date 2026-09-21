@@ -43,6 +43,7 @@ class JobPhase1SafetyTest {
     }
 
     @Test void failedKeepsOldReadyReadable()throws Exception{
+        // T14：强制重做已 READY 页且处理失败——旧正文保留可读，错误可见，且确实经过 processor
         BookStore store=new BookStore(TestConfigs.config(temp,"",""),mapper());
         String id="33333333-3333-3333-3333-333333333333";
         store.createBookDirectory(id);
@@ -54,12 +55,14 @@ class JobPhase1SafetyTest {
         when(processor.process(eq(id),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any())).thenThrow(new RuntimeException("boom"));
         JobService jobs=new JobService(store,books,processor);
         try{
-            jobs.submit(id,new JobRequest("1","local","auto",false,false,false));
+            jobs.submit(id,new JobRequest("1","local","auto",false,true,false));
             long deadline=System.currentTimeMillis()+3000;
             while(System.currentTimeMillis()<deadline){String s=store.readJob(id).status();if(s.startsWith("COMPLETED")||"FAILED".equals(s))break;Thread.sleep(50);}
             Page after=store.readPage(id,1);
             assertEquals("READY",after.status());
             assertTrue(after.blocks().stream().anyMatch(b->"甲乙丙丁戊己".equals(b.original())));
+            assertTrue(after.warnings().stream().anyMatch(w->w.contains("boom")||w.contains("处理失败")));
+            verify(processor).process(eq(id),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any());
         }finally{jobs.close();}
     }
 
@@ -72,7 +75,7 @@ class JobPhase1SafetyTest {
         store.writePage(id,pageWithText("完整來源文字完整來源文字完整"),false);
         BookService books=mock(BookService.class);when(books.get(id)).thenReturn(book);
         PageProcessor processor=mock(PageProcessor.class);
-        when(processor.process(eq(id),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any())).thenAnswer(inv->emptyPage());
+        when(processor.process(eq(id),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any())).thenAnswer(inv->new ProcessingResult(emptyPage(),ProcessingResult.Category.TEXT));
         JobService jobs=new JobService(store,books,processor);
         try{
             jobs.submit(id,new JobRequest("1","local","auto",false,true,false));
@@ -99,7 +102,7 @@ class JobPhase1SafetyTest {
             entered.countDown();
             try{Thread.sleep(30_000);}catch(InterruptedException e){Thread.currentThread().interrupt();throw new CancelledException();}
             Block b=textBlock("s","新任务结果");
-            return new Page(1,600,800,"READY","local",List.of(b),List.of(),false,null,List.of(b));
+            return new ProcessingResult(new Page(1,600,800,"READY","local",List.of(b),List.of(),false,null,List.of(b)),ProcessingResult.Category.TEXT);
         });
         JobService jobs=new JobService(store,books,processor);
         try{
@@ -120,7 +123,7 @@ class JobPhase1SafetyTest {
             when(books.get(id)).thenReturn(book);
             Block done=textBlock("s","新任务结果");
             Page ready=new Page(1,600,800,"READY","local",List.of(done),List.of(),false,null,List.of(done));
-            when(processor.process(eq(id),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any())).thenReturn(ready);
+            when(processor.process(eq(id),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any())).thenReturn(new ProcessingResult(ready,ProcessingResult.Category.TEXT));
             Job second=jobs.submit(id,new JobRequest("1","local","auto",false,false,false));
             assertNotEquals(first.id(),second.id());
             deadline=System.currentTimeMillis()+5000;

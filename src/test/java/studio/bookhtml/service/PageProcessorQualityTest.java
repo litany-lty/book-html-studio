@@ -68,7 +68,7 @@ class PageProcessorQualityTest {
         Block ocr = new Block("paddle-1", "text", 0, new double[]{.1, .1, .5, .5}, "horizontal-tb",
                 "扫描正文内容", "扫描正文内容", 0.9, false, false, null, "paddle", List.of("paddle-1"), null, new double[]{0, 0, 100, 100});
         when(paddle.recognize(eq(ocrImage), eq("auto"), eq(false), eq("paddle"), any())).thenReturn(List.of(ocr));
-        Page page = processor.process("book", 1, "paddle", "auto", false, false, () -> false);
+        Page page = processor.process("book", 1, "paddle", "auto", false, false, () -> false).page();
         try {
             assertEquals("paddle", page.provider());
             assertTrue(page.warnings().stream().anyMatch(w -> w.contains("覆盖不足")));
@@ -98,7 +98,7 @@ class PageProcessorQualityTest {
         when(pdf.renderForOcr(file, 1)).thenReturn(blank);
         Block empty = new Block("paddle-1", "text", 0, new double[]{.1, .1, .5, .2}, "horizontal-tb", "   ", "   ", null, true, false, null, "paddle", List.of("paddle-1"), null, new double[]{0, 0, 50, 20});
         when(paddle.recognize(eq(blank), eq("auto"), eq(false), eq("paddle"), any())).thenReturn(List.of(empty));
-        Page page = processor.process("book", 1, "paddle", "auto", false, false, () -> false);
+        Page page = processor.process("book", 1, "paddle", "auto", false, false, () -> false).page();
         try {
             assertEquals("READY", page.status());
             assertTrue(page.provider().contains("blank"));
@@ -145,7 +145,7 @@ class PageProcessorQualityTest {
         PageProcessor processor2 = new PageProcessor(store, pdf, nativeText, mock(TesseractService.class), qwenPipe,
                 paddle, mock(MiniMaxVisionClient.class), assist, toc,
                 new SparsePageGuard(), mock(VerticalLayoutNormalizer.class), mock(AssistedReviewService.class), new TraditionalConverter());
-        Page page = processor2.process("book", 1, "paddle", "auto", false, true, () -> false);
+        Page page = processor2.process("book", 1, "paddle", "auto", false, true, () -> false).page();
         try {
             assertTrue(page.blocks().stream().anyMatch(x -> x.id().equals("paddle-b")), "丢失来源不得悄悄交付");
             assertTrue(page.warnings().stream().anyMatch(w -> w.contains("来源校验失败")));

@@ -71,7 +71,7 @@ class PaddleFallbackTest {
                 .thenReturn(List.of(textBlock("ppocr-line-1", "ppocr")));
         stubPage(store, pdf, nativeText, image);
         try {
-            Page page = processor(store, pdf, nativeText, paddle).process("book", 1, "paddle", "auto", false, false, () -> false);
+            Page page = processor(store, pdf, nativeText, paddle).process("book", 1, "paddle", "auto", false, false, () -> false).page();
             assertEquals("READY", page.status());
             assertEquals("ppocr", page.provider());
             assertTrue(page.blocks().stream().anyMatch(b -> b.id().equals("ppocr-line-1")));

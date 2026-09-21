@@ -131,7 +131,7 @@ class ConcurrentPageCommitTest {
             inProcessor.countDown();
             assertTrue(releaseProcessor.await(10, TimeUnit.SECONDS));
             Block ocr = textBlock("ocr-1", "识别结果文字内容");
-            return new Page(1, 600, 800, "READY", "local", List.of(ocr), List.of(), false, null, List.of(ocr));
+            return new ProcessingResult(new Page(1, 600, 800, "READY", "local", List.of(ocr), List.of(), false, null, List.of(ocr)),ProcessingResult.Category.TEXT);
         });
         JobService jobs = new JobService(store, books, processor);
         try {
