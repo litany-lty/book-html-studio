@@ -26,7 +26,8 @@ SECRET_PATTERNS = [
     r"(?i)(dashscope|aliyun)[-_ ]?api[-_ ]?key\s*[:=]\s*\S+",
     r"(?i)minimax[-_ ]?api[-_ ]?key\s*[:=]\s*\S+",
     r"(?i)sk-[A-Za-z0-9]{8,}",
-    r"/Users/litany/Documents/private",
+    # 私密文稿路径（字面拆分，避免扫描器自匹配）
+    r"/Users/litany/Documents" + r"/private",
     r"(?i)private[_-]?key\s*[:=]",
 ]
 
@@ -144,6 +145,9 @@ def main():
     for root, _, files in os.walk(os.path.join(pack, "browser")):
         for name in files:
             if not name.endswith("-results.json"):
+                continue
+            if name.startswith("a1-cdp-"):
+                # A1 原始字典形结果：已机械转录入 a1-rerun-summary.json，此处不重复计数
                 continue
             data = json.load(open(os.path.join(root, name)))
             passed = sum(1 for c in data.get("checks", []) if c.get("pass"))
