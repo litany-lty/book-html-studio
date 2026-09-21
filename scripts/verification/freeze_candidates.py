@@ -20,7 +20,7 @@ import os
 import random
 import sys
 
-NEGATIONS = set("不未非无莫勿否别没弗毋")
+NEGATIONS = set("不未非无無莫勿否别別没沒弗毋")
 IOU_THRESHOLD = 0.5
 MAX_DIVERGENT = 300
 MAX_KEEP = 30
@@ -94,9 +94,12 @@ def match_blocks(blocks_a, blocks_b, book_id, meta, page, divergent, keep, gaps)
             if i2 - i1 > BLOCK_DIFF_MAX_SPAN or j2 - j1 > BLOCK_DIFF_MAX_SPAN:
                 gaps["oversizeSpans"] = gaps.get("oversizeSpans", 0) + 1
                 continue
-            if not (ta[i1:i2].strip() or tb[j1:j2].strip()):
+            if not ta[i1:i2].strip():
+                gaps["nonTextTargets"] = gaps.get("nonTextTargets", 0) + 1
                 continue
-            window = ta[max(0, i1 - 8):i2 + 8]
+            # Only the disputed span determines risk; neighboring digits/negations
+            # must not turn punctuation or table separators into high-risk cases.
+            target_text = ta[i1:i2] + tb[j1:j2]
             divergent.append({
                 "book": book_id, "pdfSha256": meta["pdfSha256"], "sourcePage": page,
                 "blockId": a.get("id"), "ppocrBlockId": best.get("id"),
@@ -107,7 +110,7 @@ def match_blocks(blocks_a, blocks_b, book_id, meta, page, divergent, keep, gaps)
                     {"candidateId": "k1", "text": tb[j1:j2], "sourceKind": "PRIMARY_OCR",
                      "producer": "ppocr"}],
                 "spanLen": i2 - i1, "otherLen": j2 - j1,
-                "category": category(window), "kind": "DIVERGENT"})
+                "category": category(target_text), "kind": "DIVERGENT"})
     return matched
 
 
@@ -145,7 +148,7 @@ def mine_page_level(blocks_a, blocks_b, matched_a, book_id, meta, page, divergen
         if i2 - i1 > PAGE_DIFF_MAX_SPAN or j2 - j1 > PAGE_DIFF_MAX_SPAN:
             continue
         # 块拼接处的纯空白差异是噪音，不是转录分歧
-        if not (full_a[i1:i2].strip() or full_b[j1:j2].strip()):
+        if not full_a[i1:i2].strip():
             continue
         # 相邻相等块即上下文；两侧各>=10 字才收，否则丢弃
         left_len = opcodes[index - 1][2] - opcodes[index - 1][1] if index > 0 and opcodes[index - 1][0] == "equal" else 0
@@ -157,7 +160,7 @@ def mine_page_level(blocks_a, blocks_b, matched_a, book_id, meta, page, divergen
         block, offset = map_a[i1]
         if offset + (i2 - i1) > len(block.get("original") or ""):
             continue
-        window = full_a[max(0, i1 - 8):i2 + 8]
+        target_text = full_a[i1:i2] + full_b[j1:j2]
         divergent.append({
             "book": book_id, "pdfSha256": meta["pdfSha256"], "sourcePage": page,
             "blockId": block.get("id"), "ppocrBlockId": None,
@@ -168,7 +171,7 @@ def mine_page_level(blocks_a, blocks_b, matched_a, book_id, meta, page, divergen
                 {"candidateId": "k1", "text": full_b[j1:j2], "sourceKind": "PRIMARY_OCR",
                  "producer": "ppocr"}],
             "spanLen": i2 - i1, "otherLen": j2 - j1,
-            "category": category(window), "kind": "DIVERGENT-PAGE"})
+            "category": category(target_text), "kind": "DIVERGENT-PAGE"})
         added += 1
     return added
 

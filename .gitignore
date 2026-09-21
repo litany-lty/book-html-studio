@@ -4,6 +4,7 @@
 /.env
 /TASK.md
 /.run.lock/
+/.run-runtime/
 *.log
 .DS_Store
 .idea/

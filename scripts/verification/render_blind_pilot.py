@@ -191,13 +191,14 @@ textarea{min-height:65px}button{font:inherit}button.primary{background:#235b8d;c
 <label class="option"><input type="radio" name="status" value="READABLE_WITH_TRUTH"> 可辨认</label>
 <label class="option"><input type="radio" name="status" value="UNREADABLE"> 原图不可辨认</label>
 <label class="option"><input type="radio" name="status" value="AMBIGUOUS"> 无法唯一定位或判定</label></div>
+<label class="option"><input type="radio" name="status" value="NOT_TEXT"> 仅为换行/列间空白，没有待认文字</label>
 <label>原字转录（仅“可辨认”时填写；保持原字，不转简体）<input id="truth" type="text" autocomplete="off"></label>
 <label>备注（可选）<textarea id="note"></textarea></label><p id="warning" class="small warn"></p>
 <div class="row"><button id="prev">上一案</button><button id="next">下一案</button><span class="small">填写会尝试自动保存在本浏览器；请定期下载 JSON 备份。</span></div>
 </section></main></div>
 <script>const board=""" + data + """;
 const key='jr14-blind-'+board.datasetSha256;let labels={};try{labels=JSON.parse(localStorage.getItem(key)||'{}')}catch(e){}let index=0;
-const byId=id=>document.getElementById(id);const valid=['READABLE_WITH_TRUTH','UNREADABLE','AMBIGUOUS'];
+const byId=id=>document.getElementById(id);const valid=['READABLE_WITH_TRUTH','UNREADABLE','AMBIGUOUS','NOT_TEXT'];
 function complete(v){return Boolean(v&&valid.includes(v.status)&&(v.status!=='READABLE_WITH_TRUTH'||(v.originalScriptTruth||'').trim().length>0))}
 function persist(){try{localStorage.setItem(key,JSON.stringify(labels));byId('warning').textContent=''}catch(e){byId('warning').textContent='浏览器自动保存不可用，请立即下载 JSON 备份。'}}
 function save(){const c=board.cases[index],status=document.querySelector('input[name=status]:checked')?.value||'UNLABELED';
@@ -215,6 +216,7 @@ for(const [i,c] of board.cases.entries()){const b=document.createElement('button
 document.querySelectorAll('input[name=status]').forEach(r=>r.onchange=()=>{byId('truth').disabled=r.value!=='READABLE_WITH_TRUTH';save()});
 byId('truth').oninput=save;byId('note').oninput=save;byId('prev').onclick=()=>show(index-1);byId('next').onclick=()=>show(index+1);
 byId('download').onclick=()=>{save();const result={schemaVersion:'jr14-blind-labels-v1',datasetSha256:board.datasetSha256,
+reviewerType:'HUMAN',reviewedByHuman:true,sourceOnlyReview:true,
 complete:board.cases.every(c=>complete(labels[c.caseId])),labels:board.cases.map(c=>({caseId:c.caseId,...(labels[c.caseId]||{status:'UNLABELED',originalScriptTruth:'',note:''})}))};
 const blob=new Blob([JSON.stringify(result,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');
 a.href=url;a.download='jr14-human-labels.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};show(0);

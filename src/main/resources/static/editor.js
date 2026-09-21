@@ -1,5 +1,5 @@
 const BLOCK_TYPES = [
-  ['text', '正文'], ['heading', '标题'], ['figure', '插图'], ['table', '表格'], ['formula', '公式'], ['caption', '图注'], ['page-number', '页码']
+  ['text', '正文'], ['heading', '标题'], ['advertisement', '广告'], ['figure', '插图'], ['table', '表格'], ['formula', '公式'], ['caption', '图注'], ['page-number', '页码']
 ];
 
 function field(labelText, control) {

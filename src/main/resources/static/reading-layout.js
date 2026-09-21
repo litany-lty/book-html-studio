@@ -31,12 +31,22 @@
     return Math.max(...lengths) - Math.min(...lengths) <= 2;
   }
 
+  // Printed contents often arrive as one OCR block. Leaders plus page labels
+  // are entry boundaries, not soft scan-line wraps; keep them in both readers.
+  function contentsMultiline(value) {
+    const lines = String(value ?? '').replace(/\r\n?/g, '\n').split('\n').map(line => line.trim()).filter(Boolean);
+    if (lines.length < 3) return false;
+    const entry = /^.{1,120}?(?:[.．·•…]{2,}|[—─_-]{3,}|\s\/\s*)\s*[（(]?[0-9０-９一二三四五六七八九十百千〇零IVXLCDM]{1,10}[）)]?\s*$/iu;
+    const count = lines.filter(line => entry.test(line)).length;
+    return count >= 3 && count / lines.length >= .7;
+  }
+
   function preservesLineEntries(block, value) {
     if (visualTypes.has(String(block?.type || ''))) return true;
     const source = String(block?.source || '');
     if (structuredSources.some(prefix => source.startsWith(prefix))) return true;
     const fullTexts = [block?.original, block?.simplified].filter(text => typeof text === 'string' && text);
-    const structural = text => numberedMultiline(text) || parallelMultiline(text, block);
+    const structural = text => numberedMultiline(text) || parallelMultiline(text, block) || contentsMultiline(text);
     return fullTexts.some(structural) || structural(value);
   }
 
@@ -48,7 +58,14 @@
   }
 
   function normalizeText(value, block) {
-    const text = String(value ?? '').replace(/\r\n?/g, '\n');
+    let text = String(value ?? '').replace(/\r\n?/g, '\n');
+    if (!visualTypes.has(String(block?.type || ''))) {
+      // Paddle may encode underlining and circled footnotes as TeX in prose.
+      // Decode only complete, allowlisted formatting wrappers, never equations.
+      // This runs after issue ranges are sliced: stored text/offsets stay intact.
+      text = text.replace(/\$\s*\\(?:underline|uwave)\s*\{\s*\\text\s*\{([^{}\n]*)\}\s*\}\s*\$/gu, '$1')
+        .replace(/\$\s*\^\s*\{([①-⑳㉑-㉟㊱-㊿])\}\s*\$/gu, '$1');
+    }
     if (!text || preservesLineEntries(block, text)) return text;
     return text.split(/(\n{2,})/u).map(part => {
       if (/^\n{2,}$/u.test(part)) return '\n\n';

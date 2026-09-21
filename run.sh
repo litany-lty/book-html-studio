@@ -3,6 +3,7 @@ set -euo pipefail
 
 BOOK_APP_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 BOOK_JAR="$BOOK_APP_ROOT/target/book-html-studio.jar"
+BOOK_RUNTIME_DIR="$BOOK_APP_ROOT/.run-runtime"
 BOOK_LOCK_DIR="$BOOK_APP_ROOT/.run.lock"
 BOOK_LOCK_HELD=0
 BOOK_CHILD_PID=""
@@ -126,6 +127,7 @@ is_this_app_process() {
   [[ "$process_cwd" == "$BOOK_APP_ROOT" ]] || return 1
   case " $process_command " in
     *" -jar target/book-html-studio.jar "*|*" -jar $BOOK_JAR "*) return 0 ;;
+    *" -jar $BOOK_RUNTIME_DIR/book-html-studio-"*".jar "*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -146,6 +148,30 @@ if ! mvn -q -DskipTests package; then
 fi
 if [[ ! -f "$BOOK_JAR" ]]; then
   printf '%s\n' '构建未生成 target/book-html-studio.jar，现有服务未停止。' >&2
+  exit 1
+fi
+
+# Never run from Maven's mutable output: a later package can corrupt lazy class
+# loading or graceful shutdown of the old process before it is replaced.
+BOOK_JAR_HASH="$(shasum -a 256 "$BOOK_JAR" | awk '{print $1}')"
+if [[ ! "$BOOK_JAR_HASH" =~ ^[a-f0-9]{64}$ ]]; then
+  printf '%s\n' '无法核实构建包身份，现有服务未停止。' >&2
+  exit 1
+fi
+mkdir -p "$BOOK_RUNTIME_DIR"
+BOOK_RUNTIME_JAR="$BOOK_RUNTIME_DIR/book-html-studio-$BOOK_JAR_HASH.jar"
+if [[ ! -f "$BOOK_RUNTIME_JAR" ]]; then
+  BOOK_RUNTIME_TEMP="$(mktemp "$BOOK_RUNTIME_DIR/.prepare.XXXXXX")"
+  cp "$BOOK_JAR" "$BOOK_RUNTIME_TEMP"
+  if [[ "$(shasum -a 256 "$BOOK_RUNTIME_TEMP" | awk '{print $1}')" != "$BOOK_JAR_HASH" ]]; then
+    printf '%s\n' '构建包在复制期间发生变化，现有服务未停止。' >&2
+    exit 1
+  fi
+  chmod 400 "$BOOK_RUNTIME_TEMP"
+  mv "$BOOK_RUNTIME_TEMP" "$BOOK_RUNTIME_JAR"
+fi
+if [[ "$(shasum -a 256 "$BOOK_RUNTIME_JAR" | awk '{print $1}')" != "$BOOK_JAR_HASH" ]]; then
+  printf '%s\n' '运行副本校验失败，现有服务未停止。' >&2
   exit 1
 fi
 
@@ -177,7 +203,7 @@ printf '%s\n' "纸页工坊：http://127.0.0.1:${BOOK_PORT}（Ctrl+C 停止）"
 # RENDER_MAX_CONCURRENT / RENDER_MAX_IN_FLIGHT_MB / RENDER_MAX_WAIT_MS 控制共享渲染准入；
 # RENDER_WORKER_TIMEOUT_S 控制独立解码进程超时。
 BOOK_XMX="${BOOK_XMX:-768m}"
-"$JAVA_HOME/bin/java" -Xmx"$BOOK_XMX" -jar "$BOOK_JAR" "${BOOK_APP_ARGS[@]}" &
+"$JAVA_HOME/bin/java" -Xmx"$BOOK_XMX" -jar "$BOOK_RUNTIME_JAR" "${BOOK_APP_ARGS[@]}" &
 BOOK_CHILD_PID=$!
 BOOK_STARTED=0
 for BOOK_ATTEMPT in $(seq 1 150); do

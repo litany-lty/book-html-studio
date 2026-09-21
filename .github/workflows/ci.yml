@@ -36,29 +36,29 @@ jobs:
           for file in src/main/resources/static/*.js src/main/resources/export/*.js scripts/*.mjs; do
             node --check "$file"
           done
+          node scripts/verification/probe_display.js
+          node scripts/verification/probe_job_scope.js
       - name: Python verification tests
         shell: bash
         run: |
           python3 -m pip install --disable-pip-version-check OpenCC==1.4.2
           python3 -m py_compile scripts/verification/*.py
           python3 scripts/verification/shadow_eval.py --selftest
-          python3 scripts/verification/test_shadow_eval.py
+          python3 -m unittest discover -s scripts/verification -p 'test_*.py'
       - name: Test and package
         run: mvn --batch-mode verify
       - name: Build manifest
-        if: always()
         run: |
-          python3 scripts/verification/build_manifest.py || echo "manifest skipped"
-          echo "testedCommit=${testedCommit:-unknown}" > test-results/sha.txt 2>/dev/null || true
+          python3 scripts/verification/build_manifest.py --jar target/book-html-studio.jar --out test-results/build
+          echo "testedCommit=${testedCommit}" > test-results/sha.txt
       - name: Upload test evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: jev-test-evidence-${{ github.sha }}
           path: |
             target/surefire-reports/
             test-results/
-            manifest.json
           if-no-files-found: warn
       - name: Untested items (explicit NOT_RUN/BLOCKED, not simulated)
         if: always()

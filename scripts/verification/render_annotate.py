@@ -1,11 +1,12 @@
-"""M3/J11 盲标看板：将冻结候选渲染成原图拼板（本地，无外呼）。
+"""M3/J11 候选对照看板（非盲标）：将冻结候选渲染成原图拼板。
 
 用法：
   python3 scripts/verification/render_annotate.py --freeze <freeze.json> --runs <eval-runs>
       --pdfdir <pdf目录> --bookmap <json> --out <dir> [--cols 2] [--rows 4]
 产物：<out>/montage-NN.png + <out>/order.json（屏上顺序）。
-真值由标注者看原图判定后写入 truth.json {caseId: <正确转录|null>}，
-null=原图不可辨认；单人盲标，偏差在报告注明。
+本看板会显示候选和 OCR 上下文，不得据此宣称独立盲标真值。
+独立原图复核请使用 render_blind_pilot.py，并记录 AI/人工标注来源。
+历史 truth.json 格式为 {caseId: <正确转录|null>}，null 表示原图不可辨认。
 """
 import argparse
 import json

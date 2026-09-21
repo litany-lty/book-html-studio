@@ -100,21 +100,29 @@ public class PageProcessor {
                     warnings.add("本地 OCR 仅为初稿，复杂图表、竖排和手写内容可能存在明显错字");}
             }finally{image.flush();}
         }
+        // 保真门和局部复核结束后才分类：只改派生块类型，原始 OCR sourceRecords 保持原样。
+        AdvertisementFilter.Result advertisements=AdvertisementFilter.classify(blocks,previous.reviewed(),converter);
+        blocks=advertisements.blocks();
+        if(advertisements.marked()>0)warnings.add("已标记 "+advertisements.marked()+" 个独立页边广告块；原稿和原始识别记录保留可查看");
+        if(advertisements.heldForReview()>0)warnings.add("有 "+advertisements.heldForReview()+" 个疑似广告块含已确认疑点，未自动隐藏，请人工复核");
+        int bodyChars=blocks.stream().filter(b->!"advertisement".equals(b.type())).mapToInt(b->QualityGate.nonSpace(b.original())).sum();
+        if(advertisements.marked()>0&&bodyChars==0)warnings.add("本页仅识别到页边广告，未确认为正文；请对照原图复核");
         BlockValidator.validate(blocks);warnings.add(traceWarning(store.pdf(bookId),pageNumber,actualProvider,layout));
-        ProcessingResult.Category category=QualityGate.totalChars(blocks)>0?ProcessingResult.Category.TEXT
-            :QualityGate.isFigureOnly(blocks)?ProcessingResult.Category.VISUAL_ONLY:ProcessingResult.Category.TEXT;
+        ProcessingResult.Category category=bodyChars>0?ProcessingResult.Category.TEXT
+            :(advertisements.marked()>0||QualityGate.isFigureOnly(blocks))?ProcessingResult.Category.VISUAL_ONLY:ProcessingResult.Category.TEXT;
         return new ProcessingResult(new Page(pageNumber,previous.width(),previous.height(),"READY",actualProvider,blocks,List.copyOf(warnings),false,null,sourceRecords),category);
     }
-    /** 阶段3：混合页检查——原生字符少但图像墨多时改走图像识别；预览图低成本、失败保守用原生。 */
+    /** 阶段3：混合页检查——原生字符少但图像墨多时改走图像识别；预览图失败也保守改走图像识别。 */
     private boolean preferOcrOverNative(Path pdfPath,int pageNumber,List<Block> nativeBlocks,List<String> warnings,BooleanSupplier cancelled){
         int chars=QualityGate.totalChars(nativeBlocks);
         double area=nativeBlocks.stream().filter(Objects::nonNull).map(Block::bbox).filter(b->b!=null&&b.length==4).mapToDouble(b->Math.max(0,b[2])*Math.max(0,b[3])).sum();
         if(chars>=200&&area>=0.05) return false;
-        if(cancelled.getAsBoolean()) return false;
+        if(cancelled.getAsBoolean()) throw new CancelledException();
         BufferedImage preview=null;
         try{preview=this.pdf.render(pdfPath,pageNumber,900);}
-        catch(Exception e){return false;}
-        if(preview==null) return false;
+        catch(CancelledException e){throw e;}
+        catch(Exception e){if(cancelled.getAsBoolean())throw new CancelledException();warnings.add("原生文字层覆盖不足且原图预览失败，已保守改走图像识别");return true;}
+        if(preview==null){warnings.add("原生文字层覆盖不足且原图预览为空，已保守改走图像识别");return true;}
         try{
             boolean prefer=QualityGate.shouldPreferOcr(nativeBlocks,preview);
             if(prefer) warnings.add("检测到原生文字层覆盖不足（字符少、图像墨量大），已改用图像识别以防漏识扫描内容");

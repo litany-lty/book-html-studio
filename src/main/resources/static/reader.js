@@ -1,6 +1,6 @@
 import { api } from './api.js';
 
-const textual = new Set(['text', 'heading', 'caption', 'page-number']);
+const textual = new Set(['text', 'heading', 'advertisement', 'caption', 'page-number']);
 const pictured = new Set(['figure', 'table', 'formula']);
 let fitObserver;
 
@@ -141,7 +141,9 @@ function renderReading(container, ctx) {
   let previousPlain = null;
   let previousText = '';
   let paragraph = null;
+  const advertisements = [];
   [...blocks].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).forEach(block => {
+    if (block.type === 'advertisement') { advertisements.push(block); previousPlain = null; paragraph = null; return; }
     if (block.type === 'page-number') return;
     const text = blockText(block, script);
     if (pictured.has(block.type)) {
@@ -187,6 +189,25 @@ function renderReading(container, ctx) {
     empty.className = 'flow-empty';
     empty.textContent = '本页没有可进入阅读流的内容，请查看原稿或在校对栏补充。';
     flow.append(empty);
+  }
+  if (advertisements.length) {
+    const details = document.createElement('details');
+    details.className = 'filtered-ads';
+    const summary = document.createElement('summary');
+    summary.textContent = `已过滤 ${advertisements.length} 处广告 · 查看`;
+    const note = document.createElement('p'); note.className = 'filtered-ads-note';
+    note.textContent = '仅从横排正文中收起，原识别字与原稿位置仍保留。';
+    const list = document.createElement('ol');
+    advertisements.forEach(block => {
+      const item = document.createElement('li');
+      const transcript = document.createElement('p');
+      transcript.textContent = block.original || block.simplified || '（未识别到文字）';
+      const locate = document.createElement('button'); locate.type = 'button'; locate.className = 'button quiet';
+      locate.textContent = '在原稿定位';
+      locate.addEventListener('click', () => ctx.onAdvertisementLocate?.(block.id));
+      item.append(transcript, locate); list.append(item);
+    });
+    details.append(summary, note, list); flow.append(details);
   }
   container.append(flow);
 }

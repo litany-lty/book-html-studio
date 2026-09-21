@@ -17,27 +17,30 @@
     </div>
     <div class="library-tools">
       <label class="field compact"><span>书架</span><select id="book-select" aria-label="选择已导入书籍"><option value="">选择书籍</option></select></label>
-      <label class="upload-button" for="pdf-upload">导入 PDF<input id="pdf-upload" type="file" accept="application/pdf,.pdf"></label>
+      <label class="upload-button" for="pdf-upload">导入 PDF<input id="pdf-upload" type="file" accept="application/pdf,.pdf" aria-describedby="import-status"></label>
       <button id="export-button" class="button primary" type="button" disabled>导出离线书</button>
     </div>
   </header>
+  <div id="import-status" class="import-status" role="status" hidden><span id="import-message"></span><button id="refresh-library" class="button quiet" type="button" hidden>刷新书架</button></div>
 
   <section id="job-panel" class="job-panel" aria-labelledby="job-heading">
-    <div class="job-title"><div><h1 id="job-heading">开始转换</h1><p id="book-summary">先导入一本 PDF，原稿会始终保留。</p></div><button id="job-toggle" class="button quiet" type="button" aria-expanded="false">处理设置</button></div>
+    <div class="job-title"><div><h1 id="job-heading">开始转换</h1><p id="book-summary">先导入一本 PDF，原稿会始终保留。</p></div><div class="job-title-actions"><button id="cancel-job" class="button danger" type="button" hidden>取消任务</button><button id="job-toggle" class="button quiet" type="button" aria-expanded="false">处理设置</button></div></div>
     <form id="job-form" class="job-form" hidden>
-      <label class="field"><span>页码范围</span><input id="page-range" name="pages" value="1-20" placeholder="例如 1-20 或 1,3,25" required><small>默认先自动处理前 20 页；必须主动选择才会处理全书，结果可直接阅读并按需抽查。</small></label>
+      <label class="field"><span>页码范围</span><input id="page-range" name="pages" value="1-20" placeholder="例如 1-20 或 1,3,25" required><small>默认范围为前 20 页，点击“开始处理”后才会识别；必须主动选择才会处理全书。</small></label>
       <label class="check full-book"><input id="all-pages" type="checkbox"><span>处理全部页面</span></label>
       <fieldset><legend>识别通道</legend><div id="provider-options" class="provider-options"></div><p id="provider-note" class="field-note">正在读取服务端识别配置…</p></fieldset>
       <label id="qwen-assist-label" class="check assist-check"><input id="qwen-assist" name="assist" type="checkbox"><span>启用 Qwen3.8-Max 结构整理与疑点建议<small id="qwen-assist-note">会额外调用阿里云服务，建议不会自动覆盖 OCR 原文。</small></span></label>
       <label class="field"><span>版面方向</span><select name="layout"><option value="auto">自动判断</option><option value="vertical">竖排</option><option value="horizontal">横排</option></select></label>
       <label id="split-spreads-label" class="check"><input id="split-spreads" name="splitSpreads" type="checkbox" checked><span>尝试拆分跨页扫描<small id="split-spreads-note">仅用于支持分区识别的提供商。</small></span></label>
       <label class="check danger-check"><input id="force-processing" name="force" type="checkbox"><span>覆盖已有识别与校对结果</span><small>包括手工修改；默认不覆盖，勾选后需再次确认。</small></label>
-      <div class="job-actions"><button class="button primary" type="submit">开始处理</button><button id="cancel-job" class="button danger" type="button" hidden>取消任务</button></div>
+      <div class="job-actions"><button class="button primary" type="submit">开始处理</button></div>
     </form>
     <div id="job-progress" class="progress-area" hidden>
       <div class="progress-copy"><strong id="progress-label">准备中</strong><span id="progress-count"></span></div>
       <progress id="progress-bar" max="1" value="0"></progress>
       <p id="job-errors" class="inline-message"></p>
+      <details id="job-error-details" class="job-error-details" hidden><summary id="job-error-summary">查看全部错误</summary><ol id="job-all-errors"></ol></details>
+      <div id="job-recovery" class="job-recovery" hidden><span id="job-recovery-message"></span><button id="refresh-job" class="button" type="button" hidden>刷新任务状态</button><button id="edit-job" class="button" type="button" hidden>调整处理范围</button></div>
     </div>
   </section>
 

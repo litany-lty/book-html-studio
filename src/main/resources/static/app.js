@@ -19,6 +19,7 @@ let outlineRequest = 0;
 let pageInputPending = false;
 let assistPreference;
 let splitSpreadsPreference = true;
+let jobSyncError = false;
 
 function toast(message, tone = 'info') {
   const item = document.createElement('div');
@@ -46,6 +47,10 @@ function hasDirtyChanges() {
 function clearPolling() {
   if (state.pollTimer) window.clearTimeout(state.pollTimer);
   state.pollTimer = null;
+}
+
+function jobSessionMatches(bookId, requestId) {
+  return state.book?.id === bookId && bookRequest === requestId;
 }
 
 function imageStage() {
@@ -158,6 +163,15 @@ function renderBooks() {
   select.replaceChildren(new Option('选择书籍', ''));
   state.books.forEach(book => select.append(new Option(`${book.title}（${book.totalPages} 页）`, book.id)));
   select.value = previous;
+  $('#empty-state p').textContent = state.books.length
+    ? '从上方书架选择已有书籍，或导入新的 PDF。先浏览原稿，再在“处理设置”中选择少量页面识别。'
+    : '导入后先查看原稿，再挑选少量页面识别。没有识别结果的页面仍会诚实地显示原图。';
+}
+
+function importStatus(message, canRefresh = false) {
+  $('#import-status').hidden = !message;
+  $('#import-message').textContent = message;
+  $('#refresh-library').hidden = !canRefresh;
 }
 
 function summaryFor(n) {
@@ -523,6 +537,15 @@ function renderCurrent(full = true) {
         target.focus({ preventScroll: true });
         target.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
       });
+    },
+    onAdvertisementLocate(blockId) {
+      state.selectedBlockId = blockId;
+      state.view = 'original'; renderCurrent(); saveReadingPosition();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const target = [...$('#paper').querySelectorAll('.edit-overlay')].find(node => node.dataset.blockId === blockId);
+        target?.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+        target?.focus({ preventScroll: true });
+      }));
     }
   });
   $('#page-message').hidden = !message;
@@ -607,9 +630,14 @@ async function goToPage(n, options = {}) {
 async function selectBook(id) {
   if (hasDirtyChanges()) { $('#book-select').value = state.book?.id || ''; return; }
   const requestId = ++bookRequest;
+  const submit = $('#job-form button[type="submit"]');
+  const refresh = $('#refresh-job');
+  setBusy(submit, false); submit.textContent = '开始处理'; delete submit.dataset.label; submit.disabled = true;
+  setBusy(refresh, false); refresh.textContent = '刷新任务状态'; delete refresh.dataset.label;
   ++pageRequest;
   pageFetchController?.abort();
   clearPolling(); ++outlineRequest; state.pageCache.clear(); state.page = null; state.blocks = []; state.selectedIssueId = null; state.dirty = false; state.outline = []; state.outlineStatus = 'idle'; state.activeOutlineBlockId = null;
+  jobSyncError = false; $('#job-progress').hidden = true; $('#job-recovery').hidden = true;
   // A1-01：切书开启新编辑会话并清空冲突栏
   state.editorEpoch++; state.conflict = null; state.saveInFlight = null;
   // J08：切书换作用域，辅助推荐映射清空
@@ -635,8 +663,9 @@ async function selectBook(id) {
     state.currentPage = page;
     const outlinePromise = refreshOutline(id);
     await goToPage(page, { force: true, restoreScroll: true, scrollTop: prefs.scrollTop, skipSavePosition: true });
+    if (requestId !== bookRequest) return;
     await Promise.all([refreshJob(), outlinePromise]);
-  } catch (error) { showError(error); }
+  } catch (error) { if (requestId === bookRequest) showError(error); }
 }
 
 function validateRange(value, total) {
@@ -658,36 +687,84 @@ function renderJob(job) {
   $('#progress-label').textContent = labels[job.status] || job.status;
   $('#progress-count').textContent = job.total ? `${job.completed || 0} / ${job.total}${job.currentPage ? ` · 第 ${job.currentPage} 页` : ''}` : '';
   $('#progress-bar').max = Math.max(1, job.total || 1); $('#progress-bar').value = job.completed || 0;
-  const errors = [...(job.errors || []), ...(job.error ? [job.error] : [])]; $('#job-errors').textContent = errors.slice(-3).join('；');
+  const errors = [...(job.errors || []), ...(job.error ? [job.error] : [])];
+  $('#job-errors').textContent = errors.slice(-3).join('；');
+  $('#job-error-details').hidden = errors.length <= 3;
+  $('#job-error-summary').textContent = `查看全部错误（${errors.length} 条）`;
+  const list = $('#job-all-errors'); list.replaceChildren();
+  errors.forEach(error => { const item = document.createElement('li'); item.textContent = error; list.append(item); });
+  const guidance = {
+    COMPLETED_WITH_ERRORS: '部分页面未完成。按上方错误页码重新选择范围；默认会跳过已完成页，不会覆盖手工校对。',
+    CANCELLED: '已完成的页面保留。可按需重新选择未完成的页码继续处理。',
+    INTERRUPTED: '服务中断前完成的页面保留。核对页码后可继续处理；不要勾选覆盖已有结果。',
+    FAILED: '任务未完成。检查上方错误和服务状态后，重新选择未完成页码。'
+  };
+  $('#job-recovery').hidden = !(jobSyncError || guidance[job.status]);
+  $('#job-recovery-message').textContent = jobSyncError
+    ? '暂时无法确认任务状态，处理可能仍在后台运行。请先刷新状态，不要重复创建任务。'
+    : (guidance[job.status] || '');
+  $('#refresh-job').hidden = !jobSyncError;
+  $('#edit-job').hidden = Boolean(jobSyncError || !guidance[job.status]);
   if (active) schedulePoll(); else clearPolling();
 }
 
-function schedulePoll() {
+function schedulePoll(delay = 1500) {
   clearPolling();
   const bookId = state.book?.id;
+  const requestId = bookRequest;
   state.pollTimer = window.setTimeout(async () => {
-    if (!state.book) return;
+    if (!jobSessionMatches(bookId, requestId)) return;
     try {
       const job = await api.job(bookId);
-      if (state.book?.id !== bookId) return;
-      renderJob(job);
-      if (!activeJobs.has(job.status)) await refreshBookData();
-    } catch (error) { clearPolling(); showError(error); }
-  }, 1500);
+      if (!jobSessionMatches(bookId, requestId)) return;
+      jobSyncError = false; renderJob(job);
+      if (!activeJobs.has(job.status)) {
+        try { await refreshBookData(bookId, requestId); }
+        catch (error) { if (jobSessionMatches(bookId, requestId)) showError(error); }
+      }
+    } catch (_) {
+      if (!jobSessionMatches(bookId, requestId)) return;
+      showJobSyncError();
+    }
+  }, delay);
+}
+
+function showJobSyncError() {
+  jobSyncError = true;
+  $('#job-progress').hidden = false;
+  $('#job-recovery').hidden = false;
+  $('#job-recovery-message').textContent = '暂时无法确认任务状态，处理可能仍在后台运行。请先刷新状态，不要重复创建任务。';
+  $('#refresh-job').hidden = false; $('#edit-job').hidden = true;
+  $('#job-form button[type="submit"]').disabled = true;
+  schedulePoll(10000);
 }
 
 async function refreshJob() {
   if (!state.book) return;
-  try { renderJob(await api.job(state.book.id)); } catch (error) { showError(error); }
+  const bookId = state.book.id;
+  const requestId = bookRequest;
+  try {
+    const job = await api.job(bookId);
+    if (!jobSessionMatches(bookId, requestId)) return;
+    const recovered = jobSyncError;
+    jobSyncError = false; renderJob(job);
+    if (recovered && !activeJobs.has(job.status)) {
+      try { await refreshBookData(bookId, requestId); }
+      catch (error) { if (jobSessionMatches(bookId, requestId)) showError(error); }
+    }
+  } catch (_) {
+    if (!jobSessionMatches(bookId, requestId)) return;
+    showJobSyncError();
+  }
 }
 
-async function refreshBookData() {
-  if (!state.book) return;
-  const id = state.book.id;
+async function refreshBookData(id = state.book?.id, requestId = bookRequest) {
+  if (!id || !jobSessionMatches(id, requestId)) return;
   const [book, summaries] = await Promise.all([api.book(id), api.pages(id)]);
-  if (state.book?.id !== id) return;
+  if (!jobSessionMatches(id, requestId)) return;
   state.book = book; state.books = state.books.map(item => item.id === id ? book : item); state.summaries = summaries; state.pageCache.clear(); renderBooks(); renderBookMeta(); renderToc();
   await refreshOutline(id);
+  if (!jobSessionMatches(id, requestId)) return;
   if (state.dirty) { toast('任务状态已更新，保留当前未保存的校对内容。'); return; }
   await goToPage(state.currentPage, { force: true });
 }
@@ -747,19 +824,51 @@ $('#pdf-upload').addEventListener('change', async event => {
   const file = event.target.files[0]; if (!file) return;
   if (file.type && file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) { toast('请选择 PDF 文件。', 'error'); event.target.value = ''; return; }
   const max = Number(state.config?.maxUploadMb || 0); if (max && file.size > max * 1024 * 1024) { toast(`文件超过 ${max} MB 上传上限。`, 'error'); event.target.value = ''; return; }
-  const label = event.target.closest('label'); label.classList.add('busy');
-  try { const book = await api.upload(file); state.books = [book, ...state.books.filter(item => item.id !== book.id)]; renderBooks(); await selectBook(book.id); toast('PDF 已导入，可以先浏览原稿。', 'success'); }
-  catch (error) { showError(error); }
-  finally { label.classList.remove('busy'); event.target.value = ''; }
+  const labels = $$('[for="pdf-upload"]');
+  labels.forEach(label => label.classList.add('busy'));
+  event.target.disabled = true;
+  importStatus(`正在导入《${file.name}》；大文件可能需要稍等，请勿重复选择。`);
+  try {
+    const book = await api.upload(file);
+    state.books = [book, ...state.books.filter(item => item.id !== book.id)]; renderBooks();
+    importStatus('导入成功，正在打开原稿…');
+    await selectBook(book.id);
+    importStatus(''); toast('PDF 已导入，可以先浏览原稿。', 'success');
+  } catch (error) {
+    const uncertain = error?.name === 'TimeoutError' || error?.name === 'TypeError';
+    importStatus(uncertain
+      ? '连接中断，导入结果尚不确定。先刷新书架检查是否已导入，确认没有后再试，避免重复。'
+      : (error?.message || '导入失败，请检查文件后重试。'), uncertain);
+  } finally { labels.forEach(label => label.classList.remove('busy')); event.target.disabled = false; event.target.value = ''; }
+});
+
+$('#refresh-library').addEventListener('click', async () => {
+  const button = $('#refresh-library'); setBusy(button, true, '刷新中…');
+  try { state.books = await api.books(); renderBooks(); importStatus('书架已刷新。若找到刚才导入的书，请从书架选择；没有时再重新导入。'); }
+  catch (error) { importStatus(`刷新书架失败：${error?.message || '请检查服务状态后重试。'}`, true); }
+  finally { setBusy(button, false); }
 });
 
 $('#job-toggle').addEventListener('click', () => { const form = $('#job-form'); form.hidden = !form.hidden; $('#job-toggle').setAttribute('aria-expanded', String(!form.hidden)); });
+$('#refresh-job').addEventListener('click', async () => {
+  const button = $('#refresh-job'); setBusy(button, true, '刷新中…');
+  const bookId = state.book?.id, requestId = bookRequest;
+  try { await refreshJob(); }
+  finally { if (jobSessionMatches(bookId, requestId)) setBusy(button, false); }
+});
+$('#edit-job').addEventListener('click', () => {
+  $('#force-processing').checked = false;
+  $('#job-form').hidden = false;
+  $('#job-toggle').setAttribute('aria-expanded', 'true');
+  $('#page-range').focus();
+});
 $('#all-pages').addEventListener('change', event => { $('#page-range').disabled = event.target.checked; if (event.target.checked) $('#page-range').value = ''; else { const end = Math.min(20, state.book?.totalPages || 20); $('#page-range').value = end > 1 ? `1-${end}` : '1'; } });
 $('#provider-options').addEventListener('change', updateProviderNote);
 $('#qwen-assist').addEventListener('change', event => { assistPreference = event.target.checked; });
 $('#split-spreads').addEventListener('change', event => { splitSpreadsPreference = event.target.checked; });
 $('#job-form').addEventListener('submit', async event => {
   event.preventDefault(); if (!state.book) return;
+  if (jobSyncError) { toast('先刷新任务状态，确认后台没有仍在运行的任务。', 'error'); return; }
   const form = new FormData(event.currentTarget); const all = $('#all-pages').checked; const pages = all ? 'all' : String(form.get('pages') || '');
   if (!all && !validateRange(pages, state.book.totalPages)) { toast(`请输入 1 到 ${state.book.totalPages} 页内的页码，例如 1-20 或 1,3,25。`, 'error'); $('#page-range').focus(); return; }
   const provider = selectedProvider(); if (!provider) { toast('请选择可用的识别方式。', 'error'); return; }
@@ -775,11 +884,32 @@ $('#job-form').addEventListener('submit', async event => {
   if (provider !== 'local' && !window.confirm(`所选页面图片将发送给 ${cloudTargets}。所选 paddle 系通道额度不足时会按可用情况自动改用同系另一通道并注明。自动结果会直接生成横排阅读稿，但不保证无误，确定开始吗？`)) return;
   if (form.get('force') && !window.confirm('这会替换所选页已有的识别和手工校对结果，确定重新识别吗？')) return;
   const button = event.currentTarget.querySelector('button[type="submit"]'); setBusy(button, true, '正在创建任务…');
-  try { const job = await api.startJob(state.book.id, { pages, provider, assist, layout: form.get('layout'), splitSpreads: form.get('splitSpreads') === 'on', force: form.get('force') === 'on' }); renderJob(job); toast('处理任务已开始。', 'success'); }
-  catch (error) { showError(error); }
-  finally { setBusy(button, false); button.disabled = Boolean(state.pollTimer); }
+  const bookId = state.book.id, requestId = bookRequest;
+  try {
+    const job = await api.startJob(bookId, { pages, provider, assist, layout: form.get('layout'), splitSpreads: form.get('splitSpreads') === 'on', force: form.get('force') === 'on' });
+    if (!jobSessionMatches(bookId, requestId)) return;
+    renderJob(job); $('#force-processing').checked = false; toast('处理任务已开始。', 'success');
+  } catch (error) {
+    if (!jobSessionMatches(bookId, requestId)) return;
+    if (error?.name === 'TimeoutError' || error?.name === 'TypeError') showJobSyncError();
+    else showError(error);
+  } finally {
+    if (jobSessionMatches(bookId, requestId)) {
+      setBusy(button, false);
+      button.disabled = jobSyncError || Boolean(state.pollTimer) || !state.book;
+    }
+  }
 });
-$('#cancel-job').addEventListener('click', async () => { if (!state.book || !window.confirm('取消会停止本地处理或等待，但不能保证撤销已提交的远端任务或计费；已经完成的页面会保留。确定继续吗？')) return; try { renderJob(await api.cancelJob(state.book.id)); toast('已请求取消任务。'); } catch (error) { showError(error); } });
+$('#cancel-job').addEventListener('click', async () => {
+  if (!state.book || !window.confirm('取消会停止本地处理或等待，但不能保证撤销已提交的远端任务或计费；已经完成的页面会保留。确定继续吗？')) return;
+  const bookId = state.book.id;
+  const requestId = bookRequest;
+  try {
+    const job = await api.cancelJob(bookId);
+    if (state.book?.id !== bookId || requestId !== bookRequest) return;
+    renderJob(job); toast('已请求取消任务。');
+  } catch (error) { if (state.book?.id === bookId && requestId === bookRequest) showError(error); }
+});
 
 $$('[data-view]').forEach(button => button.addEventListener('click', () => { state.view = button.dataset.view; renderCurrent(); saveReadingPosition(); }));
 $('#focus-toggle').addEventListener('click', () => { state.focus = !state.focus; closeDrawers(); renderCurrent(false); saveReadingPosition(); });

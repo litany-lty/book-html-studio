@@ -26,7 +26,8 @@ public class JobService {
     @PostConstruct void recover(){store.recoverInterruptedJobs();}
     @PreDestroy void close(){worker.shutdownNow();}
     public synchronized Job submit(String bookId,JobRequest request){Book book=books.get(bookId);String provider=request.providerOrDefault();String layout=request.layout()==null?"auto":request.layout();List<Integer> pages=PageRanges.parse(request.pages(),book.totalPages());String fingerprint=bookId+"|"+pages+"|"+provider+"|"+layout+"|"+request.splitSpreads()+"|"+request.force()+"|"+request.assistEnabled();
-        if(active!=null&&!active.future.isDone()){if(active.fingerprint.equals(fingerprint))return store.readJob(bookId);throw new ApiException(HttpStatus.CONFLICT,"已有识别任务正在运行");}
+        // Future.cancel 会立刻标记 done；只有 worker 的 finally 清除 active 才表示实际退出。
+        if(active!=null){if(!active.cancelled&&active.fingerprint.equals(fingerprint))return store.readJob(bookId);throw new ApiException(HttpStatus.CONFLICT,"已有识别任务正在运行或正在取消");}
         Job current = null;
         try { current = store.readJob(bookId); } catch (Exception ignored) { }
         if(current!=null&&List.of("QUEUED","RUNNING","CANCELLING").contains(current.status()))throw new ApiException(HttpStatus.CONFLICT,"已有识别任务正在运行或正在取消，请稍后再试");
@@ -34,9 +35,13 @@ public class JobService {
             List.copyOf(pages),provider,layout,request.splitSpreads(),request.force(),request.assistEnabled(),fingerprint);
         write(bookId,queued);Running running=new Running(bookId,fingerprint);active=running;running.future=worker.submit(()->run(running,queued,pages,provider,layout,request.splitSpreads(),request.force(),request.assistEnabled()));return queued;}
     public Job get(String bookId){books.get(bookId);return store.readJob(bookId);}
-    // 阶段1：取消写入 CANCELLING，等待 worker 实际退出后才写 CANCELLED；旧任务不再直接覆盖为 CANCELLED
-    public synchronized Job cancel(String bookId){books.get(bookId);Job job=store.readJob(bookId);if(active!=null&&active.bookId.equals(bookId)&&!active.future.isDone()){active.cancelled=true;active.future.cancel(true);Job cancelling=statusJob(job,"CANCELLING",job.completed(),job.total(),job.currentPage(),null,job.errors());write(bookId,cancelling);return cancelling;}return job;}
-    private void run(Running running,Job initial,List<Integer> pages,String provider,String layout,boolean split,boolean force,boolean assist){int completed=0;List<String>errors=new ArrayList<>();try{
+    // 运行中取消先写 CANCELLING，由 worker 收尾时写 CANCELLED；排队未启动可直接取消。
+    public synchronized Job cancel(String bookId){books.get(bookId);Job job=store.readJob(bookId);if(active==null||!active.bookId.equals(bookId)||!List.of("QUEUED","RUNNING","CANCELLING").contains(job.status()))return job;
+        if("CANCELLING".equals(job.status()))return job;
+        Running running=active;running.cancelled=true;
+        if(!running.started){running.future.cancel(false);Job cancelled=statusJob(job,"CANCELLED",job.completed(),job.total(),job.currentPage(),null,job.errors());write(bookId,cancelled);active=null;return cancelled;}
+        Job cancelling=statusJob(job,"CANCELLING",job.completed(),job.total(),job.currentPage(),null,job.errors());write(bookId,cancelling);running.thread.interrupt();return cancelling;}
+    private void run(Running running,Job initial,List<Integer> pages,String provider,String layout,boolean split,boolean force,boolean assist){synchronized(this){if(active!=running||running.cancelled)return;running.started=true;running.thread=Thread.currentThread();}int completed=0;List<String>errors=new ArrayList<>();try{
         writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",0,pages.size(),null,null,List.of()));
         for(int pageNumber:pages){
             if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
@@ -58,6 +63,7 @@ public class JobService {
             try{
                 ProcessingResult result=processor.process(running.bookId,pageNumber,provider,layout,split,assist,()->running.cancelled||Thread.currentThread().isInterrupted());
                 Page page=mergeUnresolvedIssues(old,result.page());
+                if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
                 if(!stillCurrent(running,initial.id()))return;
                 // F03/R08：有证据的空白/纯视觉页直接成功；显著缩水仍拒绝；其他空结果仍失败
                 boolean confirmedNoText=result.category()==ProcessingResult.Category.BLANK_CONFIRMED
@@ -116,6 +122,7 @@ public class JobService {
             }
             completed++;writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",completed,pages.size(),pageNumber,null,List.copyOf(errors)));
         }
+        if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
         writeIfCurrent(running,initial.id(),statusJob(initial,errors.isEmpty()?"COMPLETED":"COMPLETED_WITH_ERRORS",completed,pages.size(),null,null,List.copyOf(errors)));
     }catch(CancelledException|CancellationException e){
         if(!stillCurrent(running,initial.id()))return;
@@ -127,7 +134,15 @@ public class JobService {
     private void write(String id,Job job){try{store.writeJob(id,job);}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"任务状态保存失败");}}
     // 阶段1：job 代次保护——仅当内存 active 仍是本 worker 且持久化 jobId 一致时才写入
     private boolean stillCurrent(Running running,String expectedJobId){synchronized(this){if(active!=running)return false;}try{Job cur=store.readJob(running.bookId);return cur!=null&&expectedJobId.equals(cur.id());}catch(Exception e){return false;}}
-    private void writeIfCurrent(Running running,String expectedJobId,Job job){synchronized(this){if(active!=running)return;}try{Job cur=store.readJob(running.bookId);if(cur==null||!expectedJobId.equals(cur.id()))return;write(running.bookId,job);}catch(Exception ignored){}}
+    private void writeIfCurrent(Running running,String expectedJobId,Job job){synchronized(this){if(active!=running)return;try{Job cur=store.readJob(running.bookId);if(cur==null||!expectedJobId.equals(cur.id()))return;
+            if("CANCELLING".equals(cur.status())){
+                if("CANCELLED".equals(job.status())||List.of("COMPLETED","COMPLETED_WITH_ERRORS","FAILED").contains(job.status()))
+                    write(running.bookId,statusJob(cur,"CANCELLED",cur.completed(),cur.total(),cur.currentPage(),null,cur.errors()));
+                return;
+            }
+            if(running.cancelled&&!"CANCELLED".equals(job.status()))return;
+            write(running.bookId,job);
+        }catch(Exception ignored){}}}
     private static Job statusJob(Job initial,String status,int completed,int total,Integer currentPage,String error,List<String>errors){
         return new Job(initial.id(),status,completed,total,currentPage,error,errors==null?List.of():List.copyOf(errors),Instant.now(),
             initial.pages(),initial.provider(),initial.layout(),initial.splitSpreads(),initial.force(),initial.assist(),initial.fingerprint());
@@ -148,5 +163,5 @@ public class JobService {
     private static int length(String value){return value==null?0:value.length();}
     static int sourceChars(Page page){if(page==null)return 0;List<Block>records=page.sourceRecords()!=null&&!page.sourceRecords().isEmpty()?page.sourceRecords():page.blocks();if(records==null)return 0;return records.stream().map(Block::original).filter(Objects::nonNull).mapToInt(s->(int)s.codePoints().filter(cp->!Character.isWhitespace(cp)).count()).sum();}
     private static int blockChars(Page page){if(page==null||page.blocks()==null)return 0;return page.blocks().stream().map(Block::original).filter(Objects::nonNull).mapToInt(s->(int)s.codePoints().filter(cp->!Character.isWhitespace(cp)).count()).sum();}
-    private static final class Running{final String bookId,fingerprint;volatile boolean cancelled;Future<?> future;Running(String bookId,String fingerprint){this.bookId=bookId;this.fingerprint=fingerprint;}}
+    private static final class Running{final String bookId,fingerprint;volatile boolean cancelled;boolean started;Thread thread;Future<?> future;Running(String bookId,String fingerprint){this.bookId=bookId;this.fingerprint=fingerprint;}}
 }

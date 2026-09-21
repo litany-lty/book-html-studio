@@ -54,9 +54,13 @@ textarea { width: 100%; resize: vertical; line-height: 1.55; }
 .upload-button input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .upload-button.busy { opacity: .55; pointer-events: none; }
 .upload-button.large { min-height: 42px; margin-top: 10px; padding-inline: 20px; border-color: var(--blue); color: var(--blue); }
+.import-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--line); background: var(--blue-pale); padding: 7px 22px; color: var(--blue-deep); font-size: 12px; line-height: 1.5; }
+.import-status .button { min-height: 30px; padding: 3px 8px; }
 
 .job-panel { border-bottom: 1px solid var(--line); background: #f8fafc; padding: 10px 22px; }
 .job-title { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.job-title > div:first-child { min-width: 0; }
+.job-title-actions { display: flex; align-items: center; flex: none; gap: 6px; }
 .job-title h1 { display: inline; margin: 0 9px 0 0; font-size: 13px; }
 .job-title p { display: inline; margin: 0; color: var(--muted); font-size: 12px; }
 .job-form { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); align-items: end; gap: 12px; padding: 14px 0 6px; border-top: 1px solid var(--line); margin-top: 10px; }
@@ -82,6 +86,11 @@ progress::-webkit-progress-bar { background: var(--workspace-deep); }
 progress::-webkit-progress-value { background: var(--blue); }
 progress::-moz-progress-bar { background: var(--blue); }
 .inline-message { margin: 7px 0 0; color: var(--amber); font-size: 12px; line-height: 1.45; }
+.job-error-details { margin-top: 6px; color: var(--amber); font-size: 12px; }
+.job-error-details summary { cursor: pointer; width: fit-content; }
+.job-error-details ol { max-height: 105px; overflow: auto; margin: 6px 0 0; padding-left: 22px; line-height: 1.5; }
+.job-recovery { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.job-recovery .button { min-height: 30px; padding: 3px 9px; }
 
 .mobile-bar { display: none; height: 46px; align-items: center; justify-content: space-between; padding: 0 8px; background: #fff; border-bottom: 1px solid var(--line); }
 .mobile-bar span { max-width: 56vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
@@ -209,6 +218,13 @@ progress::-moz-progress-bar { background: var(--blue); }
 .reading-figure .visual-ocr summary { cursor: pointer; text-align: center; font-family: var(--sans); }
 .reading-figure .visual-ocr p { margin: .55em 0 0; border-left: 2px solid var(--line-strong); background: var(--workspace); padding: 9px 11px; color: var(--ink-soft); font-size: 1em; text-align: left; }
 .flow-empty { color: var(--muted); text-align: left !important; }
+.filtered-ads { margin-top: 2.5em; border-top: 1px solid var(--line); padding-top: .7em; color: var(--muted); font: 12px/1.6 var(--sans); }
+.filtered-ads summary { width: fit-content; cursor: pointer; color: var(--blue); }
+.filtered-ads-note { margin: .7em 0 !important; color: var(--muted); font: inherit; text-align: left !important; }
+.filtered-ads ol { max-height: 260px; overflow: auto; margin: .5em 0 0; padding-left: 1.6em; }
+.filtered-ads li { border-bottom: 1px solid var(--line); padding: .5em 0; }
+.filtered-ads li p { margin: 0 0 .4em; white-space: pre-wrap; text-align: left; font: 15px/1.6 var(--serif); }
+.filtered-ads .button { min-height: 32px; padding: 4px 8px; font-size: 12px; }
 .pagination { width: min(740px, calc(100% - 36px)); display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 22px auto 36px; }
 .pagination form { display: flex; align-items: center; gap: 7px; color: var(--muted); }
 .pagination input { width: 70px; text-align: center; font-variant-numeric: tabular-nums; }
@@ -313,6 +329,7 @@ progress::-moz-progress-bar { background: var(--blue); }
 }
 
 @media (max-width: 620px) {
+  .import-status { padding-inline: 12px; }
   .topbar { gap: 8px; }
   .brand-mark { width: 29px; height: 34px; }
   .brand strong { font-size: 15px; }
@@ -323,6 +340,9 @@ progress::-moz-progress-bar { background: var(--blue); }
   .library-tools .button, .library-tools .upload-button { min-height: 34px; padding-inline: 8px; font-size: 12px; }
   .job-panel { padding: 8px 12px; }
   .job-title h1 { font-size: 12px; }
+  .job-title { gap: 6px; }
+  .job-title-actions { gap: 2px; }
+  .job-title-actions .button { min-height: 34px; padding-inline: 6px; font-size: 12px; }
   .job-title p { max-width: 66vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .job-form { grid-template-columns: 1fr; max-height: 52vh; overflow: auto; }
   .danger-check { grid-column: auto; }

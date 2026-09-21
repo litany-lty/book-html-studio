@@ -7,7 +7,7 @@ import studio.bookhtml.domain.ContentIssue;
 import java.util.*;
 
 public final class BlockValidator {
-    private static final Set<String> TYPES = Set.of("text", "heading", "figure", "table", "caption", "page-number", "formula");
+    private static final Set<String> TYPES = Set.of("text", "heading", "figure", "table", "caption", "page-number", "formula", "advertisement");
     private static final Set<String> MODES = Set.of("vertical-rl", "horizontal-tb");
     private BlockValidator() {}
     public static void validate(List<Block> blocks) {

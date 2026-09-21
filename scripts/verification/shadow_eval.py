@@ -39,11 +39,17 @@ def _extract_case_info(case):
     ann = case.get("annotation") if isinstance(case.get("annotation"), dict) else {}
     status = ann.get("status")
     if not status:
-        if case.get("unreadable") or (case.get("truth") is None and not ann.get("originalScriptTruth")):
+        if case.get("unreadable"):
             status = "UNREADABLE"
-        else:
+        elif case.get("truth") is not None or ann.get("originalScriptTruth") is not None:
             status = "READABLE_WITH_TRUTH"
+        else:
+            status = "UNLABELED"
+    if status not in {"READABLE_WITH_TRUTH", "UNREADABLE", "AMBIGUOUS", "NOT_TEXT", "UNLABELED"}:
+        raise ValueError(f"Unknown annotation status: {status}")
     truth = ann.get("originalScriptTruth") if ann.get("originalScriptTruth") is not None else case.get("truth")
+    if status == "READABLE_WITH_TRUTH" and (not isinstance(truth, str) or not truth.strip()):
+        raise ValueError("Readable annotation requires a non-empty original-script truth")
     return status, truth
 
 
@@ -79,11 +85,14 @@ def _eval_single(cases, normalize_fn=None):
     readable = []
     unreadable = []
     unlabeled = []
+    non_text = []
 
     for c in cases:
         status, truth = _extract_case_info(c)
         if status == "UNLABELED":
             unlabeled.append(c)
+        elif status == "NOT_TEXT":
+            non_text.append(c)
         elif status in ("UNREADABLE", "AMBIGUOUS"):
             unreadable.append(c)
         else:
@@ -100,6 +109,7 @@ def _eval_single(cases, normalize_fn=None):
         "readableN": len(readable),
         "unreadableN": len(unreadable),
         "unlabeledN": len(unlabeled),
+        "nonTextN": len(non_text),
         "keyErrors": [],
         "casesDetail": [],
     }
@@ -221,7 +231,7 @@ def _eval_single(cases, normalize_fn=None):
             "book": case.get("book"),
             "category": case.get("category"),
             "riskTags": sorted(set(case.get("riskTags", []))),
-            "status": "UNREADABLE",
+            "status": _extract_case_info(case)[0],
             "truth": None,
             "bText": run_b["text"],
             "cText": run_c["text"],
@@ -241,6 +251,7 @@ def _eval_single(cases, normalize_fn=None):
 
     admitted_count_c = sum(
         1 for c in cases
+        if _extract_case_info(c)[0] not in ("UNLABELED", "NOT_TEXT")
         if _extract_run_info(c, "C").get("admitted") is not None
         and not _extract_run_info(c, "C")["failed"]
     )
@@ -332,6 +343,26 @@ def evaluate(dataset, normalize=False):
     cases = dataset.get("cases", [])
     # 1. 主指标：原字精确转录（不先归一化，严格区分原字）
     metrics = _eval_single(cases, normalize_fn=None)
+    reviewers = {}
+    target_kinds = {}
+    for case in cases:
+        annotation = case.get("annotation") or {}
+        reviewer = annotation.get("reviewerType", "UNSPECIFIED")
+        reviewers[reviewer] = reviewers.get(reviewer, 0) + 1
+        target_kind = annotation.get("targetKind", "UNSPECIFIED")
+        target_kinds[target_kind] = target_kinds.get(target_kind, 0) + 1
+    all_human = bool(cases) and all(
+        (c.get("annotation") or {}).get("reviewerType") == "HUMAN"
+        and (c.get("annotation") or {}).get("reviewedByHuman") is True
+        and _extract_case_info(c)[0] != "UNLABELED" for c in cases)
+    metrics["annotationProvenance"] = reviewers
+    metrics["byTargetKind"] = target_kinds
+    metrics["evaluationPurpose"] = "HUMAN_REVIEWED" if all_human else "EXPLORATORY_NOT_HUMAN_CALIBRATION"
+    metrics["humanCalibrationEligible"] = all_human
+    metrics["automaticAssistApproval"] = False
+    metrics["admittedRecommendationCountAllCases"] = sum(
+        1 for c in cases if _extract_run_info(c, "C").get("admitted") is not None
+        and not _extract_run_info(c, "C")["failed"])
 
     # 2. 投影指标（若启用 normalize，依赖 opencc s2t；缺失必须报错）
     if normalize:
