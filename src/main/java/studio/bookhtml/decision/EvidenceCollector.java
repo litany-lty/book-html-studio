@@ -7,6 +7,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import javax.imageio.ImageIO;
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import org.springframework.stereotype.Service;
 import studio.bookhtml.config.DecisionProperties;
 import studio.bookhtml.domain.Block;
@@ -30,14 +31,23 @@ public class EvidenceCollector {
     private final QwenOcrClient qwen;
     private final DecisionBudget budget;
     private final DecisionProperties config;
+    private final DecisionOutboundGate gate;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public EvidenceCollector(CandidateResolutionService resolution, IssueImageService images,
-                             QwenOcrClient qwen, DecisionBudget budget, DecisionProperties config) {
+                             QwenOcrClient qwen, DecisionBudget budget, DecisionProperties config,
+                             DecisionOutboundGate gate) {
         this.resolution = resolution;
         this.images = images;
         this.qwen = qwen;
         this.budget = budget;
         this.config = config;
+        this.gate = gate != null ? gate : new DecisionOutboundGate(config);
+    }
+
+    public EvidenceCollector(CandidateResolutionService resolution, IssueImageService images,
+                             QwenOcrClient qwen, DecisionBudget budget, DecisionProperties config) {
+        this(resolution, images, qwen, budget, config, new DecisionOutboundGate(config));
     }
 
     public record Collection(List<CandidateResolutionService.RawCandidate> raws,
@@ -103,8 +113,19 @@ public class EvidenceCollector {
             reasons.add("VISION_CHANNEL_NOT_CONFIGURED");
             return new Collection(raws, legacy, attempts, reasons);
         }
+        if (gate != null) {
+            long deadlineNanos = java.time.Duration.ofSeconds(Math.max(1, config.getJobDeadlineSeconds())).toNanos();
+            DecisionOutboundGate.GateVerdict gv = gate.check(new DecisionOutboundGate.GateRequest(
+                    DecisionOutboundGate.Purpose.VISION, "QWEN-CROP", deadlineNanos,
+                    new DecisionOutboundGate.CapabilityView(qwen.configured(), null, null)));
+            if (!gv.allowed()) {
+                reasons.add(gv.reasonCode());
+                return new Collection(raws, legacy, attempts, reasons);
+            }
+        }
         boolean sent = false;
         boolean reserved = false;
+        String attemptId = null;
         try {
             IssueImageService.Snippet snippet = images.locateOne(bookId, page,
                     issue == null ? null : issue.id());
@@ -122,7 +143,13 @@ public class EvidenceCollector {
             }
             // 预留发生在真正外呼前一刻；本地证据定位本身不计费
             Long limit = config.getMonetaryBudgetMinor();
-            if (!budget.tryReserve(bookId, RESERVE_PER_VISION_CALL_MINOR, limit)) {
+            try {
+                attemptId = budget.reserve(bookId, "vision-crop", RESERVE_PER_VISION_CALL_MINOR, limit);
+            } catch (IOException e) {
+                reasons.add("VISION_BUDGET_UNAVAILABLE");
+                return new Collection(raws, legacy, attempts, reasons);
+            }
+            if (attemptId == null) {
                 reasons.add("VISION_BUDGET_REJECTED");
                 return new Collection(raws, legacy, attempts, reasons);
             }
@@ -134,16 +161,33 @@ public class EvidenceCollector {
                 if (image != null) { width = image.getWidth(); height = image.getHeight(); }
             } catch (Exception ignored) {
             }
+            budget.markSendIntent(bookId, attemptId);
             sent = true;
             attempts++;
             freshCalls.incrementAndGet();
             List<studio.bookhtml.domain.Block> reread =
                     qwen.recognize(snippet.png(), width, height, layout, cancelled);
+            try {
+                budget.settleReported(bookId, attemptId, RESERVE_PER_VISION_CALL_MINOR);
+            } catch (IOException ignored) {}
             String text = reread.stream().map(b -> b.original() == null ? "" : b.original())
                     .reduce("", String::concat).strip();
             if (text.isEmpty()) {
                 reasons.add("VISION_EMPTY");
                 return new Collection(raws, legacy, attempts, reasons);
+            }
+            int claimedStart = ref.startUtf16();
+            int claimedEnd = ref.endUtf16();
+            if ("region".equals(snippet.mode())) {
+                CandidateResolutionService.ExpandedSpan located =
+                        CandidateResolutionService.locateScope(frozenOriginal, text);
+                if (located != null) {
+                    claimedStart = located.startUtf16();
+                    claimedEnd = located.endUtf16();
+                } else {
+                    claimedStart = -1;
+                    claimedEnd = -1;
+                }
             }
             raws.add(new CandidateResolutionService.RawCandidate(text,
                     DecisionModels.SourceKind.CROP_OCR, "qwen-crop-ocr", null, null,
@@ -153,12 +197,15 @@ public class EvidenceCollector {
                             : DecisionModels.LocatorMode.REGION,
                     snippet.bbox() == null ? null : snippet.bbox().clone(), "crop-v1",
                     List.of("E-crop-" + freshCalls.get()), null,
-                    ref.startUtf16(), ref.endUtf16()));
+                    claimedStart, claimedEnd));
             return new Collection(raws, legacy, attempts, reasons);
         } catch (Exception e) {
             // 已发送则费用未知，保留预留；未发送则释放；失败不是“原文已正确”，不写假成功
-            if (sent) budget.settleUnknown(bookId);
-            else if (reserved) budget.release(bookId, RESERVE_PER_VISION_CALL_MINOR);
+            if (sent && attemptId != null) {
+                try { budget.retainUnknown(bookId, attemptId); } catch (Exception ignored) {}
+            } else if (reserved && attemptId != null) {
+                try { budget.releaseNotSent(bookId, attemptId); } catch (Exception ignored) {}
+            }
             reasons.add(sent ? "VISION_FAILED" : "VISION_NOT_SENT");
             return new Collection(raws, legacy, attempts, reasons);
         }

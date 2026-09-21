@@ -100,14 +100,25 @@ public final class QualityGate {
             Block out = results.get(e.getKey());
             if (!Objects.equals(e.getValue().original(), out.original()))
                 return GateVerdict.no("块 " + e.getKey() + " 原文被改写");
-            Set<String> resolvedBefore = new HashSet<>();
+            // JR-12: 完整保护已确认疑点的范围、replacement 及 ReviewResolution 核心载荷
+            Map<String, studio.bookhtml.domain.ContentIssue> sourceIssues = new LinkedHashMap<>();
             if (e.getValue().issues() != null) for (var issue : e.getValue().issues())
-                if (issue != null && issue.resolved() && issue.id() != null) resolvedBefore.add(issue.id());
-            Set<String> resolvedAfter = new HashSet<>();
+                if (issue != null && issue.id() != null && issue.resolved()) sourceIssues.put(issue.id(), issue);
+            Map<String, studio.bookhtml.domain.ContentIssue> outIssues = new LinkedHashMap<>();
             if (out.issues() != null) for (var issue : out.issues())
-                if (issue != null && issue.resolved() && issue.id() != null) resolvedAfter.add(issue.id());
-            if (!resolvedAfter.containsAll(resolvedBefore))
-                return GateVerdict.no("块 " + e.getKey() + " 已确认疑点丢失");
+                if (issue != null && issue.id() != null && issue.resolved()) outIssues.put(issue.id(), issue);
+            for (Map.Entry<String, studio.bookhtml.domain.ContentIssue> entry : sourceIssues.entrySet()) {
+                studio.bookhtml.domain.ContentIssue sIssue = entry.getValue();
+                studio.bookhtml.domain.ContentIssue oIssue = outIssues.get(entry.getKey());
+                if (oIssue == null)
+                    return GateVerdict.no("块 " + e.getKey() + " 已确认疑点 " + entry.getKey() + " 丢失");
+                if (sIssue.start() != oIssue.start() || sIssue.end() != oIssue.end())
+                    return GateVerdict.no("块 " + e.getKey() + " 已确认疑点 " + entry.getKey() + " 范围被篡改");
+                if (!Objects.equals(sIssue.replacement(), oIssue.replacement()))
+                    return GateVerdict.no("块 " + e.getKey() + " 已确认疑点 " + entry.getKey() + " 替换文本被篡改");
+                if (!Objects.equals(sIssue.resolution(), oIssue.resolution()))
+                    return GateVerdict.no("块 " + e.getKey() + " 已确认疑点 " + entry.getKey() + " 确认载荷被篡改");
+            }
         }
         return GateVerdict.ok();
     }
@@ -137,6 +148,22 @@ public final class QualityGate {
                     return GateVerdict.no("块 " + out.id() + " 引用未知来源");
                 if (!covered.add(ref))
                     return GateVerdict.no("来源 " + ref + " 被重复引用（拆分不在本轮合同内）");
+                // JR-12-T03: 检查来源块中已确认疑点是否被丢弃或篡改
+                Block src = sources.get(ref);
+                if (src != null && src.issues() != null) {
+                    for (var issue : src.issues()) {
+                        if (issue != null && issue.resolved()) {
+                            var outIssue = out.issues() == null ? null : out.issues().stream()
+                                    .filter(i -> i != null && issue.id().equals(i.id()))
+                                    .findFirst().orElse(null);
+                            if (outIssue == null || !outIssue.resolved())
+                                return GateVerdict.no("合并丢弃了已确认疑点 " + issue.id());
+                            if (!Objects.equals(issue.replacement(), outIssue.replacement())
+                                    || !Objects.equals(issue.resolution(), outIssue.resolution()))
+                                return GateVerdict.no("合并篡改了已确认疑点 " + issue.id() + " 的确认载荷");
+                        }
+                    }
+                }
             }
             StringBuilder expected = new StringBuilder();
             for (String ref : refs) expected.append(sources.get(ref).original() == null ? "" : sources.get(ref).original());
@@ -170,8 +197,15 @@ public final class QualityGate {
             List<String> refs = out.sourceIds() == null ? List.of() : out.sourceIds();
             if (refs.isEmpty() || refs.stream().anyMatch(ref -> ref == null || ref.isBlank() || !sources.containsKey(ref)))
                 return GateVerdict.no("新块 " + out.id() + " 缺少有效视觉来源引用");
+            // JR-12-T04: sourceRect 合法性与边界校验
             if (out.sourceRect() == null || out.sourceRect().length != 4)
                 return GateVerdict.no("新块 " + out.id() + " 缺少原图区域证据");
+            for (double coord : out.sourceRect()) {
+                if (Double.isNaN(coord) || Double.isInfinite(coord) || coord < 0 || coord > 100000)
+                    return GateVerdict.no("新块 " + out.id() + " 原图区域坐标非法");
+            }
+            if (out.sourceRect()[2] <= 0 || out.sourceRect()[3] <= 0)
+                return GateVerdict.no("新块 " + out.id() + " 原图区域尺寸非法");
             accounted.addAll(refs);
         }
         if (!accounted.containsAll(sources.keySet())) return GateVerdict.no("部分来源既未保留也未被恢复引用");

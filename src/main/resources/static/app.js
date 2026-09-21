@@ -365,11 +365,18 @@ function renderReview() {
 const decisionPanel = createDecisionPanel({
   getSession: () => state.book
     ? { bookId: state.book.id, page: state.currentPage, epoch: state.editorEpoch } : null,
-  hasDirty: () => state.dirty,
-  onAccepted: () => {
-    // 接受已推进服务端版本：失效本页缓存后强制重载，不读回可能被推进的旧版本
+  onAccepted: (result) => {
+    // 接受已推进服务端版本：失效本页缓存；若有未保存草稿则保留草稿并同步版本，否则重载页面
     state.pageCache.delete(state.currentPage);
-    goToPage(state.currentPage, { force: true });
+    if (state.dirty) {
+      if (state.page) state.page.revision = result?.pageRevision || (state.page.revision + 1);
+      const targetIssue = (state.blocks || []).flatMap(b => b.issues || []).find(i => i && i.id === state.selectedIssueId);
+      if (targetIssue) targetIssue.resolved = true;
+      renderReview();
+      renderDecisionSection();
+    } else {
+      goToPage(state.currentPage, { force: true });
+    }
   },
   onRecommendation: (issueId, info) => {
     state.assistMap[issueId] = info;

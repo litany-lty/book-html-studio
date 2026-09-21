@@ -24,13 +24,7 @@ public class SharedTransport implements DecisionTransport, AutoCloseable {
     @Override
     public BoundedHttp.Response send(HttpRequest request, long deadlineNanos, int maxBytes,
                                      BooleanSupplier cancelled) throws IOException {
-        try {
-            return http.send(request, deadlineNanos, maxBytes, cancelled);
-        } catch (BoundedHttp.BoundedHttpException e) {
-            throw e;
-        } catch (IOException e) {
-            throw new IOException("IO:有界传输失败", e);
-        }
+        return http.send(request, deadlineNanos, maxBytes, cancelled);
     }
 
     @Override

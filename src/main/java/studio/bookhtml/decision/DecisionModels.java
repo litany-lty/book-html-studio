@@ -81,12 +81,21 @@ public final class DecisionModels {
             String pdfSha256, int sourcePageNumber, String sourceSpanHash, String cropHash,
             LocatorMode locatorMode, double[] bbox, String transformVersion,
             AlignmentStatus alignmentStatus, List<String> evidenceRefs,
-            Double rawConfidence, String normalizerVersion, Instant createdAt) {
+            Double rawConfidence, String normalizerVersion, Instant createdAt,
+            String comparisonText, String textLayer, Boolean originalScriptKnown) {
+        /** JR-07：比较用文字层。ORIGINAL_TRANSCRIPT=原字转录；LEGACY_DISPLAY_HYPOTHESIS=旧推测显示（假设，非证实）。 */
+        public static final String LAYER_ORIGINAL = "ORIGINAL_TRANSCRIPT";
+        public static final String LAYER_LEGACY_HYPOTHESIS = "LEGACY_DISPLAY_HYPOTHESIS";
         public Candidate {
             requireText("candidateId", candidateId);
             if (sourceKind == null) throw new IllegalArgumentException("sourceKind 为空");
             if (originalScriptText == null && (originalUnknownReason == null || originalUnknownReason.isBlank()))
                 throw new IllegalArgumentException("原字未知须说明原因");
+            if (comparisonText == null || comparisonText.isBlank())
+                throw new IllegalArgumentException("比较文字为空");
+            if (textLayer == null
+                    || (!LAYER_ORIGINAL.equals(textLayer) && !LAYER_LEGACY_HYPOTHESIS.equals(textLayer)))
+                throw new IllegalArgumentException("文字层级非法");
             if (rawConfidence != null && !(rawConfidence >= 0 && rawConfidence <= 1
                     && Double.isFinite(rawConfidence)))
                 throw new IllegalArgumentException("rawConfidence 非法");
@@ -97,6 +106,27 @@ public final class DecisionModels {
             upstreamEvidenceIds = upstreamEvidenceIds == null ? List.of() : List.copyOf(upstreamEvidenceIds);
             evidenceRefs = List.copyOf(evidenceRefs);
             bbox = bbox == null ? null : bbox.clone();
+        }
+
+        public Candidate(
+                String candidateId, String originalScriptText, String originalUnknownReason,
+                String simplifiedDisplayText, String converterVersion,
+                SourceKind sourceKind, String producer, String requestedModel,
+                String reportedModel, String runId,
+                String acquisitionGroup, List<String> upstreamEvidenceIds,
+                String pdfSha256, int sourcePageNumber, String sourceSpanHash, String cropHash,
+                LocatorMode locatorMode, double[] bbox, String transformVersion,
+                AlignmentStatus alignmentStatus, List<String> evidenceRefs,
+                Double rawConfidence, String normalizerVersion, Instant createdAt) {
+            this(candidateId, originalScriptText, originalUnknownReason,
+                    simplifiedDisplayText, converterVersion, sourceKind, producer,
+                    requestedModel, reportedModel, runId, acquisitionGroup,
+                    upstreamEvidenceIds, pdfSha256, sourcePageNumber, sourceSpanHash, cropHash,
+                    locatorMode, bbox, transformVersion, alignmentStatus, evidenceRefs,
+                    rawConfidence, normalizerVersion, createdAt,
+                    originalScriptText != null ? originalScriptText : (simplifiedDisplayText != null ? simplifiedDisplayText : "unknown"),
+                    originalScriptText != null ? LAYER_ORIGINAL : LAYER_LEGACY_HYPOTHESIS,
+                    originalScriptText != null);
         }
 
         /** 语义稳定投影：排除 runId/模型回执/时间等易变字段，语义去重与缓存键用它。 */
@@ -122,6 +152,9 @@ public final class DecisionModels {
             map.put("evidenceRefs", new ArrayList<>(evidenceRefs));
             map.put("rawConfidence", rawConfidence);
             map.put("normalizerVersion", normalizerVersion);
+            map.put("comparisonText", comparisonText);
+            map.put("textLayer", textLayer);
+            map.put("originalScriptKnown", originalScriptKnown);
             return map;
         }
     }
@@ -203,6 +236,7 @@ public final class DecisionModels {
             List<String> reasonCodes, List<String> evidenceRefs,
             Map<String, Long> usageReported, Long estimatedCostMinor, long reservedCostMinor,
             CostStatus costStatus, String scoresJson,
+            String admittedRecommendationId, String transportId,
             Instant createdAt, Instant sentAt, Instant completedAt,
             Instant deadlineAt) {
         public DecisionEvidence {
@@ -226,6 +260,35 @@ public final class DecisionModels {
             reasonCodes = reasonCodes == null ? List.of() : List.copyOf(reasonCodes);
             evidenceRefs = evidenceRefs == null ? List.of() : List.copyOf(evidenceRefs);
             usageReported = usageReported == null ? null : Map.copyOf(usageReported);
+        }
+
+        public DecisionEvidence(
+                String schemaVersion, String decisionId, String logicalRequestId, String physicalAttemptId,
+                String snapshotHash, String candidateSetHash, String requestHash,
+                String questionTemplateVersion,
+                String provider, String endpointIdentity, String requestedModel, String reportedModel,
+                String providerContractVersion, String responseHash, String providerRequestId,
+                ExecutionStatus executionStatus, NormalizedChoice choice, NormalizedNoul evidenceGap,
+                String policyVersion, String thresholdProfileVersion,
+                Verdict verdict, Applicability applicabilityAtWrite,
+                List<String> reasonCodes, List<String> evidenceRefs,
+                Map<String, Long> usageReported, Long estimatedCostMinor, long reservedCostMinor,
+                CostStatus costStatus, String scoresJson,
+                Instant createdAt, Instant sentAt, Instant completedAt,
+                Instant deadlineAt) {
+            this(schemaVersion, decisionId, logicalRequestId, physicalAttemptId,
+                    snapshotHash, candidateSetHash, requestHash,
+                    questionTemplateVersion,
+                    provider, endpointIdentity, requestedModel, reportedModel,
+                    providerContractVersion, responseHash, providerRequestId,
+                    executionStatus, choice, evidenceGap,
+                    policyVersion, thresholdProfileVersion,
+                    verdict, applicabilityAtWrite,
+                    reasonCodes, evidenceRefs,
+                    usageReported, estimatedCostMinor, reservedCostMinor,
+                    costStatus, scoresJson,
+                    null, "default",
+                    createdAt, sentAt, completedAt, deadlineAt);
         }
     }
 

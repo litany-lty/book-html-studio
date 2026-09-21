@@ -135,6 +135,7 @@ public class DecisionStore {
     }
 
     public Optional<DecisionModels.DecisionSnapshot> loadSnapshot(String bookId, String snapshotHash) throws IOException {
+        checkLeaf(snapshotHash);
         return readIsolated(decisionsDir(bookId).resolve("snapshots").resolve(snapshotHash + ".json"),
                 DecisionModels.DecisionSnapshot.class);
     }
@@ -145,6 +146,7 @@ public class DecisionStore {
     }
 
     public Optional<DecisionModels.CandidateSet> loadCandidateSet(String bookId, String candidateSetHash) throws IOException {
+        checkLeaf(candidateSetHash);
         return readIsolated(decisionsDir(bookId).resolve("candidates").resolve(candidateSetHash + ".json"),
                 DecisionModels.CandidateSet.class);
     }
@@ -155,6 +157,7 @@ public class DecisionStore {
     }
 
     public Optional<DecisionModels.DecisionEvidence> loadResult(String bookId, String decisionId) throws IOException {
+        checkLeaf(decisionId);
         return readIsolated(decisionsDir(bookId).resolve("results").resolve(decisionId + ".json"),
                 DecisionModels.DecisionEvidence.class);
     }
@@ -165,6 +168,7 @@ public class DecisionStore {
     }
 
     public Optional<DecisionJob> loadJob(String bookId, String jobId) throws IOException {
+        checkLeaf(jobId);
         return readIsolated(decisionsDir(bookId).resolve("jobs").resolve(jobId + ".json"), DecisionJob.class);
     }
 
@@ -323,6 +327,21 @@ public class DecisionStore {
             if (createdAt == null || updatedAt == null || deadlineAt == null)
                 throw new IllegalArgumentException("时间为空");
             // target 可空：旧作业无该字段时读为 null，按遗留关闭处理，不复用、不接受
+        }
+
+        public DecisionJob(
+                String jobId, String state, int stateVersion, String progressStage,
+                String admissionKey, String requestHash,
+                String bookId, int sourcePageNumber, String blockId, String issueId,
+                String snapshotHash, String candidateSetHash, String decisionId,
+                String clientOperationId, String verdict, List<String> reasonCodes,
+                long reservedCostMinor, String costStatus, String cancellationState,
+                Instant createdAt, Instant updatedAt, Instant deadlineAt, boolean allowFreshVision) {
+            this(jobId, state, stateVersion, progressStage, admissionKey, requestHash,
+                    bookId, sourcePageNumber, blockId, issueId, snapshotHash, candidateSetHash,
+                    decisionId, clientOperationId, verdict, reasonCodes, reservedCostMinor,
+                    costStatus, cancellationState, createdAt, updatedAt, deadlineAt,
+                    allowFreshVision, null);
         }
     }
 

@@ -89,4 +89,54 @@ class DecisionStoreTest {
         assertNull(decisions.findByAdmission(id, "other-key"));
         assertEquals("job-1", decisions.loadJob(id, "job-1").orElseThrow().jobId());
     }
+
+    @Test void checkLeafRejectsPathTraversalAndInvalidIds() throws Exception {
+        // JR-11-T03: 拒绝斜杠、反斜杠、点路径与非预期格式
+        assertThrows(IllegalArgumentException.class, () -> DecisionStore.checkLeaf("../evil"));
+        assertThrows(IllegalArgumentException.class, () -> DecisionStore.checkLeaf("sub/dir"));
+        assertThrows(IllegalArgumentException.class, () -> DecisionStore.checkLeaf("sub\\dir"));
+        assertThrows(IllegalArgumentException.class, () -> DecisionStore.checkLeaf(""));
+        assertThrows(IllegalArgumentException.class, () -> DecisionStore.checkLeaf(null));
+
+        // load 方法在参数含非法路径时立即拒绝，不读受控目录之外的文件
+        BookStore store = store();
+        String id = book(store);
+        DecisionStore decisions = new DecisionStore(store, new ObjectMapper().findAndRegisterModules());
+        assertThrows(IllegalArgumentException.class, () -> decisions.loadJob(id, "../outside"));
+        assertThrows(IllegalArgumentException.class, () -> decisions.loadSnapshot(id, "../../outside"));
+        assertThrows(IllegalArgumentException.class, () -> decisions.loadResult(id, "foo/bar"));
+        assertThrows(IllegalArgumentException.class, () -> decisions.loadCandidateSet(id, "foo\\bar"));
+    }
+
+    @Test void dirLimitAllowsOverwriteOfExistingJob() throws Exception {
+        // JR-11-T01: 达到条目上限仍允许已有任务更新终态
+        BookStore store = store();
+        String id = book(store);
+        DecisionStore decisions = new DecisionStore(store, new ObjectMapper().findAndRegisterModules());
+        Instant now = Instant.now();
+        DecisionStore.DecisionJob job = new DecisionStore.DecisionJob("job-existing", "QUEUED", 1, "LOCATING",
+                "admission-1", null, id, 1, "b1", "i1", null, null, null, "op-1", null, List.of(),
+                0, "UNKNOWN", "NONE", now, now, now.plusSeconds(180), false);
+        decisions.saveJob(id, job);
+
+        // 模拟目录被其他条目填满至 MAX_FILES_PER_DIR
+        Path jobsDir = decisions.decisionsDir(id).resolve("jobs");
+        for (int i = 0; i < DecisionStore.MAX_FILES_PER_DIR; i++) {
+            Path dummy = jobsDir.resolve("dummy-" + i + ".json");
+            if (!Files.exists(dummy)) Files.writeString(dummy, "{}");
+        }
+
+        // 新增文件被拒绝
+        DecisionStore.DecisionJob newJob = new DecisionStore.DecisionJob("job-new", "QUEUED", 1, "LOCATING",
+                "admission-new", null, id, 1, "b1", "i1", null, null, null, "op-new", null, List.of(),
+                0, "UNKNOWN", "NONE", now, now, now.plusSeconds(180), false);
+        assertThrows(java.io.IOException.class, () -> decisions.saveJob(id, newJob));
+
+        // 已有文件更新成功落盘
+        DecisionStore.DecisionJob updatedJob = new DecisionStore.DecisionJob("job-existing", "SUCCEEDED", 2, "DONE",
+                "admission-1", null, id, 1, "b1", "i1", null, null, "dec-1", "op-1", "RECOMMEND", List.of(),
+                0, "UNKNOWN", "NONE", now, now, now.plusSeconds(180), false);
+        assertDoesNotThrow(() -> decisions.saveJob(id, updatedJob));
+        assertEquals("SUCCEEDED", decisions.loadJob(id, "job-existing").orElseThrow().state());
+    }
 }

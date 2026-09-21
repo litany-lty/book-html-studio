@@ -24,12 +24,34 @@ public class DecisionAcceptService {
     private final BookStore store;
     private final DecisionStore decisions;
     private final TraditionalConverter converter;
+    private final PdfIdentity pdfIdentity;
+    private final studio.bookhtml.config.DecisionProperties config;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public DecisionAcceptService(BookStore store, DecisionStore decisions,
-                                 TraditionalConverter converter) {
+                                 TraditionalConverter converter, PdfIdentity pdfIdentity,
+                                 studio.bookhtml.config.DecisionProperties config) {
         this.store = store;
         this.decisions = decisions;
         this.converter = converter;
+        this.pdfIdentity = pdfIdentity != null ? pdfIdentity : new PdfIdentity();
+        this.config = config != null ? config : assistConfig();
+    }
+
+    public DecisionAcceptService(BookStore store, DecisionStore decisions,
+                                 TraditionalConverter converter, PdfIdentity pdfIdentity) {
+        this(store, decisions, converter, pdfIdentity, assistConfig());
+    }
+
+    public DecisionAcceptService(BookStore store, DecisionStore decisions,
+                                 TraditionalConverter converter) {
+        this(store, decisions, converter, new PdfIdentity(), assistConfig());
+    }
+
+    private static studio.bookhtml.config.DecisionProperties assistConfig() {
+        studio.bookhtml.config.DecisionProperties p = new studio.bookhtml.config.DecisionProperties();
+        p.setMode("ASSIST");
+        return p;
     }
 
     public record AcceptBody(String clientOperationId, String blockId, int expectedPageRevision,
@@ -48,6 +70,9 @@ public class DecisionAcceptService {
                 || body.candidateSetHash() == null || body.candidateSetHash().isBlank()
                 || body.candidateId() == null || body.candidateId().isBlank() || sourcePage < 1)
             throw new ApiException(HttpStatus.BAD_REQUEST, "参数非法");
+        if (config != null && !"ASSIST".equalsIgnoreCase(config.getMode()))
+            throw new ApiException(HttpStatus.FORBIDDEN,
+                    "当前决策模式未开放接受建议（当前为 " + config.getMode() + "，仅在 ASSIST 模式下可用）");
         // 确认请求必须经用户对照原图；没有原图时只能普通人工输入，不能走此路径冒充
         if (!body.userAttestedSourceCheck())
             throw new ApiException(HttpStatus.BAD_REQUEST, "接受须确认已对照原图");
@@ -61,8 +86,42 @@ public class DecisionAcceptService {
         if (!ACCEPTABLE_VERDICTS.contains(evidence.verdict().name()))
             throw new ApiException(HttpStatus.CONFLICT,
                     "当前建议不可接受：" + evidence.verdict().name());
+        DecisionModels.DecisionSnapshot snapshot;
+        try {
+            snapshot = decisions.loadSnapshot(bookId, evidence.snapshotHash())
+                    .orElseThrow(() -> new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "建议快照不可用"));
+        } catch (IOException e) {
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "建议读取失败");
+        }
+        if (!evidence.candidateSetHash().equals(snapshot.candidateSetHash()))
+            throw new ApiException(HttpStatus.CONFLICT, "快照候选集合与建议结果不一致");
         if (!evidence.candidateSetHash().equals(body.candidateSetHash()))
             throw new ApiException(HttpStatus.CONFLICT, "候选集合已变化，请刷新后重试");
+
+        // JR-01: 完整目标绑定核验
+        DecisionModels.IssueRef ref = snapshot.issueRef();
+        if (!bookId.equals(ref.bookId())
+                || sourcePage != ref.sourcePageNumber()
+                || !body.blockId().equals(ref.blockId())
+                || !issueId.equals(ref.issueId())
+                || body.expectedPageRevision() != ref.pageRevision()
+                || !body.issueBasisHash().equals(ref.issueBasisHash())) {
+            throw new studio.bookhtml.store.PageConflictException(ref.pageRevision(),
+                    "建议目标与请求不匹配，拒绝跨位置或跨版本接受");
+        }
+
+        // JR-01-T04: 核对来源 PDF 内容身份
+        try {
+            String currentPdfSha256 = pdfIdentity.sha256(store.pdf(bookId));
+            if (!ref.pdfSha256().equals(currentPdfSha256)) {
+                throw new ApiException(HttpStatus.CONFLICT, "来源 PDF 内容已变化，旧建议不可接受");
+            }
+        } catch (ApiException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "来源 PDF 读取失败");
+        }
+
         DecisionModels.CandidateSet set;
         try {
             set = decisions.loadCandidateSet(bookId, evidence.candidateSetHash())
@@ -76,13 +135,16 @@ public class DecisionAcceptService {
         // 原字未知的旧简体推测不能伪造 originalReplacement，转普通人工录入
         if (candidate.originalScriptText() == null || candidate.originalScriptText().isBlank())
             throw new ApiException(HttpStatus.CONFLICT, "该候选无原字转录，请手工录入确认");
-        DecisionModels.DecisionSnapshot snapshot;
-        try {
-            snapshot = decisions.loadSnapshot(bookId, evidence.snapshotHash())
-                    .orElseThrow(() -> new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "建议快照不可用"));
-        } catch (IOException e) {
-            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "建议读取失败");
-        }
+        // JR-03: 候选范围对齐检查
+        if (candidate.alignmentStatus() != DecisionModels.AlignmentStatus.EXACT)
+            throw new ApiException(HttpStatus.CONFLICT, "候选范围未精确对齐，不得直接接受");
+        if (!ref.sourceSpanHash().equals(candidate.sourceSpanHash()))
+            throw new ApiException(HttpStatus.CONFLICT, "候选对应文本区间与当前问题不匹配");
+        if (candidate.sourcePageNumber() != ref.sourcePageNumber())
+            throw new ApiException(HttpStatus.CONFLICT, "候选页码与当前问题不匹配");
+        if (!ref.pdfSha256().equals(candidate.pdfSha256()))
+            throw new ApiException(HttpStatus.CONFLICT, "候选来源 PDF 与当前问题不匹配");
+
         String simplified = converter.toSimplified(candidate.originalScriptText());
         BookStore.IssueAcceptSpec spec = new BookStore.IssueAcceptSpec(body.blockId(), issueId,
                 body.issueBasisHash(), body.candidateSetHash(), candidate.candidateId(),

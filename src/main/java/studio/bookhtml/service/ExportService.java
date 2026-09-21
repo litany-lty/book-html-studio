@@ -91,14 +91,20 @@ public class ExportService {
                     } catch (Exception e) {
                         continue;
                     }
-                    if (current == null || current.get("recommendedCandidateId") == null) continue;
+                    if (current == null) continue;
+                    Object candidateId = current.get("admittedRecommendationId") != null
+                            ? current.get("admittedRecommendationId")
+                            : (current.get("modelPreferredCandidateId") != null
+                                    ? current.get("modelPreferredCandidateId")
+                                    : current.get("recommendedCandidateId"));
+                    if (candidateId == null) continue;
                     @SuppressWarnings("unchecked")
                     List<Map<String, Object>> candidates =
                             (List<Map<String, Object>>) current.get("candidates");
                     if (candidates == null) continue;
                     Map<String, Object> recommended = null;
                     for (Map<String, Object> candidate : candidates)
-                        if (current.get("recommendedCandidateId").equals(candidate.get("candidateId")))
+                        if (candidateId.equals(candidate.get("candidateId")))
                             recommended = candidate;
                     if (recommended == null) continue;
                     String quote = null;

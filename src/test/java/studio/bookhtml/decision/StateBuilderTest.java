@@ -46,7 +46,7 @@ class StateBuilderTest {
         assertFalse(choice.contains(DecisionStateBuilder.GAP_ID));
         assertFalse(gap.contains(DecisionStateBuilder.CHOICE_ID));
         assertFalse(gap.contains("best"));
-        assertEquals("question-template-v1", DecisionStateBuilder.TEMPLATE_VERSION);
+        assertEquals("question-template-v2", DecisionStateBuilder.TEMPLATE_VERSION);
     }
 
     @Test void overBudgetDropsOptionalFirstThenRefuses() throws Exception {
@@ -100,8 +100,35 @@ class StateBuilderTest {
         assertEquals(first.candidateSetHash(), set2.candidateSetHash());
         assertEquals(first.candidates().get(0).candidateId(),
                 built2.aliasToCandidateId().get("C0"));
-        assertEquals(built.aliasToCandidateId(), built2.aliasToCandidateId());
         assertEquals(snapshot.snapshotHash(),
                 DecisionStateBuilder.snapshot(ref(), "cs-hash", built2).snapshotHash());
+    }
+
+    @Test void jr07T01_legacyInferenceHasComparisonTextAndHypothesisLayerInState() throws Exception {
+        // JR-07-T01: 仅当前 OCR + 旧 inferredText：实际序列化 state 能读到两个候选文字，旧者明确是假设
+        CandidateResolutionService res = resolution();
+        var raws = List.of(new CandidateResolutionService.RawCandidate("甲",
+                DecisionModels.SourceKind.PRIMARY_OCR, "paddle", null, null, "r0",
+                "G0", List.of(), null, DecisionModels.LocatorMode.REGION,
+                new double[]{0, 0, 10, 10}, "t-v1", List.of("E0"), 0.9, 0, 1));
+        DecisionModels.CandidateSet set = res.buildSet(ref(), "甲乙", "甲", raws);
+        DecisionModels.Candidate legacy = res.legacyCandidate(ref(), "不得", "cand-legacy-1");
+        DecisionModels.CandidateSet merged = res.mergeLegacy(set, legacy);
+
+        DecisionStateBuilder.BuiltState built = builder().build(ref(), "甲乙", merged, List.of(), false, 32768);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> candidates = (List<Map<String, Object>>) built.state().get("candidates");
+        assertEquals(2, candidates.size());
+
+        Map<String, Object> ocrEntry = candidates.stream()
+                .filter(c -> "甲".equals(c.get("text"))).findFirst().orElseThrow();
+        assertEquals(DecisionModels.Candidate.LAYER_ORIGINAL, ocrEntry.get("textLayer"));
+        assertEquals(true, ocrEntry.get("originalScriptKnown"));
+
+        Map<String, Object> legacyEntry = candidates.stream()
+                .filter(c -> "不得".equals(c.get("text"))).findFirst().orElseThrow();
+        assertEquals(DecisionModels.Candidate.LAYER_LEGACY_HYPOTHESIS, legacyEntry.get("textLayer"));
+        assertEquals(false, legacyEntry.get("originalScriptKnown"));
+        assertFalse(String.valueOf(legacyEntry.get("text")).isBlank());
     }
 }

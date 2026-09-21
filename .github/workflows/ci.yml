@@ -28,5 +28,11 @@ jobs:
           for file in src/main/resources/static/*.js src/main/resources/export/*.js scripts/*.mjs; do
             node --check "$file"
           done
+      - name: Python verification tests
+        shell: bash
+        run: |
+          python3 -m py_compile scripts/verification/*.py
+          python3 scripts/verification/shadow_eval.py --selftest
+          python3 scripts/verification/test_shadow_eval.py
       - name: Test and package
         run: mvn --batch-mode verify

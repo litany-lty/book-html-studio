@@ -35,7 +35,7 @@ class BudgetConcurrencyTest {
         ExecutorService pool = Executors.newFixedThreadPool(threads);
         CountDownLatch ready = new CountDownLatch(threads);
         CountDownLatch go = new CountDownLatch(1);
-        AtomicInteger granted = new AtomicInteger();
+        java.util.concurrent.ConcurrentLinkedQueue<String> grantedIds = new java.util.concurrent.ConcurrentLinkedQueue<>();
         try {
             for (int i = 0; i < threads; i++) {
                 pool.submit(() -> {
@@ -43,7 +43,10 @@ class BudgetConcurrencyTest {
                     try { assertTrue(go.await(5, TimeUnit.SECONDS)); } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                     }
-                    if (budget.tryReserve(bookId, 1, 2L)) granted.incrementAndGet();
+                    try {
+                        String id = budget.reserve(bookId, "test", 1, 2L);
+                        if (id != null) grantedIds.add(id);
+                    } catch (Exception ignored) {}
                 });
             }
             assertTrue(ready.await(5, TimeUnit.SECONDS));
@@ -53,17 +56,19 @@ class BudgetConcurrencyTest {
         } finally {
             pool.shutdownNow();
         }
-        assertEquals(2, granted.get());
+        assertEquals(2, grantedIds.size());
         assertEquals(2, budget.reservedMinor(bookId));
+        String first = grantedIds.poll();
+        String second = grantedIds.poll();
         // 未知费用保留预留，不记 0
-        budget.settleUnknown(bookId);
+        budget.retainUnknown(bookId, first);
         assertEquals(2, budget.reservedMinor(bookId));
         // 真实结算按合同扣减
-        budget.settleReported(bookId, 1, 1);
+        budget.settleReported(bookId, first, 1);
         assertEquals(1, budget.reservedMinor(bookId));
         assertEquals(1, budget.reportedMinor(bookId));
         // 未发送取消释放
-        budget.release(bookId, 1);
+        budget.releaseNotSent(bookId, second);
         assertEquals(0, budget.reservedMinor(bookId));
     }
 }

@@ -54,7 +54,10 @@ export function createDecisionPanel(deps) {
   let disposed = false;
   let fetchController = null;
   let pollTimer = 0;
-  let current = null; // {bookId, page, epoch, blockId, issueId, basis, revision}
+  let panelEpoch = 0;
+  let acceptInFlight = false;
+  let inFlightOperationId = null;
+  let current = null; // {bookId, page, epoch, panelEpoch, blockId, issueId, basis, revision, candidateSetHash}
 
   function session() {
     return getSession();
@@ -62,8 +65,13 @@ export function createDecisionPanel(deps) {
 
   function sameScope(snapshot) {
     const s = session();
-    return s && snapshot
-      && s.bookId === snapshot.bookId && s.page === snapshot.page && s.epoch === snapshot.epoch;
+    return Boolean(s && snapshot && current
+      && s.bookId === snapshot.bookId
+      && s.page === snapshot.page
+      && s.epoch === snapshot.epoch
+      && snapshot.panelEpoch === current.panelEpoch
+      && snapshot.blockId === current.blockId
+      && snapshot.issueId === current.issueId);
   }
 
   function abortFlight() {
@@ -83,7 +91,7 @@ export function createDecisionPanel(deps) {
     document.querySelectorAll('[data-decision-panel] [data-needs-clean]').forEach(button => {
       const action = button.dataset.action;
       if (action !== 'compare' && action !== 'vision' && action !== 'accept') return;
-      button.disabled = Boolean(dirty);
+      button.disabled = Boolean(dirty) || (action === 'accept' && acceptInFlight);
       button.title = dirty ? '有未保存草稿，请先保存' : (titles[action] || '');
     });
   }
@@ -100,13 +108,11 @@ export function createDecisionPanel(deps) {
       : `op-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
 
-  async function loadBasis(blockId, issueId) {
-    const s = session();
-    const snapshot = { ...s };
+  async function loadBasis(scope) {
     fetchController?.abort();
     fetchController = new AbortController();
-    const data = await api.decisions(s.bookId, s.page, issueId, fetchController.signal);
-    if (!sameScope(snapshot)) throw Object.assign(new Error('已切换页面'), { name: 'StaleRequest' });
+    const data = await api.decisions(scope.bookId, scope.page, scope.issueId, fetchController.signal);
+    if (!sameScope(scope)) throw Object.assign(new Error('已切换疑点或页面'), { name: 'StaleRequest' });
     return { basis: data.basis, current: data.current, history: data.history || [] };
   }
 
@@ -116,23 +122,21 @@ export function createDecisionPanel(deps) {
       showError(new Error('有未保存草稿，请先保存后再评估；评估只针对已保存内容。'));
       return;
     }
-    const s = session();
-    const snapshot = { ...s, blockId: current.blockId, issueId: current.issueId };
-    const scope = { bookId: s.bookId, page: s.page, epoch: s.epoch };
+    const scope = { ...current };
     fetchController?.abort();
     fetchController = new AbortController();
     const signal = fetchController.signal;
     renderStatus(`正在创建评估任务…`);
     try {
-      const job = await api.decisionJobsCreate(s.bookId, s.page, current.issueId, {
+      const job = await api.decisionJobsCreate(scope.bookId, scope.page, scope.issueId, {
         clientOperationId: uuid(),
-        blockId: current.blockId,
-        expectedPageRevision: current.revision,
-        issueBasisHash: current.basis,
+        blockId: scope.blockId,
+        expectedPageRevision: scope.revision,
+        issueBasisHash: scope.basis,
         allowFreshVision,
       }, signal);
       if (!sameScope(scope)) return;
-      pollJob(job.jobId);
+      pollJob(job.jobId, scope);
     } catch (error) {
       if (error?.name === 'StaleRequest') return;
       if (!sameScope(scope)) return;
@@ -140,14 +144,12 @@ export function createDecisionPanel(deps) {
     }
   }
 
-  async function pollJob(jobId) {
+  async function pollJob(jobId, scope) {
     if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = 0; }
-    const s = session();
-    const scope = { ...s };
     const tick = async () => {
       if (disposed || !sameScope(scope)) return;
       try {
-        const job = await api.decisionJob(s.bookId, jobId, fetchController?.signal);
+        const job = await api.decisionJob(scope.bookId, jobId, fetchController?.signal);
         if (!sameScope(scope)) return;
         if (TERMINAL.has(job.jobState)) {
           await refresh();
@@ -164,12 +166,10 @@ export function createDecisionPanel(deps) {
     await tick();
   }
 
-  async function cancelJob(jobId, stateVersion) {
-    const s = session();
-    const scope = { ...s };
+  async function cancelJob(jobId, stateVersion, scope) {
     try {
       // 明确取消该决策作业（绑定 jobId 与状态版本）；关闭面板不等同取消。
-      await api.decisionJobCancel(s.bookId, jobId, { expectedStateVersion: stateVersion });
+      await api.decisionJobCancel(scope.bookId, jobId, { expectedStateVersion: stateVersion });
       if (!sameScope(scope)) return;
       await refresh();
     } catch (error) {
@@ -178,41 +178,51 @@ export function createDecisionPanel(deps) {
     }
   }
 
-  async function acceptDecision(decisionId, candidateId, basis, revision, operationId) {
-    const s = session();
-    const scope = { ...s };
+  async function acceptDecision(decisionId, candidateId, basis, revision, scope) {
+    if (acceptInFlight) return;
     if (hasDirty()) {
       showError(new Error('有未保存草稿，请先保存后再确认；确认只针对已保存内容。'));
       return;
     }
+    const operationId = inFlightOperationId || uuid();
+    inFlightOperationId = operationId;
+    acceptInFlight = true;
     renderStatus('正在提交确认…');
+    syncDraftGuard(true);
     try {
-      const result = await api.decisionAccept(s.bookId, s.page, current.issueId, decisionId, {
+      const result = await api.decisionAccept(scope.bookId, scope.page, scope.issueId, decisionId, {
         clientOperationId: operationId,
-        blockId: current.blockId,
+        blockId: scope.blockId,
         expectedPageRevision: revision,
         issueBasisHash: basis,
-        candidateSetHash: current.candidateSetHash,
+        candidateSetHash: scope.candidateSetHash,
         candidateId,
         userAttestedSourceCheck: true,
       });
+      inFlightOperationId = null;
+      acceptInFlight = false;
       if (!sameScope(scope)) return;
       onAccepted(result);
     } catch (error) {
+      acceptInFlight = false;
       // 超时/断网读回核实：按 operationId 而不是文本碰巧相同判断成功
       if (error?.name === 'TimeoutError' || error?.name === 'TypeError') {
         try {
-          const remote = await api.page(s.bookId, s.page);
+          const remote = await api.page(scope.bookId, scope.page);
           const confirmed = (remote.blocks || []).flatMap(b => (b.issues || []).map(i => ({ b, i })))
-            .find(({ i }) => i.id === current.issueId && i.resolution?.clientOperationId === operationId);
+            .find(({ i }) => i.id === scope.issueId && i.resolution?.clientOperationId === operationId);
           if (confirmed && sameScope(scope)) {
+            inFlightOperationId = null;
             onAccepted({ pageRevision: remote.revision, idempotent: true, resolved: true });
             return;
           }
-        } catch (_) { /* 读回失败则报原错 */ }
+        } catch (_) { /* 读回失败则保留 operationId 供重试 */ }
+      } else {
+        inFlightOperationId = null;
       }
       if (!sameScope(scope)) return;
       renderError(error);
+      syncDraftGuard(hasDirty());
     }
   }
 
@@ -239,18 +249,24 @@ export function createDecisionPanel(deps) {
   async function refresh() {
     const host = document.querySelector('[data-decision-panel]');
     if (!host || !current) return;
-    const s = session();
-    const scope = { ...s, blockId: current.blockId, issueId: current.issueId };
+    const scope = { ...current };
     try {
-      const { basis, current: decision, history } = await loadBasis(current.blockId, current.issueId);
+      const { basis, current: decision, history } = await loadBasis(scope);
       if (!sameScope(scope)) return;
       current.basis = basis.issueBasisHash;
       current.revision = basis.pageRevision;
       current.candidateSetHash = decision?.candidateSetHash || null;
-      renderPanel(host, { basis, decision, history });
+      renderPanel(host, { basis, decision, history }, scope);
       if (decision?.recommendedCandidateId && decision?.candidates) {
         const hit = decision.candidates.find(c => c.candidateId === decision.recommendedCandidateId);
-        if (hit) onRecommendation(current.issueId, { text: hit.originalText || hit.displayText, candidateId: hit.candidateId, decisionId: decision.decisionId, verdict: decision.verdict });
+        if (hit && sameScope(scope)) {
+          onRecommendation(scope.issueId, {
+            text: hit.originalText || hit.displayText,
+            candidateId: hit.candidateId,
+            decisionId: decision.decisionId,
+            verdict: decision.verdict
+          });
+        }
       }
     } catch (error) {
       if (error?.name === 'StaleRequest') return;
@@ -307,7 +323,7 @@ export function createDecisionPanel(deps) {
         const picked = radios.find(r => r.checked)?.value || decision.recommendedCandidateId;
         if (!picked) { showError(new Error('请先选择一个候选。')); return; }
         if (!check.checked) { showError(new Error('请先勾选“已对照原图”。没有原图时不能显示已对照，只能普通人工输入。')); return; }
-        acceptDecision(decision.decisionId, picked, current.basis, current.revision, uuid());
+        acceptDecision(decision.decisionId, picked, scope.basis, scope.revision, scope);
       });
       const keepButton = el('button', 'button decision-action', '保留待核对');
       keepButton.addEventListener('click', () => {
@@ -331,7 +347,7 @@ export function createDecisionPanel(deps) {
     actions.append(compareButton, visionButton);
     if (decision?.jobId && !['SUCCEEDED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(decision.jobState)) {
       const cancelButton = el('button', 'button quiet decision-action', '取消本次评估');
-      cancelButton.addEventListener('click', () => cancelJob(decision.jobId, decision.jobStateVersion ?? 0));
+      cancelButton.addEventListener('click', () => cancelJob(decision.jobId, decision.jobStateVersion ?? 0, scope));
       actions.append(cancelButton);
     }
     host.append(actions);
@@ -350,8 +366,21 @@ export function createDecisionPanel(deps) {
 
   function render(host, block, issue) {
     abortFlight();
+    panelEpoch++;
+    inFlightOperationId = null;
+    acceptInFlight = false;
     const s = session();
-    current = { bookId: s.bookId, page: s.page, epoch: s.epoch, blockId: block.id, issueId: issue.id, basis: null, revision: null };
+    current = {
+      bookId: s.bookId,
+      page: s.page,
+      epoch: s.epoch,
+      panelEpoch,
+      blockId: block.id,
+      issueId: issue.id,
+      basis: null,
+      revision: null,
+      candidateSetHash: null,
+    };
     host.replaceChildren();
     host.dataset.decisionPanel = '';
     const loading = el('p', 'decision-status', '正在读取建议基线…');

@@ -156,4 +156,96 @@ class QualityGateTest {
         assertTrue(QualityGate.check(List.of(s1), List.of(fresh, r2),
                 QualityGate.GateOp.NEW_VISUAL_TRANSCRIPTION).accepted());
     }
+
+    @Test void reorderRejectsTamperedResolvedIssuePayload() {
+        // JR-12-T01: 同 id/resolved=true，但 replacement/range/ReviewResolution 改动：重排门拒绝
+        studio.bookhtml.decision.DecisionModels.ReviewResolution res =
+                new studio.bookhtml.decision.DecisionModels.ReviewResolution(
+                        "res-1", "op-1", studio.bookhtml.decision.DecisionModels.Origin.JEV_ASSISTED,
+                        "dec-1", "cand-1", "cs-1", "pdf-1", 0, "basis-1", "甲", "甲",
+                        "conv-v1", true, java.time.Instant.now(), 1);
+        studio.bookhtml.domain.ContentIssue origIssue =
+                new studio.bookhtml.domain.ContentIssue("i1", "suspected", 0, 1, 0, 1, "r", true, "甲", "推", res);
+        Block s1 = new Block("s1", "text", 0, new double[]{0, 0, .4, .2}, "horizontal-tb",
+                "甲乙", "甲乙", 0.9, false, false, null, "paddle", List.of("s1"), null, null, List.of(origIssue));
+
+        // 1. 改动 replacement
+        studio.bookhtml.domain.ContentIssue tamperedReplacement =
+                new studio.bookhtml.domain.ContentIssue("i1", "suspected", 0, 1, 0, 1, "r", true, "乙", "推", res);
+        Block out1 = new Block("s1", "text", 0, new double[]{0, 0, .4, .2}, "horizontal-tb",
+                "甲乙", "甲乙", 0.9, false, false, null, "paddle", List.of("s1"), null, null, List.of(tamperedReplacement));
+        assertFalse(QualityGate.checkReorderOrReclassify(List.of(s1), List.of(out1)).accepted());
+
+        // 2. 改动 range
+        studio.bookhtml.domain.ContentIssue tamperedRange =
+                new studio.bookhtml.domain.ContentIssue("i1", "suspected", 0, 2, 0, 2, "r", true, "甲", "推", res);
+        Block out2 = new Block("s1", "text", 0, new double[]{0, 0, .4, .2}, "horizontal-tb",
+                "甲乙", "甲乙", 0.9, false, false, null, "paddle", List.of("s1"), null, null, List.of(tamperedRange));
+        assertFalse(QualityGate.checkReorderOrReclassify(List.of(s1), List.of(out2)).accepted());
+
+        // 3. 改动 resolution
+        studio.bookhtml.decision.DecisionModels.ReviewResolution tamperedRes =
+                new studio.bookhtml.decision.DecisionModels.ReviewResolution(
+                        "res-2", "op-2", studio.bookhtml.decision.DecisionModels.Origin.MANUAL,
+                        "dec-x", "cand-x", "cs-x", "pdf-x", 0, "basis-x", "乙", "乙",
+                        "conv-v1", true, java.time.Instant.now(), 1);
+        studio.bookhtml.domain.ContentIssue tamperedResolution =
+                new studio.bookhtml.domain.ContentIssue("i1", "suspected", 0, 1, 0, 1, "r", true, "甲", "推", tamperedRes);
+        Block out3 = new Block("s1", "text", 0, new double[]{0, 0, .4, .2}, "horizontal-tb",
+                "甲乙", "甲乙", 0.9, false, false, null, "paddle", List.of("s1"), null, null, List.of(tamperedResolution));
+        assertFalse(QualityGate.checkReorderOrReclassify(List.of(s1), List.of(out3)).accepted());
+    }
+
+    @Test void reorderAllowsOrderTypeHeadingChangeWithSamePayload() {
+        // JR-12-T02: 合法只改 order/type/heading：原字和确认载荷不变时通过
+        studio.bookhtml.decision.DecisionModels.ReviewResolution res =
+                new studio.bookhtml.decision.DecisionModels.ReviewResolution(
+                        "res-1", "op-1", studio.bookhtml.decision.DecisionModels.Origin.JEV_ASSISTED,
+                        "dec-1", "cand-1", "cs-1", "pdf-1", 0, "basis-1", "甲", "甲",
+                        "conv-v1", true, java.time.Instant.now(), 1);
+        studio.bookhtml.domain.ContentIssue origIssue =
+                new studio.bookhtml.domain.ContentIssue("i1", "suspected", 0, 1, 0, 1, "r", true, "甲", "推", res);
+        Block s1 = new Block("s1", "text", 0, new double[]{0, 0, .4, .2}, "horizontal-tb",
+                "甲乙", "甲乙", 0.9, false, false, null, "paddle", List.of("s1"), null, null, List.of(origIssue));
+        Block modified = new Block("s1", "heading", 1, new double[]{0, 0, .4, .2}, "horizontal-tb",
+                "甲乙", "甲乙", 0.9, false, false, 2, "paddle", List.of("s1"), null, null, List.of(origIssue));
+        assertTrue(QualityGate.checkReorderOrReclassify(List.of(s1), List.of(modified)).accepted());
+    }
+
+    @Test void mergePreservesResolvedIssuesOrRejects() {
+        // JR-12-T03: 合并含已确认疑点的块：必须保留已确认疑点及其确认载荷
+        studio.bookhtml.decision.DecisionModels.ReviewResolution res =
+                new studio.bookhtml.decision.DecisionModels.ReviewResolution(
+                        "res-1", "op-1", studio.bookhtml.decision.DecisionModels.Origin.JEV_ASSISTED,
+                        "dec-1", "cand-1", "cs-1", "pdf-1", 0, "basis-1", "甲", "甲",
+                        "conv-v1", true, java.time.Instant.now(), 1);
+        studio.bookhtml.domain.ContentIssue origIssue =
+                new studio.bookhtml.domain.ContentIssue("i1", "suspected", 0, 1, 0, 1, "r", true, "甲", "推", res);
+        Block s1 = new Block("s1", "text", 0, new double[]{0, 0, .4, .2}, "horizontal-tb",
+                "甲乙", "甲乙", 0.9, false, false, null, "paddle", List.of("s1"), null, null, List.of(origIssue));
+        Block s2 = sourceBlock("s2", "丙丁");
+
+        // 合并后丢弃 i1 -> 拒绝
+        Block mDropped = outBlock("m1", "甲乙丙丁", List.of("s1", "s2"), null);
+        assertFalse(QualityGate.checkMergeTextStructure(List.of(s1, s2), List.of(mDropped)).accepted());
+
+        // 合并后保留 i1 且载荷一致 -> 通过
+        Block mKept = new Block("m1", "text", 0, new double[]{0, 0, .4, .2}, "horizontal-tb",
+                "甲乙丙丁", "甲乙丙丁", 0.9, false, false, null, "assist", List.of("s1", "s2"), null, null, List.of(origIssue));
+        assertTrue(QualityGate.checkMergeTextStructure(List.of(s1, s2), List.of(mKept)).accepted());
+    }
+
+    @Test void newVisualTranscriptionRejectsInvalidBbox() {
+        // JR-12-T04: 新视觉条目 sourceRect 含 NaN/无穷/越界或非正：拒绝
+        Block s1 = sourceBlock("s1", "图甲");
+        Block kept = outBlock("s1", "图甲", List.of("s1"), new double[]{0, 0, 40, 20});
+        Block nanRect = outBlock("qwen-1", "目录", List.of("s1"), new double[]{Double.NaN, 0, 100, 50});
+        assertFalse(QualityGate.checkNewVisualTranscription(List.of(s1), List.of(kept, nanRect)).accepted());
+
+        Block infRect = outBlock("qwen-2", "目录", List.of("s1"), new double[]{0, Double.POSITIVE_INFINITY, 100, 50});
+        assertFalse(QualityGate.checkNewVisualTranscription(List.of(s1), List.of(kept, infRect)).accepted());
+
+        Block zeroWidth = outBlock("qwen-3", "目录", List.of("s1"), new double[]{0, 0, 0, 50});
+        assertFalse(QualityGate.checkNewVisualTranscription(List.of(s1), List.of(kept, zeroWidth)).accepted());
+    }
 }

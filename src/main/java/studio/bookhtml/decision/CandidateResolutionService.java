@@ -23,7 +23,7 @@ import java.util.Set;
 @Service
 public class CandidateResolutionService {
     static final double LOW_CONFIDENCE_THRESHOLD = 0.5;
-    static final String CANDIDATE_CONFIG_VERSION = "candidate-config-v1";
+    static final String CANDIDATE_CONFIG_VERSION = "candidate-config-v2";
     static final String CONVERTER_VERSION = "opencc4j-ZhConverterUtil-v1";
     static final String NORMALIZER_VERSION = "exact-string-v1";
 
@@ -283,12 +283,13 @@ public class CandidateResolutionService {
                 raw.acquisitionGroup(), upstream, ref.pdfSha256(), ref.sourcePageNumber(),
                 ref.sourceSpanHash(), raw.cropHash(), raw.locatorMode(),
                 raw.bbox() == null ? null : raw.bbox().clone(), raw.transformVersion(),
-                first.alignment(), evidence, raw.rawConfidence(), NORMALIZER_VERSION, Instant.now());
+                first.alignment(), evidence, raw.rawConfidence(), NORMALIZER_VERSION, Instant.now(),
+                raw.text(), DecisionModels.Candidate.LAYER_ORIGINAL, true);
     }
 
     /**
-     * J02/6.4：旧 inferredText 兼容导入。保留现有显示值，不反向转繁体，
-     * originalScriptText 明确 unknown，不伪造原字转录与图像支持。
+     * J02/6.4 + JR-07：旧 inferredText 兼容导入。保留现有显示值并作为比较文字，
+     * 文字层级明确标假设；不反向转繁体，originalScriptText 保持 unknown。
      */
     public DecisionModels.Candidate legacyCandidate(DecisionModels.IssueRef ref, String legacyDisplayText,
                                                     String candidateId) {
@@ -300,6 +301,37 @@ public class CandidateResolutionService {
                 ref.pdfSha256(), ref.sourcePageNumber(), ref.sourceSpanHash(), null,
                 DecisionModels.LocatorMode.REGION, null, "legacy-unknown",
                 DecisionModels.AlignmentStatus.AMBIGUOUS, List.of(), null,
-                NORMALIZER_VERSION, Instant.now());
+                NORMALIZER_VERSION, Instant.now(),
+                legacyDisplayText, DecisionModels.Candidate.LAYER_LEGACY_HYPOTHESIS, false);
+    }
+
+    public DecisionModels.CandidateSet mergeLegacy(DecisionModels.CandidateSet set,
+                                                   DecisionModels.Candidate legacy) {
+        return mergeLegacy(set, legacy == null ? List.of() : List.of(legacy));
+    }
+
+    public DecisionModels.CandidateSet mergeLegacy(DecisionModels.CandidateSet set,
+                                                   List<DecisionModels.Candidate> legacy) {
+        if (legacy == null || legacy.isEmpty()) return set;
+        List<DecisionModels.Candidate> merged = new ArrayList<>(set.candidates());
+        List<String> truncation = new ArrayList<>(set.truncationReasons());
+        List<String> gaps = new ArrayList<>(set.evidenceGaps());
+        for (DecisionModels.Candidate candidate : legacy) {
+            if (merged.size() >= 6) {
+                gaps.add("LEGACY_DEFERRED:" + candidate.candidateId());
+                continue;
+            }
+            if (merged.stream().anyMatch(c -> c.candidateId().equals(candidate.candidateId()))) continue;
+            merged.add(candidate);
+        }
+        if (merged.size() == set.candidates().size() && gaps.size() == set.evidenceGaps().size())
+            return set;
+        String hash = DecisionModels.CandidateSet.computeHash(set.issueRef(), merged,
+                CANDIDATE_CONFIG_VERSION, set.rawCount(),
+                set.truncated() || merged.size() != set.candidates().size(), gaps);
+        return new DecisionModels.CandidateSet(hash, set.issueRef(), merged,
+                CANDIDATE_CONFIG_VERSION, set.rawCount(), merged.size(),
+                set.truncated(), truncation, gaps, set.hasPlaceholder(), set.allSemanticOnly(),
+                Instant.now());
     }
 }

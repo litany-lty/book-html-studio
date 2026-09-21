@@ -144,11 +144,16 @@ public class ReviewDecisionController {
             view.put("applicability", applicabilityOf(job));
             view.put("verdict", job.verdict());
             view.put("candidateSummaries", candidateSummaries(job));
-            view.put("recommendedCandidateId", recommendedOf(job));
+            view.put("modelPreferredCandidateId", modelPreferredOf(job));
+            view.put("admittedRecommendationId", admittedOf(job));
+            view.put("recommendedCandidateId", admittedOf(job));
             view.put("reasonCodes", job.reasonCodes());
         } else {
             view.put("reasonCodes", job.reasonCodes());
         }
+        view.put("physicalAttemptCount", job.reservedCostMinor() > 0 ? 1 : 0);
+        view.put("reservedCostMinor", job.reservedCostMinor());
+        view.put("costStatus", job.costStatus());
         view.put("cloudCalls", job.reservedCostMinor());
         view.put("usageStatus", job.costStatus());
         view.put("cancellationState", job.cancellationState());
@@ -187,15 +192,10 @@ public class ReviewDecisionController {
         }
     }
 
-    private String recommendedOf(DecisionStore.DecisionJob job) {
+    private String modelPreferredOf(DecisionStore.DecisionJob job) {
         try {
             var evidence = decisions.loadResult(job.bookId(), job.decisionId());
             if (evidence.isEmpty() || evidence.get().choice() == null) return null;
-            // 别名按候选顺序确定派生，读时同样推导；只在有明确候选的 verdict 下返回
-            String verdict = job.verdict();
-            if (!"RECOMMEND".equals(verdict) && !"KEEP_CURRENT".equals(verdict)
-                    && !"CANDIDATES_ONLY".equals(verdict) && !"HUMAN_REQUIRED".equals(verdict))
-                return null;
             var set = decisions.loadCandidateSet(job.bookId(), evidence.get().candidateSetHash());
             if (set.isEmpty()) return null;
             return DecisionStateBuilder.candidateIdForAlias(set.get(),
@@ -203,5 +203,16 @@ public class ReviewDecisionController {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    private String admittedOf(DecisionStore.DecisionJob job) {
+        String verdict = job.verdict();
+        if (!"RECOMMEND".equals(verdict) && !"KEEP_CURRENT".equals(verdict))
+            return null;
+        return modelPreferredOf(job);
+    }
+
+    private String recommendedOf(DecisionStore.DecisionJob job) {
+        return admittedOf(job);
     }
 }

@@ -24,6 +24,7 @@ import org.springframework.stereotype.Service;
 import studio.bookhtml.api.ApiException;
 import studio.bookhtml.config.DecisionProperties;
 import studio.bookhtml.domain.Block;
+import studio.bookhtml.domain.Book;
 import studio.bookhtml.domain.ContentIssue;
 import studio.bookhtml.domain.Page;
 import studio.bookhtml.store.BookStore;
@@ -52,17 +53,21 @@ public class DecisionCoordinator {
     private final DecisionProperties config;
     private final DecisionTransport transport;
     private final ObjectMapper json;
+    private final DecisionOutboundGate gate;
 
     private final ConcurrentHashMap<String, Object> bookLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, JobControl> controls = new ConcurrentHashMap<>();
     private final BlockingQueue<String> queue;
+    private final Object globalAdmissionLock = new Object();
     private Thread worker;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public DecisionCoordinator(BookStore store, DecisionStore decisions, DecisionBudget budget,
                                PdfIdentity pdfIdentity, CandidateResolutionService resolution,
                                EvidenceCollector evidence, DecisionStateBuilder stateBuilder,
                                JevDecisionClient jev, DecisionProperties config,
-                               DecisionTransport transport, ObjectMapper json) {
+                               DecisionTransport transport, ObjectMapper json,
+                               DecisionOutboundGate gate) {
         this.store = store;
         this.decisions = decisions;
         this.budget = budget;
@@ -74,7 +79,17 @@ public class DecisionCoordinator {
         this.config = config;
         this.transport = transport;
         this.json = json;
+        this.gate = gate != null ? gate : new DecisionOutboundGate(config);
         this.queue = new LinkedBlockingQueue<>();
+    }
+
+    public DecisionCoordinator(BookStore store, DecisionStore decisions, DecisionBudget budget,
+                               PdfIdentity pdfIdentity, CandidateResolutionService resolution,
+                               EvidenceCollector evidence, DecisionStateBuilder stateBuilder,
+                               JevDecisionClient jev, DecisionProperties config,
+                               DecisionTransport transport, ObjectMapper json) {
+        this(store, decisions, budget, pdfIdentity, resolution, evidence, stateBuilder,
+                jev, config, transport, json, new DecisionOutboundGate(config));
     }
 
     @PostConstruct
@@ -95,12 +110,23 @@ public class DecisionCoordinator {
     }
 
     /** 重启恢复：QUEUED 按策略重排；已发送未知（COMPARING 及之后）标 INTERRUPTED 不自动重发。 */
-    void recoverInterrupted() {
-        // M1：重启恢复需要书目錄存在；QUEUED 重排、RUNNING 标 INTERRUPTED 由 recoverBook 显式执行。
-        // start() 不自动全库扫描，避免启动时触碰无关书籍目录。
+    public void recoverInterrupted() {
+        try {
+            if (store != null) {
+                List<Book> books = store.listBooks();
+                if (books != null) {
+                    for (Book b : books) {
+                        if (b != null && b.id() != null) {
+                            recoverBook(b.id());
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
     }
 
-    /** 指定书的重启恢复（T43）：QUEUED 重排；COMPARING 及之后视为已发送未知，标 INTERRUPTED。 */
+    /** 指定书的重启恢复（JR-06）：QUEUED 重排；COMPARING 及之后视为已发送未知，标 INTERRUPTED；重复恢复不重复入队。 */
     public void recoverBook(String bookId) {
         List<DecisionStore.DecisionJob> jobs;
         try {
@@ -109,18 +135,43 @@ public class DecisionCoordinator {
             return;
         }
         for (DecisionStore.DecisionJob job : jobs) {
-            if ("QUEUED".equals(job.state())) {
-                queue.offer(job.jobId() + "\u0000" + bookId);
-            } else if ("RUNNING".equals(job.state()) || "CANCEL_REQUESTED".equals(job.state())) {
-                boolean maybeSent = List.of("COMPARING", "PERSISTING", "DONE")
-                        .contains(job.progressStage());
-                saveJobQuietly(bookId, withState(job,
-                        maybeSent ? "INTERRUPTED" : "QUEUED",
-                        maybeSent ? job.progressStage() : "LOCATING",
-                        maybeSent ? List.of("RESTART_INTERRUPTED_MAY_HAVE_SENT")
-                                : List.of("RESTART_REQUEUED"),
-                        job.decisionId(), job.verdict()));
-                if (!maybeSent) queue.offer(job.jobId() + "\u0000" + bookId);
+            String item = job.jobId() + "\u0000" + bookId;
+            synchronized (globalAdmissionLock) {
+                if (queue.contains(item)) {
+                    continue; // JR-06-T05：重复恢复不重复入队
+                }
+                if ("QUEUED".equals(job.state())) {
+                    if (Instant.now().isAfter(job.deadlineAt())) {
+                        persistTerminal(bookId, withState(job, "FAILED", "DONE",
+                                List.of("DEADLINE_EXPIRED_ON_RESTART"), null, null));
+                    } else if (queue.size() < config.getMaxQueueEntries()) {
+                        queue.offer(item);
+                    } else {
+                        persistTerminal(bookId, withState(job, "FAILED", "DONE",
+                                List.of("QUEUE_FULL_ON_RESTART"), null, null));
+                    }
+                } else if ("RUNNING".equals(job.state()) || "CANCEL_REQUESTED".equals(job.state())) {
+                    boolean maybeSent = List.of("COMPARING", "PERSISTING", "DONE")
+                            .contains(job.progressStage());
+                    DecisionStore.DecisionJob updated = withState(job,
+                            maybeSent ? "INTERRUPTED" : "QUEUED",
+                            maybeSent ? job.progressStage() : "LOCATING",
+                            maybeSent ? List.of("RESTART_INTERRUPTED_MAY_HAVE_SENT")
+                                    : List.of("RESTART_REQUEUED"),
+                            job.decisionId(), job.verdict());
+                    saveJobQuietly(bookId, updated);
+                    if (!maybeSent) {
+                        if (Instant.now().isAfter(job.deadlineAt())) {
+                            persistTerminal(bookId, withState(updated, "FAILED", "DONE",
+                                    List.of("DEADLINE_EXPIRED_ON_RESTART"), null, null));
+                        } else if (queue.size() < config.getMaxQueueEntries()) {
+                            queue.offer(item);
+                        } else {
+                            persistTerminal(bookId, withState(updated, "FAILED", "DONE",
+                                    List.of("QUEUE_FULL_ON_RESTART"), null, null));
+                        }
+                    }
+                }
             }
         }
     }
@@ -144,32 +195,50 @@ public class DecisionCoordinator {
             ContentIssue issue = block.issues().stream().filter(i -> i != null && issueId.equals(i.id()))
                     .findFirst().orElseThrow(() ->
                             new ApiException(HttpStatus.NOT_FOUND, "指定的问题不存在"));
+            long issueCount = page.blocks().stream()
+                    .filter(b -> b != null && b.issues() != null)
+                    .flatMap(b -> b.issues().stream())
+                    .filter(i -> i != null && issueId.equals(i.id()))
+                    .count();
+            if (issueCount > 1)
+                throw new ApiException(HttpStatus.CONFLICT, "页面数据不一致：同页存在重复问题ID");
             int revision = BookStore.revisionOrZero(page);
             if (revision != body.expectedPageRevision())
                 throw new ApiException(HttpStatus.CONFLICT, "页面版本已变化，请刷新后重试");
             String basis = IssueBasis.basisHash(block, issue);
             if (!basis.equals(body.issueBasisHash()))
                 throw new ApiException(HttpStatus.CONFLICT, "问题基线已变化，请刷新后重试");
-            String admissionKey = admissionKey(bookId, page, block, issue, basis, body.allowFreshVision());
+            DecisionTargetIdentity target = buildTargetIdentity(bookId, page, block, issue, basis);
+            String admissionKey = admissionKey(target, block, body.allowFreshVision());
             try {
                 DecisionStore.DecisionJob existing = decisions.findByAdmission(bookId, admissionKey);
                 if (existing != null && isReusable(existing, page)) {
                     return new CreateResult(
                             "SUCCEEDED".equals(existing.state()) ? 200 : 200, existing);
                 }
-                // 队列界限由显式 size 检查执行（创建时 429）；队列本身无界，避免容量与配置漂移
-                if (queue.size() >= config.getMaxQueueEntries())
-                    throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "决策队列已满");
+                // JR-06：队列界限由全局 admission 锁与容量原子检查执行（创建时 429）
                 Instant now = Instant.now();
                 DecisionStore.DecisionJob job = new DecisionStore.DecisionJob(
                         UUID.randomUUID().toString(), "QUEUED", 1, "LOCATING", admissionKey, null,
                         bookId, sourcePage, block.id(), issueId, null, null, null,
                         body.clientOperationId(), null, List.of(), 0, "UNKNOWN", "NONE",
                         now, now, now.plusSeconds(Math.max(1, config.getJobDeadlineSeconds())),
-                        body.allowFreshVision());
-                decisions.saveJob(bookId, job);
-                if (!queue.offer(job.jobId() + "\u0000" + bookId))
-                    throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "决策队列已满");
+                        body.allowFreshVision(), target);
+                String queueItem = job.jobId() + "\u0000" + bookId;
+                synchronized (globalAdmissionLock) {
+                    if (queue.size() >= config.getMaxQueueEntries() || !queue.offer(queueItem))
+                        throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "决策队列已满");
+                }
+                try {
+                    decisions.saveJob(bookId, job);
+                } catch (Exception e) {
+                    synchronized (globalAdmissionLock) {
+                        queue.remove(queueItem);
+                    }
+                    if (e instanceof IOException)
+                        throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "决策作业保存失败");
+                    throw e;
+                }
                 return new CreateResult(202, job);
             } catch (ApiException e) {
                 throw e;
@@ -214,21 +283,34 @@ public class DecisionCoordinator {
         }
     }
 
-    String admissionKey(String bookId, Page page, Block block, ContentIssue issue,
-                        String basis, boolean allowFreshVision) {
+    DecisionTargetIdentity buildTargetIdentity(String bookId, Page page, Block block, ContentIssue issue, String basis) {
         String pdfHash;
         try {
             pdfHash = pdfIdentity.sha256(store.pdf(bookId));
         } catch (IOException e) {
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "PDF 身份获取失败");
         }
+        String original = block.original() == null ? "" : block.original();
+        String originalHash = DecisionHash.sha256Hex(original);
+        String span = (original.length() >= issue.end() && issue.start() >= 0 && issue.end() >= issue.start())
+                ? original.substring(issue.start(), issue.end()) : "";
+        String spanHash = DecisionHash.sha256Hex(block.id() + "\u0000" + issue.start() + "\u0000" + issue.end() + "\u0000" + span);
+        return new DecisionTargetIdentity(
+                bookId, pdfHash, page.pageNumber(), block.id(), issue.id(),
+                BookStore.revisionOrZero(page), originalHash, basis,
+                issue.start(), issue.end(), spanHash, IssueBasis.MAPPING_VERSION);
+    }
+
+    String admissionKey(DecisionTargetIdentity target, Block block, boolean allowFreshVision) {
         String evidenceVersion = block.source() == null ? "" : block.source();
         String scope = config.getProvider() + "|" + config.getModel() + "|" + config.isAllowCloudData();
-        return DecisionHash.of(Map.of(
-                "book", bookId, "pdf", pdfHash, "pageRevision", BookStore.revisionOrZero(page),
-                "issueBasis", basis, "acquisitionPolicy", ACQUISITION_POLICY_VERSION,
-                "existingEvidence", evidenceVersion, "allowFreshVision", allowFreshVision,
-                "authorizationScope", scope));
+        return target.admissionKey(ACQUISITION_POLICY_VERSION, evidenceVersion, allowFreshVision, scope);
+    }
+
+    String admissionKey(String bookId, Page page, Block block, ContentIssue issue,
+                        String basis, boolean allowFreshVision) {
+        DecisionTargetIdentity target = buildTargetIdentity(bookId, page, block, issue, basis);
+        return admissionKey(target, block, allowFreshVision);
     }
 
     private void validateCreate(String bookId, int sourcePage, String issueId, CreateBody body) {
@@ -297,16 +379,22 @@ public class DecisionCoordinator {
     }
 
     private String findBlockId(Page page, String issueId) {
+        String found = null;
         if (page.blocks() != null) for (Block block : page.blocks()) {
             if (block != null && block.issues() != null) for (ContentIssue issue : block.issues())
-                if (issue != null && issueId.equals(issue.id())) return block.id();
+                if (issue != null && issueId.equals(issue.id())) {
+                    if (found != null)
+                        throw new ApiException(HttpStatus.CONFLICT, "页面数据不一致：同页存在重复问题ID");
+                    found = block.id();
+                }
         }
+        if (found != null) return found;
         throw new ApiException(HttpStatus.NOT_FOUND, "指定的问题不存在");
     }
 
     /** 当前建议：最新仍适用的完成作业；过期只在 history 中说明原因。 */
     public Map<String, Object> currentDecisionView(String bookId, int sourcePage, String issueId) {
-        for (DecisionStore.DecisionJob job : listIssueJobs(bookId, issueId)) {
+        for (DecisionStore.DecisionJob job : listIssueJobs(bookId, sourcePage, issueId)) {
             if (!"SUCCEEDED".equals(job.state()) || job.decisionId() == null) continue;
             if (!"CURRENT".equals(applicability(bookId, job))) continue;
             return decisionSummary(bookId, job);
@@ -318,7 +406,7 @@ public class DecisionCoordinator {
     public List<Map<String, Object>> decisionHistory(String bookId, int sourcePage, String issueId,
                                                      int limit) {
         List<Map<String, Object>> history = new ArrayList<>();
-        for (DecisionStore.DecisionJob job : listIssueJobs(bookId, issueId)) {
+        for (DecisionStore.DecisionJob job : listIssueJobs(bookId, sourcePage, issueId)) {
             if (job.decisionId() == null) continue;
             if (history.size() >= Math.max(1, limit)) break;
             Map<String, Object> summary = decisionSummary(bookId, job);
@@ -355,7 +443,7 @@ public class DecisionCoordinator {
         }
     }
 
-    private List<DecisionStore.DecisionJob> listIssueJobs(String bookId, String issueId) {
+    private List<DecisionStore.DecisionJob> listIssueJobs(String bookId, int sourcePage, String issueId) {
         List<DecisionStore.DecisionJob> jobs;
         try {
             jobs = decisions.listJobs(bookId);
@@ -364,9 +452,14 @@ public class DecisionCoordinator {
         }
         List<DecisionStore.DecisionJob> filtered = new ArrayList<>();
         for (DecisionStore.DecisionJob job : jobs)
-            if (issueId.equals(job.issueId())) filtered.add(job);
+            if (issueId.equals(job.issueId()) && (sourcePage <= 0 || job.sourcePageNumber() == sourcePage))
+                filtered.add(job);
         filtered.sort((a, b) -> b.createdAt().compareTo(a.createdAt()));
         return filtered;
+    }
+
+    private List<DecisionStore.DecisionJob> listIssueJobs(String bookId, String issueId) {
+        return listIssueJobs(bookId, -1, issueId);
     }
 
     private Map<String, Object> decisionSummary(String bookId, DecisionStore.DecisionJob job) {
@@ -404,8 +497,14 @@ public class DecisionCoordinator {
                     summary.put("candidates", candidates);
                     String selected = evidence.get().choice() == null ? null
                             : evidence.get().choice().selectedAlias();
-                    summary.put("recommendedCandidateId",
-                            DecisionStateBuilder.candidateIdForAlias(set.get(), selected));
+                    String rawChoiceId = DecisionStateBuilder.candidateIdForAlias(set.get(), selected);
+                    summary.put("modelPreferredCandidateId", rawChoiceId);
+                    boolean isAdmitted = ("RECOMMEND".equals(job.verdict()) || "KEEP_CURRENT".equals(job.verdict()))
+                            && "CURRENT".equals(applicability(bookId, job))
+                            && "ASSIST".equalsIgnoreCase(config.getMode());
+                    String admittedId = isAdmitted ? rawChoiceId : null;
+                    summary.put("admittedRecommendationId", admittedId);
+                    summary.put("recommendedCandidateId", admittedId);
                 }
             }
         } catch (IOException ignored) {
@@ -435,8 +534,12 @@ public class DecisionCoordinator {
                 finishCancelIfRequested(bookId, job);
                 return;
             }
-            if (Instant.now().isAfter(job.deadlineAt())) {
+            if (Duration.between(job.createdAt(), Instant.now()).getSeconds() > config.getQueueWaitTimeoutSeconds()) {
                 persistTerminal(bookId, withState(job, "FAILED", "DONE", List.of("QUEUE_TIMEOUT"), null, null));
+                return;
+            }
+            if (Instant.now().isAfter(job.deadlineAt())) {
+                persistTerminal(bookId, withState(job, "FAILED", "DONE", List.of("JOB_TIMEOUT"), null, null));
                 return;
             }
             execute(bookId, job, control);
@@ -457,13 +560,42 @@ public class DecisionCoordinator {
         Instant now = Instant.now();
         DecisionStore.DecisionJob running = withState(queued, "RUNNING", "LOCATING",
                 queued.reasonCodes(), null, null);
-        saveJobQuietly(bookId, running);
+        try {
+            decisions.saveJob(bookId, running);
+        } catch (IOException e) {
+            persistTerminal(bookId, withState(running, "FAILED", "DONE", List.of("STAGE_PERSISTENCE_FAILED"), null, null));
+            return;
+        }
         BooleanSupplier cancelled = () -> control.cancelled.get() || Thread.currentThread().isInterrupted();
         try {
             // 锁外快照：页面、原文、PDF 身份先冻结，再外呼
             Page page = readPageOr404(bookId, queued.sourcePageNumber());
-            Block block = findBlock(page, queued.blockId());
-            ContentIssue issue = findIssue(block, queued.issueId());
+            if (queued.target() != null) {
+                int rev = BookStore.revisionOrZero(page);
+                if (rev != queued.target().pageRevision()) {
+                    persistTerminal(bookId, withState(running, "STALE", "DONE",
+                            List.of("PAGE_REVISION_ADVANCED"), null, null));
+                    return;
+                }
+            }
+            Block block = findBlockOrNull(page, queued.blockId());
+            if (block == null) {
+                persistTerminal(bookId, withState(running, "STALE", "DONE",
+                        List.of("BLOCK_NOT_FOUND"), null, null));
+                return;
+            }
+            ContentIssue issue = findIssueOrNull(block, queued.issueId());
+            if (issue == null) {
+                persistTerminal(bookId, withState(running, "STALE", "DONE",
+                        List.of("ISSUE_NOT_FOUND"), null, null));
+                return;
+            }
+            String basis = IssueBasis.basisHash(block, issue);
+            if (queued.target() != null && !queued.target().issueBasisHash().equals(basis)) {
+                persistTerminal(bookId, withState(running, "STALE", "DONE",
+                        List.of("ISSUE_BASIS_CHANGED"), null, null));
+                return;
+            }
             String frozenOriginal = block.original();
             DecisionModels.IssueRef.checkSpan(frozenOriginal, issue.start(), issue.end());
             String pdfHash = pdfIdentity.sha256(store.pdf(bookId));
@@ -471,14 +603,18 @@ public class DecisionCoordinator {
             String spanHash = DecisionHash.sha256Hex(
                     block.id() + "\u0000" + issue.start() + "\u0000" + issue.end()
                             + "\u0000" + frozenOriginal.substring(issue.start(), issue.end()));
-            String basis = IssueBasis.basisHash(block, issue);
             DecisionModels.IssueRef ref = new DecisionModels.IssueRef(bookId, pdfHash,
                     page.pageNumber(), BookStore.revisionOrZero(page), block.id(), issue.id(),
                     originalHash, basis, issue.start(), issue.end(), spanHash,
                     IssueBasis.MAPPING_VERSION);
             String target = frozenOriginal.substring(issue.start(), issue.end());
             running = withState(running, "RUNNING", "COLLECTING", running.reasonCodes(), null, null);
-            saveJobQuietly(bookId, running);
+            try {
+                decisions.saveJob(bookId, running);
+            } catch (IOException e) {
+                persistTerminal(bookId, withState(running, "FAILED", "DONE", List.of("STAGE_PERSISTENCE_FAILED"), null, null));
+                return;
+            }
 
             // 候选收集（含受控新增视觉，上限默认 1）
             AtomicInteger freshCalls = new AtomicInteger();
@@ -501,7 +637,12 @@ public class DecisionCoordinator {
                         UUID.randomUUID().toString());
                 return;
             }
-            decisions.saveCandidateSet(bookId, set);
+            try {
+                decisions.saveCandidateSet(bookId, set);
+            } catch (IOException e) {
+                persistTerminal(bookId, withState(running, "FAILED", "DONE", List.of("STAGE_PERSISTENCE_FAILED"), null, null));
+                return;
+            }
 
             // 状态构建与快照先行持久化
             List<String> neighbors = neighborTexts(page, block, 2);
@@ -518,9 +659,19 @@ public class DecisionCoordinator {
             }
             DecisionModels.DecisionSnapshot snapshot =
                     DecisionStateBuilder.snapshot(ref, set.candidateSetHash(), built);
-            decisions.saveSnapshot(bookId, snapshot);
+            try {
+                decisions.saveSnapshot(bookId, snapshot);
+            } catch (IOException e) {
+                persistTerminal(bookId, withState(running, "FAILED", "DONE", List.of("STAGE_PERSISTENCE_FAILED"), null, null));
+                return;
+            }
             running = withState(running, "RUNNING", "COMPARING", running.reasonCodes(), null, null);
-            saveJobQuietly(bookId, running);
+            try {
+                decisions.saveJob(bookId, running);
+            } catch (IOException e) {
+                persistTerminal(bookId, withState(running, "FAILED", "DONE", List.of("STAGE_PERSISTENCE_FAILED"), null, null));
+                return;
+            }
 
             // 请求内容冻结后才生成 requestHash；相同内容复用已有完成证据，零费用
             String requestHash = requestHash(snapshot, built);
@@ -537,47 +688,82 @@ public class DecisionCoordinator {
                 return;
             }
 
-            // 可用性门禁：OFF/缺 key/未授权/预算不足一律禁呼，原流程继续
-            String blocked = config.availabilityReason();
-            if (blocked != null) {
+            // 统一外发门控：检查模式、数据授权、供应商与期限
+            String provider = "MOCK".equalsIgnoreCase(config.getProvider()) ? "MOCK" : "TYPESAFE";
+            long remainingNanos = Duration.between(Instant.now(), running.deadlineAt()).toNanos();
+            if (remainingNanos <= 0) {
+                persistTerminal(bookId, withState(running, "FAILED", "DONE", List.of("JOB_TIMEOUT"), null, null));
+                return;
+            }
+            DecisionOutboundGate.GateVerdict gateVerdict = gate.check(new DecisionOutboundGate.GateRequest(
+                    DecisionOutboundGate.Purpose.JEV, provider, remainingNanos,
+                    new DecisionOutboundGate.CapabilityView(false, config.getApiKey(), config.getModel())));
+            if (!gateVerdict.allowed()) {
                 persistVerdict(bookId, running, ref, set, snapshot, built, requestHash, logicalId,
-                        DecisionModels.Verdict.UNAVAILABLE, null, List.of("UNAVAILABLE_" + blocked),
+                        DecisionModels.Verdict.UNAVAILABLE, null, null,
+                        List.of("UNAVAILABLE_" + gateVerdict.reasonCode()),
                         DecisionModels.Applicability.CURRENT, 0, "UNKNOWN", null, null, cancelled,
                         UUID.randomUUID().toString());
                 return;
             }
-            if (!budget.tryReserve(bookId, RESERVE_PER_JEV_CALL_MINOR, config.getMonetaryBudgetMinor())) {
+            String attemptId;
+            try {
+                attemptId = budget.reserve(bookId, "jev-decision", RESERVE_PER_JEV_CALL_MINOR,
+                        config.getMonetaryBudgetMinor());
+            } catch (IOException e) {
                 persistVerdict(bookId, running, ref, set, snapshot, built, requestHash, logicalId,
-                        DecisionModels.Verdict.UNAVAILABLE, null, List.of("UNAVAILABLE_BUDGET_REJECTED"),
+                        DecisionModels.Verdict.UNAVAILABLE, null, null,
+                        List.of("UNAVAILABLE_BUDGET_UNAVAILABLE"),
+                        DecisionModels.Applicability.CURRENT, 0, "UNKNOWN", null, null, cancelled,
+                        UUID.randomUUID().toString());
+                return;
+            }
+            if (attemptId == null) {
+                persistVerdict(bookId, running, ref, set, snapshot, built, requestHash, logicalId,
+                        DecisionModels.Verdict.UNAVAILABLE, null, null,
+                        List.of("UNAVAILABLE_BUDGET_REJECTED"),
                         DecisionModels.Applicability.CURRENT, 0, "UNKNOWN", null, null, cancelled,
                         UUID.randomUUID().toString());
                 return;
             }
             boolean sent = false;
-            String physicalId = UUID.randomUUID().toString();
+            String physicalId = attemptId;
             try {
                 if (cancelled.getAsBoolean()) {
-                    budget.release(bookId, RESERVE_PER_JEV_CALL_MINOR);
+                    try { budget.releaseNotSent(bookId, physicalId); } catch (IOException ignored) {}
                     persistTerminal(bookId, withState(running, "CANCELLED", "DONE",
                             List.of("CANCELLED_JOB"), null, null));
                     return;
                 }
+                budget.markSendIntent(bookId, physicalId);
+                sent = true;
                 Map<String, Object> state = new LinkedHashMap<>(built.state());
+                long jevRemainingNanos = Duration.between(Instant.now(), running.deadlineAt()).toNanos();
+                if (jevRemainingNanos <= 0) {
+                    persistTerminal(bookId, withState(running, "FAILED", "DONE", List.of("JOB_TIMEOUT"), null, null));
+                    return;
+                }
+                long jevAttemptNanos = Math.min(
+                        Duration.ofSeconds(Math.max(1, config.getJevAttemptDeadlineSeconds())).toNanos(),
+                        jevRemainingNanos);
                 JevDecisionClient.CallResult call = jev.callOnce(endpointUrl(), config.getApiKey(),
                         config.getModel(), state, built.questions(),
-                        Duration.ofSeconds(Math.max(1, config.getJevAttemptDeadlineSeconds())).toNanos(),
+                        jevAttemptNanos,
                         config.getMaxRequestBytes(), config.getMaxResponseBytes(), cancelled);
-                sent = true;
                 // M1 无可靠计费：usage 仅记录，费用记 UNKNOWN 并保留预留
-                budget.settleUnknown(bookId);
+                try { budget.retainUnknown(bookId, physicalId); } catch (IOException ignored) {}
                 DecisionPolicy.Output policy = policyFor(bookId, snapshot, set, built, call, cancelled);
                 persistVerdict(bookId, running, ref, set, snapshot, built, requestHash, logicalId,
-                        policy.verdict(), policy.recommendedCandidateId(), policy.reasonCodes(),
+                        policy.verdict(), policy.modelPreferredCandidateId(), policy.admittedRecommendationId(),
+                        policy.reasonCodes(),
                         policy.applicability(), RESERVE_PER_JEV_CALL_MINOR, "UNKNOWN",
                         scoresJson(call), call, cancelled, physicalId);
             } catch (JevDecisionClient.JevCallException e) {
-                if (!sent) budget.release(bookId, RESERVE_PER_JEV_CALL_MINOR);
-                else budget.settleUnknown(bookId);
+                if (!sent) {
+                    try { budget.releaseNotSent(bookId, physicalId); } catch (IOException ignored) {}
+                } else {
+                    try { budget.retainUnknown(bookId, physicalId); } catch (IOException ignored) {}
+                }
                 // 取消走 CANCELLED；其余失败分别展示，由用户明确重试产生新 attempt
                 if (e.kind() == JevDecisionClient.Kind.CANCELLED || control.cancelled.get())
                     persistTerminal(bookId, withState(running, "CANCELLED", "DONE",
@@ -644,6 +830,7 @@ public class DecisionCoordinator {
         return DecisionPolicy.resolve(new DecisionPolicy.Input(snapshot, set,
                 built.aliasToCandidateId(), currentText, call, null, cancelled.getAsBoolean(), view,
                 false, built.hardRiskFlags(), false, config.getCalibrationStatus(),
+                config.getCalibrationProfile(),
                 DecisionPolicy.PILOT_DEFAULT));
     }
 
@@ -652,7 +839,8 @@ public class DecisionCoordinator {
                                 DecisionModels.DecisionSnapshot snapshot,
                                 DecisionStateBuilder.BuiltState built, String requestHash,
                                 String logicalId, DecisionModels.Verdict verdict,
-                                String recommendedCandidateId, List<String> reasonCodes,
+                                String modelPreferredCandidateId, String admittedRecommendationId,
+                                List<String> reasonCodes,
                                 DecisionModels.Applicability applicability, long reservedMinor,
                                 String costStatus, String scoresJson,
                                 JevDecisionClient.CallResult call, BooleanSupplier cancelled,
@@ -666,22 +854,32 @@ public class DecisionCoordinator {
         String requestId = call == null ? null : call.providerRequestId();
         String responseHash = call == null
                 ? DecisionHash.sha256Hex("no-call:" + logicalId) : call.responseHash();
+        DecisionModels.ExecutionStatus execStatus;
+        String cacheRequestHash;
+        if (call == null || call.choice() == null || verdict == DecisionModels.Verdict.UNAVAILABLE) {
+            execStatus = DecisionModels.ExecutionStatus.FAILED;
+            cacheRequestHash = "none";
+        } else {
+            execStatus = DecisionModels.ExecutionStatus.SUCCEEDED;
+            cacheRequestHash = requestHash == null ? "none" : requestHash;
+        }
         DecisionModels.DecisionEvidence evidence = new DecisionModels.DecisionEvidence(
                 DecisionStore.SCHEMA_VERSION, decisionId, logicalId, physicalId,
                 snapshot == null ? "none" : snapshot.snapshotHash(),
                 set == null ? "none" : set.candidateSetHash(),
-                requestHash == null ? "none" : requestHash,
+                cacheRequestHash,
                 DecisionStateBuilder.TEMPLATE_VERSION,
                 config.getProvider(), endpointIdentity(), config.getModel(), reportedModel,
                 PROVIDER_CONTRACT_VERSION, responseHash, requestId,
-                DecisionModels.ExecutionStatus.SUCCEEDED, choice, gap,
+                execStatus, choice, gap,
                 DecisionPolicy.POLICY_VERSION, DecisionPolicy.THRESHOLD_PROFILE,
                 verdict, applicability, reasonCodes == null ? List.of() : reasonCodes, List.of(),
                 usage, null, reservedMinor,
                 "REPORTED".equals(costStatus) ? DecisionModels.CostStatus.REPORTED
                         : "ESTIMATED".equals(costStatus) ? DecisionModels.CostStatus.ESTIMATED
                         : DecisionModels.CostStatus.UNKNOWN,
-                scoresJson, now, now, now, running.deadlineAt());
+                scoresJson, admittedRecommendationId, endpointIdentity(),
+                now, now, now, running.deadlineAt());
         try {
             decisions.saveResult(bookId, evidence);
         } catch (IOException e) {
@@ -691,6 +889,23 @@ public class DecisionCoordinator {
         }
         persistTerminal(bookId, withState(running, "SUCCEEDED", "DONE", reasonCodes,
                 decisionId, verdict.name()));
+    }
+
+    private void persistVerdict(String bookId, DecisionStore.DecisionJob running,
+                                DecisionModels.IssueRef ref, DecisionModels.CandidateSet set,
+                                DecisionModels.DecisionSnapshot snapshot,
+                                DecisionStateBuilder.BuiltState built, String requestHash,
+                                String logicalId, DecisionModels.Verdict verdict,
+                                String recommendedCandidateId, List<String> reasonCodes,
+                                DecisionModels.Applicability applicability, long reservedMinor,
+                                String costStatus, String scoresJson,
+                                JevDecisionClient.CallResult call, BooleanSupplier cancelled,
+                                String physicalId) {
+        String admitted = (verdict == DecisionModels.Verdict.RECOMMEND || verdict == DecisionModels.Verdict.KEEP_CURRENT)
+                ? recommendedCandidateId : null;
+        persistVerdict(bookId, running, ref, set, snapshot, built, requestHash, logicalId,
+                verdict, recommendedCandidateId, admitted, reasonCodes, applicability,
+                reservedMinor, costStatus, scoresJson, call, cancelled, physicalId);
     }
 
     private String scoresJson(JevDecisionClient.CallResult call) {
@@ -713,35 +928,17 @@ public class DecisionCoordinator {
         material.put("snapshotHash", snapshot.snapshotHash());
         material.put("aliasesInOrder", aliases);
         material.put("templateVersion", DecisionStateBuilder.TEMPLATE_VERSION);
-        material.put("endpointIdentity", ENDPOINT_IDENTITY);
+        material.put("provider", config.getProvider());
+        material.put("endpointIdentity", endpointIdentity());
         material.put("model", config.getModel());
+        material.put("policyVersion", DecisionPolicy.POLICY_VERSION);
         material.put("serializedRequest", DecisionHash.sha256Hex(CanonicalJson.write(built.state())));
         return DecisionHash.of(material);
     }
 
     DecisionModels.CandidateSet mergeLegacy(DecisionModels.CandidateSet set,
                                             List<DecisionModels.Candidate> legacy) {
-        if (legacy == null || legacy.isEmpty()) return set;
-        List<DecisionModels.Candidate> merged = new ArrayList<>(set.candidates());
-        List<String> truncation = new ArrayList<>(set.truncationReasons());
-        List<String> gaps = new ArrayList<>(set.evidenceGaps());
-        for (DecisionModels.Candidate candidate : legacy) {
-            if (merged.size() >= 6) {
-                gaps.add("LEGACY_DEFERRED:" + candidate.candidateId());
-                continue;
-            }
-            if (merged.stream().anyMatch(c -> c.candidateId().equals(candidate.candidateId()))) continue;
-            merged.add(candidate);
-        }
-        if (merged.size() == set.candidates().size() && gaps.size() == set.evidenceGaps().size())
-            return set;
-        String hash = DecisionModels.CandidateSet.computeHash(set.issueRef(), merged,
-                CandidateResolutionService.CANDIDATE_CONFIG_VERSION, set.rawCount(),
-                set.truncated() || merged.size() != set.candidates().size(), gaps);
-        return new DecisionModels.CandidateSet(hash, set.issueRef(), merged,
-                CandidateResolutionService.CANDIDATE_CONFIG_VERSION, set.rawCount(), merged.size(),
-                set.truncated(), truncation, gaps, set.hasPlaceholder(), set.allSemanticOnly(),
-                Instant.now());
+        return resolution.mergeLegacy(set, legacy);
     }
 
     private List<String> neighborTexts(Page page, Block block, int window) {
@@ -767,7 +964,13 @@ public class DecisionCoordinator {
     }
 
     private void persistTerminal(String bookId, DecisionStore.DecisionJob job) {
-        saveJobQuietly(bookId, job);
+        synchronized (bookLock(bookId)) {
+            DecisionStore.DecisionJob current = queryJob(bookId, job.jobId());
+            if (current != null && isTerminal(current.state())) {
+                return; // JR-06-T03: 终态不倒退、不被覆盖
+            }
+            saveJobQuietly(bookId, job);
+        }
     }
 
     private void saveJobQuietly(String bookId, DecisionStore.DecisionJob job) {
@@ -785,7 +988,8 @@ public class DecisionCoordinator {
                 job.blockId(), job.issueId(), job.snapshotHash(), job.candidateSetHash(), decisionId,
                 job.clientOperationId(), verdict, reasons == null ? List.of() : reasons,
                 job.reservedCostMinor(), job.costStatus(), job.cancellationState(),
-                job.createdAt(), Instant.now(), job.deadlineAt(), job.allowFreshVision());
+                job.createdAt(), Instant.now(), job.deadlineAt(), job.allowFreshVision(),
+                job.target());
     }
 
     private Block findBlock(Page page, String blockId) {

@@ -29,8 +29,10 @@ public class DecisionProperties {
     private int maxPhysicalAttemptsPerLogicalCall = 1;
     private String thresholdProfile = "pilot-default-v1";
     private String calibrationStatus = "UNVALIDATED";
+    private String calibrationProfile = "";
     private boolean allowCloudData = false;
     private Long monetaryBudgetMinor = null;
+    private Long globalBudgetMinor = null;
 
     public String getMode() { return mode; }
     public void setMode(String mode) { this.mode = mode == null ? "OFF" : mode; }
@@ -70,10 +72,16 @@ public class DecisionProperties {
     public void setThresholdProfile(String v) { this.thresholdProfile = v == null ? "pilot-default-v1" : v; }
     public String getCalibrationStatus() { return calibrationStatus; }
     public void setCalibrationStatus(String v) { this.calibrationStatus = v == null ? "UNVALIDATED" : v; }
+    /** JR-08：校准档 ID。配置字符串 alone 不构成证明，需匹配的档（模型/模板/候选/策略/数据集/结果）才放行强推荐。 */
+    public String getCalibrationProfile() { return calibrationProfile; }
+    public void setCalibrationProfile(String v) { this.calibrationProfile = v == null ? "" : v; }
     public boolean isAllowCloudData() { return allowCloudData; }
     public void setAllowCloudData(boolean v) { this.allowCloudData = v; }
     public Long getMonetaryBudgetMinor() { return monetaryBudgetMinor; }
     public void setMonetaryBudgetMinor(Long v) { this.monetaryBudgetMinor = v; }
+    /** JR-05：全局预算上限（可空）。额度作用域：每书账本独立核算，可选再受全局上限约束。 */
+    public Long getGlobalBudgetMinor() { return globalBudgetMinor; }
+    public void setGlobalBudgetMinor(Long v) { this.globalBudgetMinor = v; }
 
     /** 外呼资格：任一不满足即返回禁用原因码，否则返回 null。密钥缺失、模型为空、外发未授权、预算未设一律禁呼。 */
     public String availabilityReason() {

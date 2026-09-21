@@ -132,7 +132,7 @@ class ExportDecisionsTest {
         assertEquals("CANDIDATES_ONLY", entry.get("verdict"));
         assertNotNull(entry.get("candidateSetHash"));
         assertNotNull(entry.get("decisionId"));
-        assertEquals("question-template-v1", entry.get("templateVersion"));
+        assertEquals("question-template-v2", entry.get("templateVersion"));
         assertEquals("decision-policy-v1", entry.get("policyVersion"));
         String raw = new ObjectMapper().writeValueAsString(summaries);
         assertFalse(raw.contains("test-key"), "不得泄漏密钥");

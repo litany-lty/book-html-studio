@@ -304,6 +304,11 @@ class AcceptTest {
         DecisionStore failing = new DecisionStore(f.store,
                 new ObjectMapper().findAndRegisterModules()) {
             @Override
+            public synchronized void saveAttempt(String bookId, AttemptLedger attempt)
+                    throws java.io.IOException {
+                throw new java.io.IOException("injected budget failure");
+            }
+            @Override
             public synchronized void saveBudgetState(String bookId, BudgetState state)
                     throws java.io.IOException {
                 throw new java.io.IOException("injected budget failure");
@@ -365,5 +370,112 @@ class AcceptTest {
         ApiException rejected = assertThrows(ApiException.class,
                 () -> f.accept.accept(BOOK, 3, "i1", decisionId, body));
         assertEquals(HttpStatus.CONFLICT, rejected.status());
+    }
+
+    @Test void decisionFromPositionACannotBeAcceptedAtPositionB() throws Exception {
+        // JR-01-T01: A 的 decision 用于 B：409，B 的 Page 字节/版本/疑点不变
+        Fixture f = fixture();
+        String decisionIdA = prepareDecision(f);
+        String candidateIdA = currentCandidate(f, decisionIdA);
+        Page beforePage = f.store.readPage(BOOK, 3);
+        int revBefore = BookStore.revisionOrZero(beforePage);
+        Block blockB = beforePage.blocks().stream().filter(b -> b.id().equals("b2")).findFirst().orElseThrow();
+        ContentIssue issueB = blockB.issues().get(0);
+        DecisionModels.DecisionEvidence evidenceA = f.decisions.loadResult(BOOK, decisionIdA).orElseThrow();
+
+        DecisionAcceptService.AcceptBody bodyForB = new DecisionAcceptService.AcceptBody(
+                "op-cross-target", "b2", revBefore, IssueBasis.basisHash(blockB, issueB),
+                evidenceA.candidateSetHash(), candidateIdA, true);
+
+        ApiException rejected = assertThrows(ApiException.class,
+                () -> f.accept.accept(BOOK, 3, "i2", decisionIdA, bodyForB));
+        assertEquals(HttpStatus.CONFLICT, rejected.status());
+
+        Page afterPage = f.store.readPage(BOOK, 3);
+        assertEquals(revBefore, BookStore.revisionOrZero(afterPage));
+        ContentIssue issueBAfter = afterPage.blocks().stream().filter(b -> b.id().equals("b2"))
+                .findFirst().orElseThrow().issues().get(0);
+        assertFalse(issueBAfter.resolved());
+        assertNull(issueBAfter.replacement());
+    }
+
+    @Test void contextEditOrPdfReplacedRejectsOldDecisionRebind() throws Exception {
+        // JR-01-T04: 只改目标之外的上下文或更换来源 PDF：旧决策不能通过新 revision/basis 重新绑定
+        Fixture f = fixture();
+        String decisionId = prepareDecision(f);
+        String candidateId = currentCandidate(f, decisionId);
+
+        // 1. 更换来源 PDF 内容
+        Files.write(f.store.pdf(BOOK), "different-pdf-bytes".getBytes());
+        ApiException pdfChanged = assertThrows(ApiException.class,
+                () -> f.accept.accept(BOOK, 3, "i1", decisionId, acceptBody(f, decisionId, candidateId)));
+        assertEquals(HttpStatus.CONFLICT, pdfChanged.status());
+        assertTrue(pdfChanged.getMessage().contains("来源 PDF") || pdfChanged.getMessage().contains("PDF"));
+
+        // 恢复原 PDF 内容
+        Files.write(f.store.pdf(BOOK), "pdf-bytes".getBytes());
+
+        // 2. 改动目标之外的块（b2），推进页面版本
+        Page page = f.store.readPage(BOOK, 3);
+        int oldRev = BookStore.revisionOrZero(page);
+        Block b1 = page.blocks().get(0);
+        Block b2Changed = new Block("b2", "text", 1, new double[]{0, 0, .4, .2}, "horizontal-tb",
+                "丙丁改", "丙丁改", 0.9, false, false, null, "manual", List.of("b2"), null, null,
+                page.blocks().get(1).issues());
+        Page proposed = new Page(3, 600, 800, "READY", "manual", List.of(b1, b2Changed),
+                List.of(), false, null, page.sourceRecords(), null);
+        f.store.commitPage(BOOK, proposed, oldRev, studio.bookhtml.store.CommitActor.MANUAL, null,
+                studio.bookhtml.store.CommitOp.MANUAL_SAVE);
+
+        // 用新的 expectedRevision (oldRev + 1) 重新绑定旧快照 -> 拒绝
+        DecisionModels.DecisionEvidence evidence = f.decisions.loadResult(BOOK, decisionId).orElseThrow();
+        DecisionAcceptService.AcceptBody rebindBody = new DecisionAcceptService.AcceptBody(
+                "op-rebind", "b1", oldRev + 1, IssueBasis.basisHash(b1, b1.issues().get(0)),
+                evidence.candidateSetHash(), candidateId, true);
+        ApiException rebindRejected = assertThrows(ApiException.class,
+                () -> f.accept.accept(BOOK, 3, "i1", decisionId, rebindBody));
+        assertEquals(HttpStatus.CONFLICT, rebindRejected.status());
+    }
+
+    @Test void candidateHashOrEvidenceTamperedRejected() throws Exception {
+        // JR-01-T05: candidateSet/snapshot/evidence 相互串换、hash 不符：拒绝接受
+        Fixture f = fixture();
+        String decisionId = prepareDecision(f);
+        String candidateId = currentCandidate(f, decisionId);
+        DecisionAcceptService.AcceptBody body = acceptBody(f, decisionId, candidateId);
+
+        // 串改 candidateSetHash
+        DecisionAcceptService.AcceptBody tamperedSetHash = new DecisionAcceptService.AcceptBody(
+                body.clientOperationId(), body.blockId(), body.expectedPageRevision(),
+                body.issueBasisHash(), "tampered-candidate-set-hash", body.candidateId(), true);
+        ApiException setRejected = assertThrows(ApiException.class,
+                () -> f.accept.accept(BOOK, 3, "i1", decisionId, tamperedSetHash));
+        assertEquals(HttpStatus.CONFLICT, setRejected.status());
+    }
+
+    @Test void offOrShadowModeRejectsAcceptance() throws Exception {
+        // JR-08-T01: OFF/SHADOW 模式矩阵：不开放 JEV 接受入口（403 FORBIDDEN）
+        Fixture f = fixture();
+        String decisionId = prepareDecision(f);
+        String candidateId = currentCandidate(f, decisionId);
+        DecisionAcceptService.AcceptBody body = acceptBody(f, decisionId, candidateId);
+
+        // OFF mode
+        studio.bookhtml.config.DecisionProperties offProps = new studio.bookhtml.config.DecisionProperties();
+        offProps.setMode("OFF");
+        DecisionAcceptService offAccept = new DecisionAcceptService(f.store, f.decisions,
+                new TraditionalConverter(), new PdfIdentity(), offProps);
+        ApiException offEx = assertThrows(ApiException.class,
+                () -> offAccept.accept(BOOK, 3, "i1", decisionId, body));
+        assertEquals(HttpStatus.FORBIDDEN, offEx.status());
+
+        // SHADOW mode
+        studio.bookhtml.config.DecisionProperties shadowProps = new studio.bookhtml.config.DecisionProperties();
+        shadowProps.setMode("SHADOW");
+        DecisionAcceptService shadowAccept = new DecisionAcceptService(f.store, f.decisions,
+                new TraditionalConverter(), new PdfIdentity(), shadowProps);
+        ApiException shadowEx = assertThrows(ApiException.class,
+                () -> shadowAccept.accept(BOOK, 3, "i1", decisionId, body));
+        assertEquals(HttpStatus.FORBIDDEN, shadowEx.status());
     }
 }

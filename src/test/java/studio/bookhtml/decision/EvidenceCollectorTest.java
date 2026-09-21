@@ -81,6 +81,8 @@ class EvidenceCollectorTest {
 
     private DecisionProperties config() {
         DecisionProperties config = new DecisionProperties();
+        config.setMode("SHADOW");
+        config.setAllowCloudData(true);
         config.setMonetaryBudgetMinor(100L);
         return config;
     }

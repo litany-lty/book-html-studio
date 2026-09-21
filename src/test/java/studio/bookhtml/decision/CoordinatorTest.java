@@ -6,6 +6,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -42,7 +43,7 @@ class CoordinatorTest {
                 List.of(new ContentIssue("i-" + id, "suspected", 0, 1, 0, 1, "理由", false, null, "推测")));
     }
 
-    private record Fixture(BookStore store, DecisionCoordinator coordinator,
+    private record Fixture(BookStore store, DecisionStore decisions, DecisionCoordinator coordinator,
                            MockDecisionTransport transport, QwenOcrClient qwen,
                            IssueImageService images, DecisionProperties config) {}
 
@@ -81,7 +82,7 @@ class CoordinatorTest {
         DecisionCoordinator coordinator = new DecisionCoordinator(store, decisions, budget,
                 identity, resolution, evidence, new DecisionStateBuilder(), jev, config,
                 transport, mapper);
-        return new Fixture(store, coordinator, transport, qwen, images, config);
+        return new Fixture(store, decisions, coordinator, transport, qwen, images, config);
     }
 
     private DecisionCoordinator.CreateBody body(BookStore store, String blockId, String issueId,
@@ -362,5 +363,177 @@ class CoordinatorTest {
             }
         }
         assertEquals(0, f.transport.calls.get());
+    }
+
+    @Test void jr06T01_boundedQueueCapacityRejectsOverflowAcrossMultipleBooks() throws Exception {
+        // JR-06-T01: 并发请求跨多书入队：未超全局容量，满载明确拒绝 429
+        Fixture f = fixture(false);
+        int maxCapacity = 5;
+        f.config.setMaxQueueEntries(maxCapacity);
+
+        // 创建多本书
+        int totalRequests = 20;
+        java.util.concurrent.atomic.AtomicInteger accepted = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger rejected429 = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(10);
+        java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+
+        for (int i = 0; i < totalRequests; i++) {
+            String bookId = String.format("00000000-0000-0000-0000-%012d", i);
+            f.store.createBookDirectory(bookId);
+            f.store.writeBook(new Book(bookId, "title", "pdf", 1, Instant.now(), Instant.now(), 0, 0));
+            Files.write(f.store.pdf(bookId), "pdf".getBytes());
+            Page page = new Page(1, 600, 800, "READY", "paddle",
+                    List.of(block("b1", "文")), List.of(), false, null, List.of(block("b1", "文")));
+            f.store.writePage(bookId, page, false);
+
+            futures.add(pool.submit(() -> {
+                try {
+                    DecisionCoordinator.CreateBody b = new DecisionCoordinator.CreateBody(
+                            "op-" + UUID.randomUUID(), "b1", 0,
+                            IssueBasis.basisHash(page.blocks().get(0), page.blocks().get(0).issues().get(0)),
+                            false);
+                    DecisionCoordinator.CreateResult res = f.coordinator.createOrReuse(bookId, 1, "i-b1", b);
+                    if (res.httpStatus() == 202) accepted.incrementAndGet();
+                } catch (ApiException e) {
+                    if (e.status() == HttpStatus.TOO_MANY_REQUESTS) rejected429.incrementAndGet();
+                } catch (Exception ignored) {}
+            }));
+        }
+        for (var fut : futures) fut.get(5, TimeUnit.SECONDS);
+        pool.shutdown();
+
+        assertTrue(accepted.get() <= maxCapacity, "Accepted cannot exceed maxQueueEntries: " + accepted.get());
+        assertEquals(totalRequests, accepted.get() + rejected429.get(), "All requests accounted for");
+        assertTrue(rejected429.get() > 0, "Overflow requests must be rejected with 429");
+    }
+
+    @Test void jr06T02_workerRejectsStalePageRevisionOrModifiedIssue() throws Exception {
+        // JR-06-T02: 创建时 target/revision 持久化，入队后编辑不被 worker 静默采用
+        Fixture f = fixture(true);
+        Page page = f.store.readPage(BOOK, 3);
+        Block block = page.blocks().get(0);
+        ContentIssue issue = block.issues().get(0);
+        DecisionCoordinator.CreateResult created = f.coordinator.createOrReuse(BOOK, 3, "i-b1",
+                new DecisionCoordinator.CreateBody("op-stale-test", "b1",
+                        BookStore.revisionOrZero(page), IssueBasis.basisHash(block, issue), false));
+        assertEquals("QUEUED", created.job().state());
+
+        // 模拟页面推进 revision
+        Page modified = new Page(3, 600, 800, "READY", "manual",
+                List.of(new Block("b1", "text", 0, new double[]{0, 0, 0.4, 0.2}, "horizontal-tb",
+                        "改动后", "改动后", 0.9, true, false, null, "manual", List.of("b1"),
+                        null, new double[]{0, 0, 40, 20}, List.of())),
+                List.of(), false, null, page.sourceRecords(), null);
+        f.store.commitPage(BOOK, modified, BookStore.revisionOrZero(page),
+                studio.bookhtml.store.CommitActor.MANUAL, null,
+                studio.bookhtml.store.CommitOp.MANUAL_SAVE);
+
+        // worker 执行时发现 revision 变化，标记 STALE
+        f.coordinator.runInline(BOOK, created.job().jobId());
+        DecisionStore.DecisionJob result = f.coordinator.queryJob(BOOK, created.job().jobId());
+        assertEquals("STALE", result.state());
+        assertTrue(result.reasonCodes().contains("PAGE_REVISION_ADVANCED"));
+        assertEquals(0, f.transport.calls.get());
+    }
+
+    @Test void jr06T03_cancelAndWorkerStateIntegrity() throws Exception {
+        // JR-06-T03: 取消与 worker 同时写状态：终态不倒退、stateVersion 单调
+        Fixture f = fixture(true);
+        Page page = f.store.readPage(BOOK, 3);
+        Block block = page.blocks().get(0);
+        ContentIssue issue = block.issues().get(0);
+        DecisionCoordinator.CreateResult created = f.coordinator.createOrReuse(BOOK, 3, "i-b1",
+                new DecisionCoordinator.CreateBody("op-cancel-test", "b1",
+                        BookStore.revisionOrZero(page), IssueBasis.basisHash(block, issue), false));
+
+        DecisionStore.DecisionJob cancelled = f.coordinator.cancel(BOOK, created.job().jobId(), created.job().stateVersion());
+        assertEquals("CANCEL_REQUESTED", cancelled.state());
+        assertTrue(cancelled.stateVersion() > created.job().stateVersion());
+
+        // worker 运行后应转为 CANCELLED 终态，不可回到 RUNNING 或 SUCCEEDED
+        f.coordinator.runInline(BOOK, created.job().jobId());
+        DecisionStore.DecisionJob finalJob = f.coordinator.queryJob(BOOK, created.job().jobId());
+        assertEquals("CANCELLED", finalJob.state());
+        assertTrue(finalJob.stateVersion() >= cancelled.stateVersion());
+        assertEquals(0, f.transport.calls.get());
+    }
+
+    @Test void jr06T05_duplicateRecoveryDoesNotDuplicateQueueAndUnknownDoesNotResend() throws Exception {
+        // JR-06-T05: 重复恢复不重复入队；已发送未知标 INTERRUPTED 不重发
+        Fixture f = fixture(false);
+        Page page = f.store.readPage(BOOK, 3);
+        Block block = page.blocks().get(0);
+        ContentIssue issue = block.issues().get(0);
+        DecisionCoordinator.CreateResult created = f.coordinator.createOrReuse(BOOK, 3, "i-b1",
+                new DecisionCoordinator.CreateBody("op-dup-test", "b1",
+                        BookStore.revisionOrZero(page), IssueBasis.basisHash(block, issue), false));
+
+        // 连续两次 recoverBook
+        f.coordinator.recoverBook(BOOK);
+        f.coordinator.recoverBook(BOOK);
+
+        // worker 执行一次即可完成，不产生第二遍执行
+        f.coordinator.runInline(BOOK, created.job().jobId());
+        DecisionStore.DecisionJob afterFirst = f.coordinator.queryJob(BOOK, created.job().jobId());
+        assertEquals("SUCCEEDED", afterFirst.state());
+
+        // 模拟一个 COMPARING 状态的已发送未知任务
+        DecisionStore.DecisionJob maybeSentJob = new DecisionStore.DecisionJob(
+                "job-maybe-sent", "RUNNING", 2, "COMPARING", "key-sent", null,
+                BOOK, 3, "b1", "i-b1", null, null, null, "op-sent", null,
+                List.of(), 1, "UNKNOWN", "NONE", Instant.now(), Instant.now(),
+                Instant.now().plusSeconds(60), false, created.job().target());
+        f.decisions.saveJob(BOOK, maybeSentJob);
+
+        f.coordinator.recoverBook(BOOK);
+        DecisionStore.DecisionJob recoveredSent = f.coordinator.queryJob(BOOK, "job-maybe-sent");
+        assertEquals("INTERRUPTED", recoveredSent.state());
+        assertTrue(recoveredSent.reasonCodes().contains("RESTART_INTERRUPTED_MAY_HAVE_SENT"));
+        assertEquals(0, f.transport.calls.get());
+    }
+
+    @Test void jr01T02_crossPageSameIdsGenerateDifferentAdmissionKeysAndDuplicateIssueRejected() throws Exception {
+        // JR-01-T02: 不同页相同 issueId、blockId、quote/revision：生成不同准入键，查询绝不串页；同页重复 issueId 拒绝
+        Fixture f = fixture(true);
+        Page page3 = f.store.readPage(BOOK, 3);
+        Block b1 = page3.blocks().get(0);
+        ContentIssue issue1 = b1.issues().get(0);
+        DecisionCoordinator.CreateResult jobPage3 = f.coordinator.createOrReuse(BOOK, 3, "i-b1",
+                new DecisionCoordinator.CreateBody("op-p3", "b1",
+                        BookStore.revisionOrZero(page3), IssueBasis.basisHash(b1, issue1), false));
+
+        // 在 Page 4 上构造相同 blockId ("b1")、相同 issueId ("i-b1")、相同 quote
+        Block b1Page4 = new Block("b1", "text", 0, new double[]{0, 0, .4, .2}, "horizontal-tb",
+                "甲乙", "甲乙", 0.9, false, false, null, "manual", List.of("b1"), null, null,
+                List.of(new ContentIssue("i-b1", "suspected", 0, 1, 0, 1, "理由", false, null, "推测")));
+        Page page4 = new Page(4, 600, 800, "READY", "manual", List.of(b1Page4), List.of(), false, null, List.of(b1Page4));
+        f.store.writePage(BOOK, page4, false);
+
+        DecisionCoordinator.CreateResult jobPage4 = f.coordinator.createOrReuse(BOOK, 4, "i-b1",
+                new DecisionCoordinator.CreateBody("op-p4", "b1",
+                        0, IssueBasis.basisHash(b1Page4, b1Page4.issues().get(0)), false));
+
+        // 准入键不同，绝不串页
+        assertNotEquals(jobPage3.job().admissionKey(), jobPage4.job().admissionKey());
+        assertNotEquals(jobPage3.job().jobId(), jobPage4.job().jobId());
+
+        // 查询按 sourcePage 隔离，绝不串页
+        List<Map<String, Object>> histP3 = f.coordinator.decisionHistory(BOOK, 3, "i-b1", 10);
+        assertTrue(histP3.stream().allMatch(h -> jobPage3.job().jobId().equals(h.get("jobId"))));
+
+        // 同页存在重复 issueId 时明确报告数据不一致
+        Block dupBlock = new Block("b-dup", "text", 1, new double[]{0, 0, .4, .2}, "horizontal-tb",
+                "甲乙", "甲乙", 0.9, false, false, null, "manual", List.of("b-dup"), null, null,
+                List.of(new ContentIssue("i-b1", "suspected", 0, 1, 0, 1, "理由", false, null, "推测")));
+        Page pageDup = new Page(5, 600, 800, "READY", "manual", List.of(b1Page4, dupBlock), List.of(), false, null, List.of(b1Page4, dupBlock));
+        f.store.writePage(BOOK, pageDup, false);
+
+        ApiException dupEx = assertThrows(ApiException.class, () ->
+                f.coordinator.createOrReuse(BOOK, 5, "i-b1",
+                        new DecisionCoordinator.CreateBody("op-dup", "b1", 0,
+                                IssueBasis.basisHash(b1Page4, b1Page4.issues().get(0)), false)));
+        assertEquals(HttpStatus.CONFLICT, dupEx.status());
+        assertTrue(dupEx.getMessage().contains("重复问题ID"));
     }
 }

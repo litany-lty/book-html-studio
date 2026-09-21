@@ -32,6 +32,7 @@ class ShadowEvalRunner {
                 "门控：默认不跑真实评测");
         String datasetPath = System.getProperty("shadow.dataset");
         String outPath = System.getProperty("shadow.out", "/tmp/shadow-live.jsonl");
+        String calibrationStatus = System.getProperty("shadow.calibration", "UNVALIDATED");
         String apiKey = System.getenv("TYPESAFE_API_KEY");
         org.junit.jupiter.api.Assumptions.assumeTrue(datasetPath != null && !datasetPath.isBlank()
                 && apiKey != null && !apiKey.isBlank());
@@ -44,14 +45,20 @@ class ShadowEvalRunner {
         TraditionalConverter converter = new TraditionalConverter();
         CandidateResolutionService resolution = new CandidateResolutionService(converter);
         DecisionStateBuilder builder = new DecisionStateBuilder();
-        List<String> lines = new ArrayList<>();
+        Path outputPath = Path.of(outPath);
+        if (outputPath.getParent() != null) Files.createDirectories(outputPath.getParent());
+        // Reset or prepare output file
+        Files.write(outputPath, new byte[0]);
+
         long totalInputTokens = 0;
         int calls = 0, failures = 0;
         try (SharedTransport transport = new SharedTransport()) {
             JevDecisionClient jev = new JevDecisionClient(json, transport);
             for (Map<String, Object> kase : cases) {
-                Map<String, Object> record = runOne(kase, resolution, builder, jev, json, apiKey);
-                lines.add(json.writeValueAsString(record));
+                Map<String, Object> record = runOne(kase, resolution, builder, jev, json, apiKey, calibrationStatus);
+                String line = json.writeValueAsString(record) + "\n";
+                Files.writeString(outputPath, line, java.nio.charset.StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
                 if (record.get("usageInputTokens") instanceof Number n)
                     totalInputTokens += n.longValue();
                 calls++;
@@ -59,11 +66,11 @@ class ShadowEvalRunner {
                 else if ("CALL_FAILED".equals(record.get("verdict"))) failures++;
             }
         }
-        Files.write(Path.of(outPath), String.join("\n", lines).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         double usd = totalInputTokens * USD_PER_MTOK / 1_000_000.0;
         System.out.println("SHADOW_LIVE calls=" + calls + " failures=" + failures
                 + " inputTokens=" + totalInputTokens + " usd=" + String.format("%.6f", usd));
-        assertTrue(calls > 0);
+        assertTrue(calls > 0, "No calls were planned or executed");
+        assertTrue(failures < calls, "All calls failed: calls=" + calls + " failures=" + failures);
     }
 
     @SuppressWarnings("unchecked")
@@ -71,7 +78,8 @@ class ShadowEvalRunner {
                                        CandidateResolutionService resolution,
                                        DecisionStateBuilder builder,
                                        JevDecisionClient jev, ObjectMapper json,
-                                       String apiKey) {
+                                       String apiKey,
+                                       String calibrationStatus) {
         Map<String, Object> record = new LinkedHashMap<>();
         record.put("caseId", kase.get("caseId"));
         Instant start = Instant.now();
@@ -91,15 +99,26 @@ class ShadowEvalRunner {
             List<CandidateResolutionService.RawCandidate> raws = new ArrayList<>();
             for (Map<String, Object> candidate : candidates) {
                 String kind = String.valueOf(candidate.getOrDefault("sourceKind", "PRIMARY_OCR"));
+                String groupKey = candidate.containsKey("groupKey") ? String.valueOf(candidate.get("groupKey")) : "G-eval";
+                String runId = candidate.containsKey("runId") ? String.valueOf(candidate.get("runId")) : "run-eval";
+                List<String> evidenceRefs = candidate.containsKey("evidenceRefs") ? (List<String>) candidate.get("evidenceRefs") : List.of("E-eval");
+                String cropHash = candidate.containsKey("cropHash") ? String.valueOf(candidate.get("cropHash")) : null;
                 raws.add(new CandidateResolutionService.RawCandidate(
                         String.valueOf(candidate.getOrDefault("text", "")),
-                        DecisionModels.SourceKind.valueOf(kind), "eval", null, null,
-                        "run-eval", "G-eval", List.of(), null,
+                        DecisionModels.SourceKind.valueOf(kind), "eval", null, cropHash,
+                        runId, groupKey, List.of(), null,
                         DecisionModels.LocatorMode.REGION, null, "eval-v1",
-                        List.of("E-eval"), null, startUtf16, endUtf16));
+                        evidenceRefs, null, startUtf16, endUtf16));
             }
-            // 冻结原文用 current 占位（span 恒为 [区间起点, 起点+current 长度] 的合法子串校验）
-            String frozen = "X".repeat(startUtf16) + current;
+            // 优先使用真实冻结原文；无则用 span 合法占位
+            String frozen;
+            if (kase.containsKey("frozenOriginal")) {
+                frozen = String.valueOf(kase.get("frozenOriginal"));
+            } else if (kase.containsKey("originalText")) {
+                frozen = String.valueOf(kase.get("originalText"));
+            } else {
+                frozen = "X".repeat(Math.max(0, startUtf16)) + current;
+            }
             DecisionModels.CandidateSet set = resolution.buildSet(ref, frozen, current, raws);
             DecisionStateBuilder.BuiltState built = builder.build(ref, frozen, set,
                     List.of(), false, 32768);
@@ -115,7 +134,7 @@ class ShadowEvalRunner {
             DecisionPolicy.Output policy = DecisionPolicy.resolve(new DecisionPolicy.Input(
                     DecisionStateBuilder.snapshot(ref, set.candidateSetHash(), built), set,
                     built.aliasToCandidateId(), current, call, null, false, view, false,
-                    built.hardRiskFlags(), false, "VALIDATED", DecisionPolicy.PILOT_DEFAULT));
+                    built.hardRiskFlags(), false, calibrationStatus, DecisionPolicy.PILOT_DEFAULT));
             String recommended = policy.recommendedCandidateId();
             String pick = null;
             // 按原文回查 kN（顺序可能被优先级重排，不依赖别名索引）
@@ -126,16 +145,22 @@ class ShadowEvalRunner {
                             .equals(c.originalScriptText())) pick = "k" + i;
                 }
             }
+            record.put("rawPick", call.choice());
             record.put("jevPick", pick);
             record.put("verdict", policy.verdict().name());
+            record.put("policyVerdict", policy.verdict().name());
+            record.put("modelPreferredCandidateId", policy.modelPreferredCandidateId());
+            record.put("admittedRecommendationId", policy.admittedRecommendationId());
             record.put("reasons", policy.reasonCodes());
             record.put("usageInputTokens", call.usage() == null ? null : call.usage().get("input_tokens"));
             record.put("reportedModel", call.reportedModel());
             record.put("physicalAttemptId", physicalId);
         } catch (Exception e) {
             record.put("verdict", "CALL_FAILED");
+            record.put("policyVerdict", "CALL_FAILED");
             record.put("error", e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()).substring(0, Math.min(120, String.valueOf(e.getMessage()).length())));
             record.put("jevPick", null);
+            record.put("rawPick", null);
         }
         record.put("seconds", Duration.between(start, Instant.now()).toMillis() / 1000.0);
         return record;

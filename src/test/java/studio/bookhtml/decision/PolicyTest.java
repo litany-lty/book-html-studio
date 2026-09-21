@@ -67,8 +67,9 @@ class PolicyTest {
         DecisionStateBuilder.BuiltState built = built(set, original);
         DecisionModels.DecisionSnapshot snapshot =
                 DecisionStateBuilder.snapshot(ref(), set.candidateSetHash(), built);
+        String profile = "VALIDATED".equals(calibration) ? "pilot-profile-v1" : "";
         return new DecisionPolicy.Input(snapshot, set, built.aliasToCandidateId(), current, result,
-                null, false, view(), conflict, risks, false, calibration, DecisionPolicy.PILOT_DEFAULT);
+                null, false, view(), conflict, risks, false, calibration, profile, DecisionPolicy.PILOT_DEFAULT);
     }
 
     @Test void semanticOnlyHighScoreNeverConfirms() throws Exception {
@@ -134,7 +135,7 @@ class PolicyTest {
                 0.999, 0.0, 0.0);
         DecisionPolicy.Input in = new DecisionPolicy.Input(snapshot, set, built.aliasToCandidateId(),
                 "不", high, null, false, view(), false, built.hardRiskFlags(), false, "VALIDATED",
-                DecisionPolicy.PILOT_DEFAULT);
+                "pilot-profile-v1", DecisionPolicy.PILOT_DEFAULT);
         DecisionPolicy.Output risk = DecisionPolicy.resolve(in);
         assertEquals(DecisionModels.Verdict.HUMAN_REQUIRED, risk.verdict());
         assertTrue(risk.reasonCodes().contains("HARD_RISK_NEGATION"));
@@ -142,7 +143,7 @@ class PolicyTest {
         // 真正来源冲突
         DecisionPolicy.Input conflict = new DecisionPolicy.Input(snapshot, set, built.aliasToCandidateId(),
                 "不", high, null, false, view(), true, List.of(), false, "VALIDATED",
-                DecisionPolicy.PILOT_DEFAULT);
+                "pilot-profile-v1", DecisionPolicy.PILOT_DEFAULT);
         DecisionPolicy.Output conflictOut = DecisionPolicy.resolve(conflict);
         assertEquals(DecisionModels.Verdict.HUMAN_REQUIRED, conflictOut.verdict());
         assertTrue(conflictOut.reasonCodes().contains("SOURCE_CONFLICT"));
@@ -186,11 +187,11 @@ class PolicyTest {
                 "b1", "i1", "otext", "basis", "span");
         DecisionPolicy.Output stale = DecisionPolicy.resolve(new DecisionPolicy.Input(snapshot, set,
                 built.aliasToCandidateId(), "甲", result("C1", 0.95, 0.0, 0.0), null, false, moved,
-                false, List.of(), false, "VALIDATED", DecisionPolicy.PILOT_DEFAULT));
+                false, List.of(), false, "VALIDATED", "pilot-profile-v1", DecisionPolicy.PILOT_DEFAULT));
         assertEquals(DecisionModels.Verdict.STALE, stale.verdict());
         DecisionPolicy.Output cancelled = DecisionPolicy.resolve(new DecisionPolicy.Input(snapshot, set,
                 built.aliasToCandidateId(), "甲", result("C1", 0.95, 0.0, 0.0), null, true, view(),
-                false, List.of(), false, "VALIDATED", DecisionPolicy.PILOT_DEFAULT));
+                false, List.of(), false, "VALIDATED", "pilot-profile-v1", DecisionPolicy.PILOT_DEFAULT));
         assertEquals(DecisionModels.Verdict.CANCELLED, cancelled.verdict());
         Map<String, Double> evil = Map.of("C9", 0.9, "C0", 0.05, "NONE_SUPPORTED", 0.03,
                 "NEED_MORE_EVIDENCE", 0.02);
@@ -200,9 +201,46 @@ class PolicyTest {
                 Map.of(), Map.of(), "jev-synth-1", null, "h");
         DecisionPolicy.Output unknown = DecisionPolicy.resolve(new DecisionPolicy.Input(snapshot, set,
                 built.aliasToCandidateId(), "甲", forged, null, false, view(), false, List.of(),
-                false, "VALIDATED", DecisionPolicy.PILOT_DEFAULT));
+                false, "VALIDATED", "pilot-profile-v1", DecisionPolicy.PILOT_DEFAULT));
         assertEquals(DecisionModels.Verdict.UNAVAILABLE, unknown.verdict());
         assertTrue(unknown.reasonCodes().contains("UNKNOWN_CANDIDATE"));
+    }
+
+    @Test void jr08T02_candidateDeltaRisksCoversNegationNumeralsAndUnits() {
+        // 原字“末” 候选“未” -> 风险为 NEGATION
+        assertTrue(DecisionPolicy.candidateDeltaRisks("末", "未").contains("NEGATION"));
+
+        // 繁体“無”
+        assertTrue(DecisionPolicy.candidateDeltaRisks("有", "無").contains("NEGATION"));
+        // 繁体“沒”
+        assertTrue(DecisionPolicy.candidateDeltaRisks("出", "沒").contains("NEGATION"));
+
+        // 中文数词改变：“一” -> “二”
+        assertTrue(DecisionPolicy.candidateDeltaRisks("一", "二").contains("NUMERIC"));
+
+        // 单位改变：“尺” -> “寸”
+        assertTrue(DecisionPolicy.candidateDeltaRisks("尺", "寸").contains("UNIT"));
+
+        // 标点符号改变：“，” -> “。”
+        assertTrue(DecisionPolicy.candidateDeltaRisks("，", "。").contains("SYMBOL"));
+    }
+
+    @Test void jr08T03_validatedWithoutCalibrationProfileIsUncalibrated() throws Exception {
+        DecisionModels.CandidateSet set = set("甲乙", "甲",
+                raw("甲", DecisionModels.SourceKind.PRIMARY_OCR, "G0"),
+                raw("乙", DecisionModels.SourceKind.CROP_OCR, "G1"));
+        DecisionStateBuilder.BuiltState built = built(set, "甲乙");
+        DecisionModels.DecisionSnapshot snapshot =
+                DecisionStateBuilder.snapshot(ref(), set.candidateSetHash(), built);
+        // calibrationStatus 为 VALIDATED，但 calibrationProfile 为空
+        DecisionPolicy.Input inputWithoutProfile = new DecisionPolicy.Input(snapshot, set,
+                built.aliasToCandidateId(), "甲", result("C1", 0.95, 0.0, 0.0),
+                null, false, view(), false, List.of(), false, "VALIDATED", "",
+                DecisionPolicy.PILOT_DEFAULT);
+        DecisionPolicy.Output out = DecisionPolicy.resolve(inputWithoutProfile);
+        assertEquals(DecisionModels.Verdict.CANDIDATES_ONLY, out.verdict());
+        assertTrue(out.reasonCodes().contains("UNCALIBRATED"));
+        assertNull(out.admittedRecommendationId());
     }
 
     @Test void evidenceAndPolicyVersionedSeparately() {
