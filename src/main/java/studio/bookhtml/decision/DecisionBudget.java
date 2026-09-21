@@ -45,17 +45,20 @@ public class DecisionBudget {
         }
     }
 
-    private void persist(String bookId) {
+    private boolean persist(String bookId) {
         try {
             store.saveBudgetState(bookId, new DecisionStore.BudgetState(
                     reservedOf(bookId).get(), reportedOf(bookId).get(), 0, Instant.now()));
-        } catch (IOException ignored) {
+            return true;
+        } catch (Exception e) {
+            return false;
         }
     }
 
     /**
      * 原子预留：限额内扣减成功返回 true；不足返回 false（拒绝发生在外呼前）。
      * limitMinor 为 null 表示未设预算，一律拒绝。
+     * T57：预留落盘失败则回滚并拒绝，不发送。
      */
     public boolean tryReserve(String bookId, long amountMinor, Long limitMinor) {
         if (bookId == null || amountMinor < 0 || limitMinor == null || limitMinor < 0) return false;
@@ -63,12 +66,15 @@ public class DecisionBudget {
             long current = reservedOf(bookId).get();
             if (current + amountMinor > limitMinor) return false;
             reservedOf(bookId).addAndGet(amountMinor);
-            persist(bookId);
+            if (!persist(bookId)) {
+                reservedOf(bookId).addAndGet(-amountMinor);
+                return false;
+            }
             return true;
         }
     }
 
-    /** 未发送即取消：释放预留。 */
+    /** 未发送即取消：释放预留（落盘尽力，内存已更新为安全方向）。 */
     public void release(String bookId, long amountMinor) {
         if (bookId == null || amountMinor <= 0) return;
         synchronized (lock(bookId)) {

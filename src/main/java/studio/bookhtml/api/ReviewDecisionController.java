@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RestController;
+import studio.bookhtml.decision.DecisionAcceptService;
 import studio.bookhtml.decision.DecisionCoordinator;
 import studio.bookhtml.decision.DecisionModels;
 import studio.bookhtml.decision.DecisionStateBuilder;
@@ -26,12 +27,14 @@ import studio.bookhtml.store.BookStore;
 @RequestMapping("/api")
 public class ReviewDecisionController {
     private final DecisionCoordinator coordinator;
+    private final DecisionAcceptService acceptService;
     private final DecisionStore decisions;
     private final BookStore store;
 
-    public ReviewDecisionController(DecisionCoordinator coordinator, DecisionStore decisions,
-                                    BookStore store) {
+    public ReviewDecisionController(DecisionCoordinator coordinator, DecisionAcceptService acceptService,
+                                    DecisionStore decisions, BookStore store) {
         this.coordinator = coordinator;
+        this.acceptService = acceptService;
         this.decisions = decisions;
         this.store = store;
     }
@@ -41,6 +44,38 @@ public class ReviewDecisionController {
                                         Boolean allowFreshVision) {}
 
     public record CancelBody(Integer expectedStateVersion) {}
+
+    public record AcceptDecisionBody(String clientOperationId, String blockId,
+                                     Integer expectedPageRevision, String issueBasisHash,
+                                     String candidateSetHash, String candidateId,
+                                     Boolean userAttestedSourceCheck) {}
+
+    @RequestMapping(value = "/books/{bookId}/pages/{page}/issues/{issueId}/decisions/{decisionId}/accept",
+            method = RequestMethod.POST)
+    public Map<String, Object> accept(@PathVariable("bookId") String bookId,
+                                      @PathVariable("page") int page,
+                                      @PathVariable("issueId") String issueId,
+                                      @PathVariable("decisionId") String decisionId,
+                                      @RequestBody(required = false) AcceptDecisionBody body)
+            throws java.io.IOException {
+        if (body == null || body.clientOperationId() == null || body.blockId() == null
+                || body.expectedPageRevision() == null || body.issueBasisHash() == null
+                || body.candidateSetHash() == null || body.candidateId() == null)
+            throw new ApiException(HttpStatus.BAD_REQUEST, "参数非法");
+        DecisionAcceptService.AcceptResult result = acceptService.accept(bookId, page, issueId,
+                decisionId, new DecisionAcceptService.AcceptBody(body.clientOperationId(),
+                        body.blockId(), body.expectedPageRevision(), body.issueBasisHash(),
+                        body.candidateSetHash(), body.candidateId(),
+                        Boolean.TRUE.equals(body.userAttestedSourceCheck())));
+        Map<String, Object> response = new LinkedHashMap<>();
+        // 成功后返回此次实际 committed Page/revision，不再 readPage 取可能被推进的版本
+        response.put("pageRevision", BookStore.revisionOrZero(result.committed()));
+        response.put("idempotent", result.idempotent());
+        response.put("resolved", true);
+        response.put("issueId", issueId);
+        response.put("decisionId", decisionId);
+        return response;
+    }
 
     @RequestMapping(value = "/books/{bookId}/pages/{page}/issues/{issueId}/decision-jobs",
             method = RequestMethod.POST)

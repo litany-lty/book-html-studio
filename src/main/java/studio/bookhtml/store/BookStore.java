@@ -5,7 +5,11 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Repository;
 import studio.bookhtml.api.ApiException;
 import studio.bookhtml.config.AppProperties;
+import studio.bookhtml.decision.DecisionModels;
+import studio.bookhtml.decision.IssueBasis;
+import studio.bookhtml.domain.Block;
 import studio.bookhtml.domain.Book;
+import studio.bookhtml.domain.ContentIssue;
 import studio.bookhtml.domain.Job;
 import studio.bookhtml.domain.Page;
 
@@ -296,6 +300,82 @@ public class BookStore {
     public void writeCandidate(String id, Page candidate) throws IOException {
         synchronized (dirLock) {
             atomic(candidatePath(id, candidate.pageNumber()), candidate);
+        }
+    }
+
+    /** J09：锁内构造单疑点人工变更。内部复用相同资格与持久化逻辑，不另写保存路径。 */
+    public record IssueAcceptSpec(String blockId, String issueId, String expectedBasisHash,
+                                  String candidateSetHash, String candidateId,
+                                  String originalReplacement, String simplifiedReplacement,
+                                  String converterVersion, String clientOperationId,
+                                  String decisionId, String basisPdfSha256) {}
+
+    public record IssueAcceptResult(Page committed, boolean idempotent) {}
+
+    public IssueAcceptResult applyIssueResolution(String id, int pageNumber, int expectedRevision,
+                                                 CommitActor actor, String expectedJobId, CommitOp op,
+                                                 IssueAcceptSpec spec) throws IOException {
+        synchronized (dirLock) {
+            Path target = pagePath(id, pageNumber);
+            Page current = Files.exists(target) ? read(target, Page.class, "页面数据损坏") : null;
+            if (current == null) throw new ApiException(HttpStatus.NOT_FOUND, "页码不存在");
+            Block block = current.blocks() == null ? null : current.blocks().stream()
+                    .filter(b -> b != null && spec.blockId().equals(b.id())).findFirst().orElse(null);
+            if (block == null) throw new ApiException(HttpStatus.NOT_FOUND, "指定的块不存在");
+            ContentIssue issue = block.issues() == null ? null : block.issues().stream()
+                    .filter(i -> i != null && spec.issueId().equals(i.id())).findFirst().orElse(null);
+            if (issue == null) throw new ApiException(HttpStatus.NOT_FOUND, "指定的问题不存在");
+            // 幂等先行：同 operationId 同候选同基线返回已应用结果，不再推进 revision；
+            // 同 operationId 不同内容拒绝；其他人工编辑后无法安全重放时走版本冲突。
+            DecisionModels.ReviewResolution existing = issue.resolution();
+            if (existing != null && spec.clientOperationId().equals(existing.clientOperationId())) {
+                if (spec.candidateId().equals(existing.candidateId())
+                        && spec.candidateSetHash().equals(existing.candidateSetHash())
+                        && spec.expectedBasisHash().equals(existing.basisIssueHash()))
+                    return new IssueAcceptResult(current, true);
+                throw new PageConflictException(revisionOrZero(current),
+                        "相同操作已应用不同内容，拒绝重放，请核对后重试");
+            }
+            int currentRev = revisionOrZero(current);
+            if (currentRev != expectedRevision)
+                throw new PageConflictException(currentRev, "页面已被更新，请刷新后重试");
+            String basis;
+            try {
+                basis = IssueBasis.basisHash(block, issue);
+            } catch (IllegalArgumentException e) {
+                throw new ApiException(HttpStatus.CONFLICT, "问题基线无效：" + e.getMessage());
+            }
+            if (!basis.equals(spec.expectedBasisHash()))
+                throw new PageConflictException(currentRev, "问题基线已变化，请刷新后重试");
+            if (spec.originalReplacement() == null || spec.originalReplacement().isBlank())
+                throw new ApiException(HttpStatus.BAD_REQUEST, "候选正文为空");
+            java.time.Instant now = java.time.Instant.now();
+            DecisionModels.ReviewResolution resolution = new DecisionModels.ReviewResolution(
+                    UUID.randomUUID().toString(), spec.clientOperationId(),
+                    DecisionModels.Origin.JEV_ASSISTED, spec.decisionId(), spec.candidateId(),
+                    spec.candidateSetHash(), spec.basisPdfSha256(), currentRev, basis,
+                    spec.originalReplacement(), spec.simplifiedReplacement(), spec.converterVersion(),
+                    true, now, currentRev + 1);
+            ContentIssue confirmed = new ContentIssue(issue.id(), issue.kind(), issue.start(),
+                    issue.end(), issue.simplifiedStart(), issue.simplifiedEnd(), issue.reason(),
+                    true, spec.originalReplacement(), issue.inferredText(), resolution);
+            List<ContentIssue> issues = new java.util.ArrayList<>(block.issues().size());
+            for (ContentIssue currentIssue : block.issues())
+                issues.add(currentIssue != null && spec.issueId().equals(currentIssue.id())
+                        ? confirmed : currentIssue);
+            Block changed = new Block(block.id(), block.type(), block.order(), block.bbox(),
+                    block.writingMode(), block.original(), block.simplified(), block.confidence(),
+                    block.uncertain(), block.reviewed(), block.headingLevel(), block.source(),
+                    block.sourceIds(), block.suggestion(), block.sourceRect(), List.copyOf(issues));
+            List<Block> blocks = new java.util.ArrayList<>(current.blocks().size());
+            for (Block currentBlock : current.blocks())
+                blocks.add(currentBlock != null && spec.blockId().equals(currentBlock.id())
+                        ? changed : currentBlock);
+            Page proposed = new Page(current.pageNumber(), current.width(), current.height(),
+                    current.status(), current.provider(), List.copyOf(blocks), current.warnings(),
+                    current.reviewed(), null, current.sourceRecords(), null);
+            checkCommitEligibility(id, current, proposed, currentRev, actor, expectedJobId, op);
+            return new IssueAcceptResult(persistNewRevision(id, current, proposed), false);
         }
     }
     public Page readCandidate(String id, int page) {
