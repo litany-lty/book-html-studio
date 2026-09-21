@@ -603,19 +603,22 @@
         } catch (error) {
           return `预览失败：${String((error && error.message) || error)}，未做任何修改。`;
         }
-        const ok = (result.appliable || []).length, conflict = (result.conflicts || []).length, invalid = (result.invalid || []).length;
-        if (ok === 0 && conflict === 0) return `无可应用条目（无效 ${invalid}），未做任何修改。`;
+        const ok = (result.appliable || []).length, conflict = (result.conflicts || []).length,
+          invalid = (result.invalid || []).length, pending = (result.pending || []).length;
+        if (ok === 0 && conflict === 0 && pending === 0) return `无可应用条目（无效 ${invalid}），未做任何修改。`;
         let applied = 0;
         try {
+          const findRecord = k => (parsed.records || []).find(r => r && r.key === k) || {};
           const confirm = await opened.backend.confirmImport([
-            ...(result.appliable || []).map(a => ({ ...(parsed.records.find(r => r && r.key === a.key) || {}), key: a.key })),
+            ...(result.appliable || []).map(a => ({ ...findRecord(a.key), key: a.key })),
+            ...(result.pending || []).map(a => ({ ...findRecord(a.key), key: a.key })),
           ]);
           applied = confirm.filter(r => r.status === 'SAVED').length;
         } catch (error) {
           return `应用失败：${String((error && error.message) || error)}，部分条目可能已写入，请核对。`;
         }
         render(); refresh();
-        return `预览：可应用 ${ok}，冲突 ${conflict}，无效 ${invalid}；已应用 ${applied}。冲突条目未覆盖。`;
+        return `预览：可应用 ${ok}，待核验 ${pending}，冲突 ${conflict}，无效 ${invalid}；已应用 ${applied}。冲突条目未覆盖。`;
       }
       function appendText(container, block, text, page = getPage()) {
         const original = getScript() === 'original';

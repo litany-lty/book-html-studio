@@ -152,14 +152,19 @@
         return { schemaVersion: 1, kind: 'book-html-offline-backup', bookUid, exportedAt: Date.now(), records: all.records };
       },
       async importBackupPreview(backup) {
-        const result = { appliable: [], conflicts: [], invalid: [] };
+        const result = { appliable: [], conflicts: [], invalid: [], pending: [] };
         const list = backup && Array.isArray(backup.records) ? backup.records : null;
         if (!list) return { ...result, invalid: [{ reason: 'NOT_A_BACKUP' }] };
         for (const item of list) {
           if (!item || typeof item !== 'object' || item.bookUid !== bookUid
             || !Number.isInteger(item.sourcePage) || typeof item.blockId !== 'string'
-            || typeof item.issueId !== 'string' || !item.issueBasis || typeof item.issueBasis !== 'object') {
+            || typeof item.issueId !== 'string') {
             result.invalid.push({ reason: 'INVALID_RECORD', key: (item && item.key) || null });
+            continue;
+          }
+          if (!item.issueBasis || typeof item.issueBasis !== 'object') {
+            // 无基线：可导入为待核验，不直接应用
+            result.pending.push({ key: item.key });
             continue;
           }
           const current = await txPromise(db, 'readonly', store => {
