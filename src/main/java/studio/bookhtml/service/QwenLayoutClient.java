@@ -7,6 +7,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import studio.bookhtml.api.ApiException;
 import studio.bookhtml.config.QwenAssistProperties;
+import studio.bookhtml.decision.QuoteLocator;
 import studio.bookhtml.domain.Block;
 import studio.bookhtml.domain.ContentIssue;
 
@@ -296,9 +297,12 @@ public class QwenLayoutClient {
                     invalidReferences = true;
                     continue;
                 }
+                List<String> ambiguityNotes = new ArrayList<>();
                 suggestions.add(new Suggestion(sourceId, order, text(node, "type"),
                         headingLevel(node), safeSuggestion(text(node, "suggestion")),
-                        node.path("uncertain").asBoolean(false), proposedIssues(node.get("issues"), byId.get(sourceId))));
+                        node.path("uncertain").asBoolean(false),
+                        proposedIssues(node.get("issues"), byId.get(sourceId), ambiguityNotes),
+                        List.copyOf(ambiguityNotes)));
             }
             if (invalidReferences || referenced.size() != byId.size() || suggestions.size() != byId.size()) {
                 return fallback(sources, "Qwen3.8-Max 辅助引用关系无效，已保留 OCR 原顺序和分类");
@@ -314,6 +318,10 @@ public class QwenLayoutClient {
                         : null;
                 String modelSuggestion = suggestion.suggestion();
                 String combinedSuggestion = append(source.suggestion(), modelSuggestion);
+                if (!suggestion.ambiguityNotes().isEmpty())
+                    combinedSuggestion = append(combinedSuggestion,
+                            "Qwen 标记的疑点中有 " + suggestion.ambiguityNotes().size()
+                                    + " 处因重复出现无法唯一定位，已保留区域级复核提示，未绑定具体文字");
                 List<ContentIssue> issues = mergeIssues(source.issues(), suggestion.issues());
                 boolean unresolvedIssue = issues.stream().anyMatch(issue -> !issue.resolved());
                 boolean uncertain = source.uncertain() || suggestion.uncertain() || notBlank(modelSuggestion) || unresolvedIssue;
@@ -367,7 +375,11 @@ public class QwenLayoutClient {
         return level >= 1 && level <= 6 ? level : null;
     }
 
-    private static List<ContentIssue> proposedIssues(JsonNode nodes, Block source) {
+    /**
+     * J02/FIX-07：重复 quote 安全定位。唯一出现直接绑定；提供可验证 occurrenceIndex/
+     * 上下文时程序枚举校验；仍歧义只记区域级提示，不绑定第一处，不悄悄删除。
+     */
+    private static List<ContentIssue> proposedIssues(JsonNode nodes, Block source, List<String> ambiguityNotes) {
         if (nodes == null || !nodes.isArray() || source == null || source.original() == null) return List.of();
         List<ContentIssue> result = new ArrayList<>();
         for (JsonNode node : nodes) {
@@ -375,9 +387,19 @@ public class QwenLayoutClient {
             String quote = text(node, "quote");
             String kind = text(node, "kind");
             if (!notBlank(quote) || !("unreadable".equals(kind) || "suspected".equals(kind))) continue;
-            int start = source.original().indexOf(quote);
-            if (start < 0 || source.original().indexOf(quote, start + 1) >= 0) continue;
-            int end = start + quote.length();
+            Integer occurrence = node.has("occurrenceIndex") && node.get("occurrenceIndex").canConvertToInt()
+                    ? node.get("occurrenceIndex").asInt() : null;
+            QuoteLocator.LocateResult located = QuoteLocator.locate(source.original(), quote, occurrence,
+                    text(node, "contextBefore"), text(node, "contextAfter"));
+            if (located instanceof QuoteLocator.Ambiguous ambiguous) {
+                if (QuoteLocator.LOCATION_AMBIGUOUS.equals(ambiguous.code())
+                        || QuoteLocator.CONTEXT_MISMATCH.equals(ambiguous.code())
+                        || QuoteLocator.BAD_OCCURRENCE.equals(ambiguous.code()))
+                    ambiguityNotes.add(kind + ":" + quote);
+                continue;
+            }
+            int start = ((QuoteLocator.Located) located).start();
+            int end = ((QuoteLocator.Located) located).end();
             if (result.stream().anyMatch(issue -> overlaps(start, end, issue.start(), issue.end()))) continue;
             String reason = safeSuggestion(text(node, "reason"));
             if (!notBlank(reason)) reason = "Qwen3.8-Max 根据页面图像标记";
@@ -489,7 +511,8 @@ public class QwenLayoutClient {
     private static List<String> copyList(List<String> value) { return value == null ? null : List.copyOf(value); }
 
     private record Suggestion(String sourceId, int order, String type, Integer headingLevel,
-                              String suggestion, boolean uncertain, List<ContentIssue> issues) {}
+                              String suggestion, boolean uncertain, List<ContentIssue> issues,
+                              List<String> ambiguityNotes) {}
     private record RegionSpec(String id, int x, int y, int width, int height) {}
     private record ImageRegion(String id, double[] bbox, byte[] bytes) {}
 

@@ -211,10 +211,33 @@ class QwenLayoutClientTest {
                 + "\"quote\":\"甲\",\"kind\":\"unreadable\",\"reason\":\"不确定\"}]}]}";
         assertTrue(clientWith(ambiguous).assist(new byte[]{1}, List.of(repeated), "auto", () -> false).get(0).issues().isEmpty());
 
-        Block unique = block("b", "text", 0, "乙");
-        String unsafe = "{\"blocks\":[{\"sourceId\":\"b\",\"order\":0,\"type\":\"text\",\"issues\":[{"
+        Block unique = block("b", "text", 0, "乙");        String unsafe = "{\"blocks\":[{\"sourceId\":\"b\",\"order\":0,\"type\":\"text\",\"issues\":[{"
                 + "\"quote\":\"乙\",\"kind\":\"suspected\",\"reason\":\"图像疑点\",\"inferredText\":\"<script>x</script>\"}]}]}";
         assertNull(clientWith(unsafe).assist(new byte[]{1}, List.of(unique), "auto", () -> false).get(0).issues().get(0).inferredText());
+    }
+
+    @Test
+    void occurrenceIndexBindsVerifiedPositionAndAmbiguityKeepsRegionHint() throws Exception {
+        // T33：可验证 occurrence 绑定正确那次；不可验证保留区域级提示，不绑第一处
+        Block repeated = block("a", "text", 0, "甲乙甲丙");
+        String second = "{\"blocks\":[{\"sourceId\":\"a\",\"order\":0,\"type\":\"text\",\"issues\":[{"
+                + "\"quote\":\"甲\",\"kind\":\"suspected\",\"reason\":\"复核\",\"occurrenceIndex\":1}]}]}";
+        Block bound = clientWith(second).assist(new byte[]{1}, List.of(repeated), "auto", () -> false).get(0);
+        assertEquals(1, bound.issues().size());
+        assertEquals(2, bound.issues().get(0).start());
+        assertEquals(3, bound.issues().get(0).end());
+
+        String ambiguous = "{\"blocks\":[{\"sourceId\":\"a\",\"order\":0,\"type\":\"text\",\"issues\":[{"
+                + "\"quote\":\"甲\",\"kind\":\"suspected\",\"reason\":\"复核\"}]}]}";
+        Block hinted = clientWith(ambiguous).assist(new byte[]{1}, List.of(repeated), "auto", () -> false).get(0);
+        assertTrue(hinted.issues().isEmpty());
+        assertTrue(hinted.suggestion() != null && hinted.suggestion().contains("无法唯一定位"));
+
+        String context = "{\"blocks\":[{\"sourceId\":\"a\",\"order\":0,\"type\":\"text\",\"issues\":[{"
+                + "\"quote\":\"甲\",\"kind\":\"suspected\",\"reason\":\"复核\",\"contextBefore\":\"乙\",\"contextAfter\":\"丙\"}]}]}";
+        Block ctx = clientWith(context).assist(new byte[]{1}, List.of(repeated), "auto", () -> false).get(0);
+        assertEquals(1, ctx.issues().size());
+        assertEquals(2, ctx.issues().get(0).start());
     }
 
     @Test
