@@ -53,6 +53,7 @@ export function createDecisionPanel(deps) {
   const { getSession, hasDirty, onAccepted, onRecommendation, showError } = deps;
   let disposed = false;
   let fetchController = null;
+  let pollController = null;
   let pollTimer = 0;
   let panelEpoch = 0;
   let acceptInFlight = false;
@@ -77,6 +78,8 @@ export function createDecisionPanel(deps) {
   function abortFlight() {
     fetchController?.abort();
     fetchController = null;
+    pollController?.abort();
+    pollController = null;
     if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = 0; }
   }
 
@@ -147,23 +150,36 @@ export function createDecisionPanel(deps) {
 
   async function pollJob(jobId, scope) {
     if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = 0; }
+    // JR-02：轮询用独立 AbortController，不与 loadBasis 共享；瞬时失败重约，
+    // Abort 中止只是减少浪费，不能当正确性保证（迟到响应一律 sameScope 丢弃）。
+    const controller = new AbortController();
+    pollController = controller;
+    let failures = 0;
     const tick = async () => {
       if (disposed || !sameScope(scope)) return;
       try {
-        const job = await api.decisionJob(scope.bookId, jobId, fetchController?.signal);
+        const job = await api.decisionJob(scope.bookId, jobId, controller.signal);
         if (!sameScope(scope)) return;
         if (TERMINAL.has(job.jobState)) {
           await refresh();
           return;
         }
+        failures = 0;
         renderStatus(`${stageLabel(job.progressStage)}…`);
         pollTimer = window.setTimeout(tick, 800);
       } catch (error) {
         if (error?.name === 'StaleRequest') return;
         if (!sameScope(scope)) return;
+        failures++;
+        if (failures < 30) {
+          pollTimer = window.setTimeout(tick, 800);
+          return;
+        }
         renderError(error);
       }
     };
+    // 旧链路停止轮询，避免双重 tick
+    fetchController?.abort();
     await tick();
   }
 

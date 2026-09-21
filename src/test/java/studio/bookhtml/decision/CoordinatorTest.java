@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -459,6 +460,70 @@ class CoordinatorTest {
         assertEquals(0, f.transport.calls.get());
     }
 
+    @Test void jr06T01_hundredConcurrentAcrossBooksRespectsGlobalCapacity() throws Exception {
+        // JR-06-T01：并发 100 个请求跨多书入队：未超全局容量，无许可泄漏，满载明确拒绝
+        Fixture f = fixture(true);
+        f.config.setMaxQueueEntries(50);
+        int books = 4, issuesPerBook = 25;
+        List<String> bookIds = new ArrayList<>();
+        for (int b = 0; b < books; b++) {
+            String bookId = "bbbbbbbb-0000-4000-8000-" + String.format("%012d", b);
+            bookIds.add(bookId);
+            f.store.createBookDirectory(bookId);
+            f.store.writeBook(new Book(bookId, "t", "t.pdf", 9, Instant.now(), Instant.now(), 0, 0));
+            Files.write(f.store.pdf(bookId), "pdf-bytes".getBytes());
+            List<Block> blocks = new ArrayList<>();
+            for (int i = 0; i < issuesPerBook; i++) {
+                String bid = "b" + i;
+                blocks.add(new Block(bid, "text", i, new double[]{0, 0, .4, .2}, "horizontal-tb",
+                        "甲乙丙丁戊己庚辛壬癸甲乙丙丁戊", "甲乙丙丁戊己庚辛壬癸甲乙丙丁戊", 0.9, true, false,
+                        null, "paddle", List.of(bid), "疑点", new double[]{0, 0, 40, 20},
+                        List.of(new ContentIssue("i-" + bid, "suspected", 0, 1, 0, 1, "理由", false, null, "推测"))));
+            }
+            f.store.writePage(bookId, new Page(3, 600, 800, "READY", "paddle",
+                    blocks, List.of(), false, null, blocks), false);
+        }
+        java.util.concurrent.ExecutorService pool =
+                java.util.concurrent.Executors.newFixedThreadPool(16);
+        java.util.concurrent.atomic.AtomicInteger accepted = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger rejected = new java.util.concurrent.atomic.AtomicInteger();
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+        for (String bookId : bookIds) {
+            Page page = f.store.readPage(bookId, 3);
+            for (Block block : page.blocks()) {
+                ContentIssue issue = block.issues().get(0);
+                String basis = IssueBasis.basisHash(block, issue);
+                int rev = BookStore.revisionOrZero(page);
+                String bid = block.id();
+                String iid = issue.id();
+                futures.add(pool.submit(() -> {
+                    try {
+                        DecisionCoordinator.CreateResult r = f.coordinator.createOrReuse(bookId, 3, iid,
+                                new DecisionCoordinator.CreateBody("op-" + bookId + "-" + bid + "-"
+                                        + System.nanoTime(), bid, rev, basis, false));
+                        if (r.httpStatus() == 202) accepted.incrementAndGet();
+                    } catch (ApiException e) {
+                        if (e.status() == HttpStatus.TOO_MANY_REQUESTS) rejected.incrementAndGet();
+                        else throw new RuntimeException(e);
+                    }
+                }));
+            }
+        }
+        for (java.util.concurrent.Future<?> future : futures) future.get(30, java.util.concurrent.TimeUnit.SECONDS);
+        pool.shutdown();
+        assertTrue(pool.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS));
+        assertEquals(100, accepted.get() + rejected.get());
+        assertTrue(accepted.get() <= 50, "全局容量不得超限，实际接受=" + accepted.get());
+        assertTrue(rejected.get() >= 50, "满载必须明确拒绝，实际拒绝=" + rejected.get());
+        // 无许可泄漏：已接受作业全部可读回
+        for (String bookId : bookIds) {
+            List<DecisionStore.DecisionJob> jobs = f.decisions.listJobs(bookId);
+            for (DecisionStore.DecisionJob job : jobs) {
+                assertNotNull(f.coordinator.queryJob(bookId, job.jobId()));
+            }
+        }
+    }
+
     @Test void jr06T05_duplicateRecoveryDoesNotDuplicateQueueAndUnknownDoesNotResend() throws Exception {
         // JR-06-T05: 重复恢复不重复入队；已发送未知标 INTERRUPTED 不重发
         Fixture f = fixture(false);
@@ -538,7 +603,7 @@ class CoordinatorTest {
     }
 
     @Test void jr06T03_cancelAndWorkerRaceTerminalNeverRegresses() throws Exception {
-        // JR-06-T03：取消与 worker 同时写状态终态不倒退、版本单调
+        // JR-06-T03：取消与 worker 同时写状态终态不倒退、版本单调（CAS）
         Fixture f = fixture(true);
         Page page = f.store.readPage(BOOK, 3);
         Block block = page.blocks().get(0);
@@ -565,5 +630,31 @@ class CoordinatorTest {
         f.coordinator.runInline(BOOK, queued.jobId());
         DecisionStore.DecisionJob terminal = f.coordinator.queryJob(BOOK, queued.jobId());
         assertTrue(List.of("CANCELLED", "CANCEL_REQUESTED", "FAILED").contains(terminal.state()));
+    }
+
+    @Test void jr06T00_backgroundDrainProcessesCreatedJob() throws Exception {
+        // JR-06 回归：先落盘后入队；后台 worker 必须消费 createOrReuse 作业（曾出现先入队后落盘竞态致静默丢弃）
+        Fixture f = fixture(true);
+        f.coordinator.start();
+        try {
+            Page page = f.store.readPage(BOOK, 3);
+            Block block = page.blocks().get(0);
+            ContentIssue issue = block.issues().get(0);
+            DecisionCoordinator.CreateResult created = f.coordinator.createOrReuse(BOOK, 3, "i-b1",
+                    new DecisionCoordinator.CreateBody("op-drain-" + System.nanoTime(), "b1",
+                            BookStore.revisionOrZero(page), IssueBasis.basisHash(block, issue), false));
+            assertEquals(202, created.httpStatus());
+            DecisionStore.DecisionJob terminal = null;
+            for (int i = 0; i < 40; i++) {
+                Thread.sleep(500);
+                terminal = f.coordinator.queryJob(BOOK, created.job().jobId());
+                if (!"QUEUED".equals(terminal.state()) && !"RUNNING".equals(terminal.state())) break;
+            }
+            assertNotNull(terminal);
+            assertEquals("SUCCEEDED", terminal.state());
+            assertNotNull(terminal.decisionId());
+        } finally {
+            f.coordinator.stop();
+        }
     }
 }

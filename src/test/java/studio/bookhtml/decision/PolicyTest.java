@@ -142,7 +142,7 @@ class PolicyTest {
                 0.999, 0.0, 0.0);
         DecisionPolicy.Input in = new DecisionPolicy.Input(snapshot, set, built.aliasToCandidateId(),
                 "不", high, null, false, view(), false, built.hardRiskFlags(), false, "VALIDATED",
-                "cal-v1|model=test-model|template=question-template-v2|candidate=candidate-config-v3|policy=decision-policy-v1|threshold=pilot-default-v1|dataset=test|result=test-ok", DecisionPolicy.PILOT_DEFAULT);
+                "cal-v1|model=test-model|template=question-template-v2|candidate=candidate-config-v4|policy=decision-policy-v1|threshold=pilot-default-v1|dataset=test|result=test-ok", DecisionPolicy.PILOT_DEFAULT);
         DecisionPolicy.Output risk = DecisionPolicy.resolve(in);
         assertEquals(DecisionModels.Verdict.HUMAN_REQUIRED, risk.verdict());
         assertTrue(risk.reasonCodes().contains("HARD_RISK_NEGATION"));
@@ -150,7 +150,7 @@ class PolicyTest {
         // 真正来源冲突
         DecisionPolicy.Input conflict = new DecisionPolicy.Input(snapshot, set, built.aliasToCandidateId(),
                 "不", high, null, false, view(), true, List.of(), false, "VALIDATED",
-                "cal-v1|model=test-model|template=question-template-v2|candidate=candidate-config-v3|policy=decision-policy-v1|threshold=pilot-default-v1|dataset=test|result=test-ok", DecisionPolicy.PILOT_DEFAULT);
+                "cal-v1|model=test-model|template=question-template-v2|candidate=candidate-config-v4|policy=decision-policy-v1|threshold=pilot-default-v1|dataset=test|result=test-ok", DecisionPolicy.PILOT_DEFAULT);
         DecisionPolicy.Output conflictOut = DecisionPolicy.resolve(conflict);
         assertEquals(DecisionModels.Verdict.HUMAN_REQUIRED, conflictOut.verdict());
         assertTrue(conflictOut.reasonCodes().contains("SOURCE_CONFLICT"));
@@ -185,7 +185,7 @@ class PolicyTest {
                 snapshotMismatch, set, builtMismatch.aliasToCandidateId(), "甲",
                 result("C1", 0.95, 0.0, 0.0), null, false, view(), false, List.of(), false,
                 "VALIDATED",
-                "cal-v1|model=test-model|template=wrong-template|candidate=candidate-config-v3"
+                "cal-v1|model=test-model|template=wrong-template|candidate=candidate-config-v4"
                         + "|policy=decision-policy-v1|threshold=pilot-default-v1|dataset=test|result=test-ok",
                 DecisionPolicy.PILOT_DEFAULT));
         assertEquals(DecisionModels.Verdict.CANDIDATES_ONLY, mismatched.verdict());
@@ -207,11 +207,11 @@ class PolicyTest {
                 "b1", "i1", "otext", "basis", "span");
         DecisionPolicy.Output stale = DecisionPolicy.resolve(new DecisionPolicy.Input(snapshot, set,
                 built.aliasToCandidateId(), "甲", result("C1", 0.95, 0.0, 0.0), null, false, moved,
-                false, List.of(), false, "VALIDATED", "cal-v1|model=test-model|template=question-template-v2|candidate=candidate-config-v3|policy=decision-policy-v1|threshold=pilot-default-v1|dataset=test|result=test-ok", DecisionPolicy.PILOT_DEFAULT));
+                false, List.of(), false, "VALIDATED", "cal-v1|model=test-model|template=question-template-v2|candidate=candidate-config-v4|policy=decision-policy-v1|threshold=pilot-default-v1|dataset=test|result=test-ok", DecisionPolicy.PILOT_DEFAULT));
         assertEquals(DecisionModels.Verdict.STALE, stale.verdict());
         DecisionPolicy.Output cancelled = DecisionPolicy.resolve(new DecisionPolicy.Input(snapshot, set,
                 built.aliasToCandidateId(), "甲", result("C1", 0.95, 0.0, 0.0), null, true, view(),
-                false, List.of(), false, "VALIDATED", "cal-v1|model=test-model|template=question-template-v2|candidate=candidate-config-v3|policy=decision-policy-v1|threshold=pilot-default-v1|dataset=test|result=test-ok", DecisionPolicy.PILOT_DEFAULT));
+                false, List.of(), false, "VALIDATED", "cal-v1|model=test-model|template=question-template-v2|candidate=candidate-config-v4|policy=decision-policy-v1|threshold=pilot-default-v1|dataset=test|result=test-ok", DecisionPolicy.PILOT_DEFAULT));
         assertEquals(DecisionModels.Verdict.CANCELLED, cancelled.verdict());
         Map<String, Double> evil = Map.of("C9", 0.9, "C0", 0.05, "NONE_SUPPORTED", 0.03,
                 "NEED_MORE_EVIDENCE", 0.02);
@@ -221,7 +221,7 @@ class PolicyTest {
                 Map.of(), Map.of(), "jev-synth-1", null, "h");
         DecisionPolicy.Output unknown = DecisionPolicy.resolve(new DecisionPolicy.Input(snapshot, set,
                 built.aliasToCandidateId(), "甲", forged, null, false, view(), false, List.of(),
-                false, "VALIDATED", "cal-v1|model=test-model|template=question-template-v2|candidate=candidate-config-v3|policy=decision-policy-v1|threshold=pilot-default-v1|dataset=test|result=test-ok", DecisionPolicy.PILOT_DEFAULT));
+                false, "VALIDATED", "cal-v1|model=test-model|template=question-template-v2|candidate=candidate-config-v4|policy=decision-policy-v1|threshold=pilot-default-v1|dataset=test|result=test-ok", DecisionPolicy.PILOT_DEFAULT));
         assertEquals(DecisionModels.Verdict.UNAVAILABLE, unknown.verdict());
         assertTrue(unknown.reasonCodes().contains("UNKNOWN_CANDIDATE"));
     }

@@ -153,7 +153,7 @@ class ExportDecisionsTest {
         // JR-08-T03/T06：导出仅含正式推荐；测试用匹配档产生 RECOMMEND/KEEP_CURRENT
         config.setCalibrationStatus("VALIDATED");
         config.setCalibrationProfile("cal-v1|model=mock-model|template=question-template-v2"
-                + "|candidate=candidate-config-v3|policy=decision-policy-v1"
+                + "|candidate=candidate-config-v4|policy=decision-policy-v1"
                 + "|threshold=pilot-default-v1|dataset=test|result=test-ok");
         MockDecisionTransport transport = new HighScoreTransport();
         EvidenceCollector evidence = new EvidenceCollector(resolution, images, qwen, budget, config);

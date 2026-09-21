@@ -23,7 +23,7 @@ import java.util.Set;
 @Service
 public class CandidateResolutionService {
     static final double LOW_CONFIDENCE_THRESHOLD = 0.5;
-    static final String CANDIDATE_CONFIG_VERSION = "candidate-config-v3";
+    static final String CANDIDATE_CONFIG_VERSION = "candidate-config-v4";
     static final String CONVERTER_VERSION = "opencc4j-ZhConverterUtil-v1";
     static final String NORMALIZER_VERSION = "exact-string-v1";
 
@@ -201,8 +201,14 @@ public class CandidateResolutionService {
                     && !gaps.contains(g)) gaps.add(g);
         List<AlignedCandidate> aligned = new ArrayList<>();
         int unaligned = 0;
+        int blankExcluded = 0;
         if (raws != null) for (RawCandidate raw : raws) {
             if (raw == null) continue;
+            // JR-07-T05：空白/占位候选直接记缺口排除，不伪造比较文字，不致命
+            if (raw.text() == null || raw.text().isBlank()) {
+                blankExcluded++;
+                continue;
+            }
             AlignedCandidate checked = align(frozenOriginal, ref.startUtf16(), ref.endUtf16(), raw);
             if (checked.alignment() == DecisionModels.AlignmentStatus.UNALIGNED) {
                 unaligned++;
@@ -211,6 +217,7 @@ public class CandidateResolutionService {
             aligned.add(checked);
         }
         if (unaligned > 0) gaps.add("UNALIGNED_EXCLUDED:" + unaligned);
+        if (blankExcluded > 0) gaps.add("BLANK_EXCLUDED:" + blankExcluded);
         boolean currentBlank = currentTranscription == null || currentTranscription.isBlank();
         if (!currentBlank && aligned.stream().noneMatch(a -> isCurrent(a, currentTranscription)))
             gaps.add("CURRENT_NOT_IN_EVIDENCE");

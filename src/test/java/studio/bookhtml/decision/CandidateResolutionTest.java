@@ -138,6 +138,21 @@ class CandidateResolutionTest {
         assertTrue(set.candidates().stream().anyMatch(c -> "甲".equals(c.originalScriptText())));
     }
 
+    @Test void blankCandidatesExcludedWithGapNotFatal() throws Exception {
+        // JR-07-T05：空白/占位候选记缺口排除，不抛错致命；全空则 NO_USABLE_CANDIDATE 转人工
+        CandidateResolutionService service = service();
+        DecisionModels.IssueRef issueRef = ref("span");
+        List<CandidateResolutionService.RawCandidate> raws = List.of(
+                raw("甲", DecisionModels.SourceKind.PRIMARY_OCR, "G0", "r0"),
+                raw("", DecisionModels.SourceKind.PRIMARY_OCR, "G1", "r1"),
+                raw("   ", DecisionModels.SourceKind.CROP_OCR, "G1", "r2"));
+        DecisionModels.CandidateSet set = service.buildSet(issueRef, "甲乙", "甲", raws);
+        assertEquals(1, set.dedupedCount());
+        assertTrue(set.evidenceGaps().stream().anyMatch(g -> g.startsWith("BLANK_EXCLUDED:2")));
+        assertThrows(IllegalArgumentException.class, () -> service.buildSet(issueRef, "甲乙", "甲",
+                List.of(raw("", DecisionModels.SourceKind.PRIMARY_OCR, "G1", "r1"))));
+    }
+
     @Test void overLimitDropsWithReasonsAndNoUsableThrows() {
         CandidateResolutionService service = service();
         DecisionModels.IssueRef issueRef = ref("span");

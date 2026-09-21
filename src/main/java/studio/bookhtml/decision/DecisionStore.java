@@ -215,6 +215,13 @@ public class DecisionStore {
         return readIsolated(decisionsDir(bookId).resolve("jobs").resolve(jobId + ".json"), DecisionJob.class);
     }
 
+    /** JR-06：入队失败回滚刚落盘的 QUEUED 文件（尽力而为；重启恢复以文件为准）。 */
+    public synchronized void deleteJob(String bookId, String jobId) throws IOException {
+        checkLeaf(jobId);
+        ensureSchema(bookId);
+        Files.deleteIfExists(decisionsDir(bookId).resolve("jobs").resolve(jobId + ".json"));
+    }
+
     /** 预算账本：发送前原子预留的持久依据；未知费用保留预留，绝不记 0。 */
     public record BudgetState(long reservedMinor, long reportedMinor, long releasedMinor,
                               Instant updatedAt) {

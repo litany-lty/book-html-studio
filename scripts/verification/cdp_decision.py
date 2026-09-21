@@ -100,14 +100,35 @@ def main():
         check("decision-buttons", buttons and "比较现有候选" in buttons and "补充一次原图复识别" in buttons,
               json.dumps(buttons, ensure_ascii=False))
 
-        # 草稿门禁：默认无草稿，按钮可用
-        disabled = d.eval(session,
-          "[...document.querySelectorAll('[data-decision-panel] .decision-action')].map(b => b.disabled)")
-        check("no-draft-enabled", disabled and all(v is False for v in disabled), json.dumps(disabled))
+        # 草稿门禁：默认无草稿；JR-08 模式矩阵：未形成正式推荐（UNCALIBRATED/CANDIDATES_ONLY）
+        # 时确认按钮必须禁用，仅比较/复识别可用。接受路径由 AcceptTest 单元覆盖。
+        states = d.eval(session,
+          """[...document.querySelectorAll('[data-decision-panel] .decision-action')]
+             .map(b => ({text: b.textContent.trim(), disabled: b.disabled}))""")
+        compare_ok = any(s["text"] == "比较现有候选" and s["disabled"] is False for s in (states or []))
+        vision_ok = any(s["text"] == "补充一次原图复识别" and s["disabled"] is False for s in (states or []))
+        check("no-draft-enabled", compare_ok and vision_ok, json.dumps(states, ensure_ascii=False))
+        check("unadmitted-accept-disabled",
+              any("对照原图并确认" in s["text"] and s["disabled"] is True for s in (states or []))
+              or not any("对照原图并确认" in s["text"] for s in (states or [])),
+              json.dumps(states, ensure_ascii=False))
 
-        # 比较现有候选 → 等待候选列表
+        # 比较现有候选 → 以 API 作业完成为基准，再断言 UI 候选列表（消除轮询竞态）
         d.eval(session, """[...document.querySelectorAll('[data-decision-panel] .decision-action')]
           .find(b => b.textContent.includes('比较现有候选')).click()""")
+        api_done = False
+        for _ in range(40):
+            time.sleep(1.0)
+            try:
+                st = d.eval(session,
+                  f"""fetch('{SERVER}/api/books/{BOOK}/pages/1/issues/issue-1/decisions')
+                      .then(r => r.json()).then(j => j.current ? j.current.verdict : null)""")
+                if st:
+                    api_done = True
+                    break
+            except Exception:
+                pass
+        check("job-completed-api", api_done)
         found = wait_for(d, session,
           "document.querySelectorAll('[data-decision-panel] .decision-candidate').length", 40)
         check("candidates-shown", (found or 0) >= 1, f"count={found}")
@@ -137,31 +158,37 @@ def main():
         d.screenshot(session, OUT + "/shot-decision-390px.png")
         d.call("Emulation.clearDeviceMetricsOverride", {}, session=session)
 
-        # 辅助阅读：切换后首选候选带未确认标记进入正文，resolved 仍为 false
+        # 辅助阅读：JR-08 下 UNCALIBRATED 的模型偏好不得流入正文投影；
+        # 切换辅助阅读后仍无未确认标记（SHADOW 不改变正文投影），原展示保持源文字。
         d.eval(session, "document.querySelector('#evidence-toggle').click()")
-        assist_ok = wait_for(d, session,
-          "document.querySelector('#paper .content-issue.pending.assist[data-unconfirmed]') ? 1 : null", 15)
-        check("assisted-marker", assist_ok == 1)
+        assist_absent = wait_for(d, session,
+          "document.querySelector('#paper .content-issue.pending.assist[data-unconfirmed]') ? 0 : 1", 15)
+        check("assisted-marker", assist_absent == 1)
         assist_title = d.eval(session,
           "document.querySelector('#paper .content-issue.pending.assist')?.title || ''")
-        check("assisted-title", "尚未确认" in assist_title, assist_title[:40])
+        check("assisted-title", "尚未确认" not in assist_title, assist_title[:40])
         d.eval(session, "document.querySelector('#evidence-toggle').click()")
         time.sleep(0.6)
         confirmed_text = d.eval(session,
           "document.querySelector('#paper .content-issue.pending')?.textContent || ''")
         check("confirmed-shows-source", confirmed_text == "甲乙", confirmed_text[:20])
 
-        # 对照原图并确认：勾选已对照 → 接受 → 疑点解决、面板收起
+        # 对照原图并确认：未形成正式推荐时按钮禁用，疑点保持未解决（接受路径由 AcceptTest 覆盖）；
+        # 此处仅核实禁用态点击不产生副作用，不伪造接受成功。
         d.eval(session, """(() => {
           const panel = document.querySelector('[data-decision-panel]');
-          panel.querySelector('.decision-attest input').click();
-          [...panel.querySelectorAll('.decision-action')]
-            .find(b => b.textContent.includes('对照原图并确认')).click();
+          const btn = [...panel.querySelectorAll('.decision-action')]
+            .find(b => b.textContent.includes('对照原图并确认'));
+          if (btn && !btn.disabled) {
+            panel.querySelector('.decision-attest input').click();
+            btn.click();
+          }
           return true;
         })()""")
-        resolved_gone = wait_for(d, session,
-          "document.querySelectorAll('#paper .content-issue.pending').length === 0 ? 1 : null", 30)
-        check("accept-resolves", resolved_gone == 1)
+        time.sleep(2)
+        still_pending = d.eval(session,
+          "document.querySelectorAll('#paper .content-issue.pending').length")
+        check("accept-resolves", still_pending == 1, f"pending={still_pending}（未推荐时保持未解决为正确）")
         d.screenshot(session, OUT + "/shot-decision-accepted.png")
 
         # Esc 关闭抽屉 → 焦点回到触发按钮（A1-06 模式）

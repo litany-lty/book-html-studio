@@ -365,6 +365,7 @@ function renderReview() {
 const decisionPanel = createDecisionPanel({
   getSession: () => state.book
     ? { bookId: state.book.id, page: state.currentPage, epoch: state.editorEpoch } : null,
+  hasDirty: () => hasDirtyChanges(),
   onAccepted: (result) => {
     // 接受已推进服务端版本：失效本页缓存；若有未保存草稿则保留草稿并同步版本，否则重载页面
     state.pageCache.delete(state.currentPage);

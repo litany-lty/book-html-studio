@@ -216,7 +216,8 @@ public class DecisionCoordinator {
                     return new CreateResult(
                             "SUCCEEDED".equals(existing.state()) ? 200 : 200, existing);
                 }
-                // JR-06：队列界限由全局 admission 锁与容量原子检查执行（创建时 429）
+                // JR-06：先持久化作业文件，再入队发布；杜绝“ worker 先消费、文件后落盘”的竞态。
+                // 入队失败（满载）时尽力删除刚落盘的 QUEUED 文件，保持“满载无副作用”。
                 Instant now = Instant.now();
                 DecisionStore.DecisionJob job = new DecisionStore.DecisionJob(
                         UUID.randomUUID().toString(), "QUEUED", 1, "LOCATING", admissionKey, null,
@@ -225,19 +226,19 @@ public class DecisionCoordinator {
                         now, now, now.plusSeconds(Math.max(1, config.getJobDeadlineSeconds())),
                         body.allowFreshVision(), target);
                 String queueItem = job.jobId() + "\u0000" + bookId;
-                synchronized (globalAdmissionLock) {
-                    if (queue.size() >= config.getMaxQueueEntries() || !queue.offer(queueItem))
-                        throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "决策队列已满");
-                }
                 try {
                     decisions.saveJob(bookId, job);
-                } catch (Exception e) {
-                    synchronized (globalAdmissionLock) {
-                        queue.remove(queueItem);
+                } catch (IOException e) {
+                    throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "决策作业保存失败");
+                }
+                synchronized (globalAdmissionLock) {
+                    if (queue.size() >= config.getMaxQueueEntries() || !queue.offer(queueItem)) {
+                        try {
+                            decisions.deleteJob(bookId, job.jobId());
+                        } catch (Exception ignored) {
+                        }
+                        throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "决策队列已满");
                     }
-                    if (e instanceof IOException)
-                        throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "决策作业保存失败");
-                    throw e;
                 }
                 return new CreateResult(202, job);
             } catch (ApiException e) {
