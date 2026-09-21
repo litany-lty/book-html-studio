@@ -349,6 +349,43 @@
     return marker;
   }
 
+  // J08/12.1：语言脚本与证据状态拆成两个维度。
+  // 文字体系（原文/简体）只决定用哪套转录；阅读依据决定是否显示未确认推荐。
+  // 默认保真阅读（confirmed）：未确认推测绝不进入正文；辅助阅读（assisted）显示
+  // 首选候选并带显式标记，resolved 仍为 false，不改 original，不写回 inferredText。
+  // 返回 {text, provenance: SOURCE|CONFIRMED|ASSISTED, unresolved}。
+  function resolveReadingText(issue, sourceText, simplifiedText, script, evidence) {
+    const source = String(script === 'original' ? (sourceText ?? '') : (simplifiedText ?? sourceText ?? ''));
+    if (issue?.resolved) {
+      return { text: issue.replacement == null ? source : String(issue.replacement), provenance: 'CONFIRMED', unresolved: false };
+    }
+    const recommendation = evidence && evidence.mode === 'assisted' && typeof evidence.recommendation === 'string' && evidence.recommendation
+      ? evidence.recommendation : null;
+    if (recommendation) return { text: recommendation, provenance: 'ASSISTED', unresolved: true };
+    return { text: source, provenance: 'SOURCE', unresolved: true };
+  }
+
+  function appendConfirmedIssueText(container, options) {
+    const { block, issue, sourceText, script = 'simplified' } = options;
+    const marker = el('span', `content-issue pending ${issue?.kind === 'unreadable' ? 'unreadable' : 'suspected'}`);
+    appendText(marker, String(sourceText ?? ''), block);
+    marker.title = '文字待核对，点击查看原稿依据';
+    makeActivatable(marker, `待核对文字：${String(sourceText ?? '') || '空白'}。点击查看原稿依据`, () => inspectIssue(options, marker));
+    container.append(marker);
+    return marker;
+  }
+
+  function appendAssistedIssueText(container, options) {
+    const { block, issue, sourceText, recommendation } = options;
+    const marker = el('span', `content-issue pending assist ${issue?.kind === 'unreadable' ? 'unreadable' : 'suspected'}`);
+    appendText(marker, String(recommendation ?? sourceText ?? ''), block);
+    marker.title = '首选候选，尚未确认，点击查看来源与限制';
+    marker.setAttribute('data-unconfirmed', '1');
+    makeActivatable(marker, `首选候选尚未确认：${String(recommendation ?? '')}。点击查看来源与限制`, () => inspectIssue(options, marker));
+    container.append(marker);
+    return marker;
+  }
+
   function canJoin(previous, current, previousText, currentText) {
     if (!previous || !current || previous.type !== 'text' || current.type !== 'text') return false;
     const before = String(previousText ?? '').trim();
@@ -365,5 +402,5 @@
     return Number.isFinite(previousCenter) && Number.isFinite(currentCenter) && previousCenter >= .5 && currentCenter < .5;
   }
 
-  globalThis.BookReadingLayout = Object.freeze({ appendIssueText, appendText, canJoin, displayIssueText, inspectIssue, issueTextParts, normalizeText, numberedMultiline, parallelMultiline, preservesLineEntries, setEvidenceFetcher });
+  globalThis.BookReadingLayout = Object.freeze({ appendIssueText, appendConfirmedIssueText, appendAssistedIssueText, resolveReadingText, appendText, canJoin, displayIssueText, inspectIssue, issueTextParts, normalizeText, numberedMultiline, parallelMultiline, preservesLineEntries, setEvidenceFetcher });
 })();

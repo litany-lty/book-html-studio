@@ -281,6 +281,135 @@ public class DecisionCoordinator {
                 || "INTERRUPTED".equals(state);
     }
 
+    /** 查询装配：问题基线（服务端签发）。 */
+    public Map<String, Object> issueBasisView(String bookId, int sourcePage, String issueId) {
+        Page page = readPageOr404(bookId, sourcePage);
+        String blockId = findBlockId(page, issueId);
+        Block block = findBlock(page, blockId);
+        ContentIssue issue = findIssue(block, issueId);
+        Map<String, Object> basis = new LinkedHashMap<>();
+        basis.put("blockId", block.id());
+        basis.put("issueBasisHash", IssueBasis.basisHash(block, issue));
+        basis.put("pageRevision", BookStore.revisionOrZero(page));
+        basis.put("mappingVersion", IssueBasis.MAPPING_VERSION);
+        return basis;
+    }
+
+    private String findBlockId(Page page, String issueId) {
+        if (page.blocks() != null) for (Block block : page.blocks()) {
+            if (block != null && block.issues() != null) for (ContentIssue issue : block.issues())
+                if (issue != null && issueId.equals(issue.id())) return block.id();
+        }
+        throw new ApiException(HttpStatus.NOT_FOUND, "指定的问题不存在");
+    }
+
+    /** 当前建议：最新仍适用的完成作业；过期只在 history 中说明原因。 */
+    public Map<String, Object> currentDecisionView(String bookId, int sourcePage, String issueId) {
+        for (DecisionStore.DecisionJob job : listIssueJobs(bookId, issueId)) {
+            if (!"SUCCEEDED".equals(job.state()) || job.decisionId() == null) continue;
+            if (!"CURRENT".equals(applicability(bookId, job))) continue;
+            return decisionSummary(bookId, job);
+        }
+        return null;
+    }
+
+    /** 历史建议（最新 10 条）与各自适用性/过期原因。 */
+    public List<Map<String, Object>> decisionHistory(String bookId, int sourcePage, String issueId,
+                                                     int limit) {
+        List<Map<String, Object>> history = new ArrayList<>();
+        for (DecisionStore.DecisionJob job : listIssueJobs(bookId, issueId)) {
+            if (job.decisionId() == null) continue;
+            if (history.size() >= Math.max(1, limit)) break;
+            Map<String, Object> summary = decisionSummary(bookId, job);
+            summary.put("applicability", applicability(bookId, job));
+            history.add(summary);
+        }
+        return history;
+    }
+
+    /** 适用性重算：当前页版本/基线/策略变化即过期，不篡改已持久证据。 */
+    public String applicability(String bookId, DecisionStore.DecisionJob job) {
+        if (job == null || job.decisionId() == null) return "STALE";
+        if ("CANCELLED".equals(job.state())) return "CANCELLED";
+        try {
+            Optional<DecisionModels.DecisionEvidence> evidence =
+                    decisions.loadResult(bookId, job.decisionId());
+            if (evidence.isEmpty()) return "STALE";
+            DecisionModels.DecisionEvidence result = evidence.get();
+            if (!DecisionPolicy.POLICY_VERSION.equals(result.policyVersion())
+                    || !DecisionPolicy.THRESHOLD_PROFILE.equals(result.thresholdProfileVersion()))
+                return "POLICY_CHANGED";
+            DecisionModels.DecisionSnapshot snapshot =
+                    decisions.loadSnapshot(bookId, result.snapshotHash()).orElse(null);
+            if (snapshot == null) return "STALE";
+            Page current;
+            try {
+                current = store.readPage(bookId, snapshot.issueRef().sourcePageNumber());
+            } catch (Exception e) {
+                return "STALE";
+            }
+            return snapshotApplies(snapshot, current) ? "CURRENT" : "STALE";
+        } catch (IOException e) {
+            return "STALE";
+        }
+    }
+
+    private List<DecisionStore.DecisionJob> listIssueJobs(String bookId, String issueId) {
+        List<DecisionStore.DecisionJob> jobs;
+        try {
+            jobs = decisions.listJobs(bookId);
+        } catch (IOException e) {
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "决策作业读取失败");
+        }
+        List<DecisionStore.DecisionJob> filtered = new ArrayList<>();
+        for (DecisionStore.DecisionJob job : jobs)
+            if (issueId.equals(job.issueId())) filtered.add(job);
+        filtered.sort((a, b) -> b.createdAt().compareTo(a.createdAt()));
+        return filtered;
+    }
+
+    private Map<String, Object> decisionSummary(String bookId, DecisionStore.DecisionJob job) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("jobId", job.jobId());
+        summary.put("jobState", job.state());
+        summary.put("jobStateVersion", job.stateVersion());
+        summary.put("decisionId", job.decisionId());
+        summary.put("verdict", job.verdict());
+        summary.put("reasonCodes", job.reasonCodes());
+        try {
+            Optional<DecisionModels.DecisionEvidence> evidence =
+                    decisions.loadResult(bookId, job.decisionId());
+            if (evidence.isPresent()) {
+                summary.put("candidateSetHash", evidence.get().candidateSetHash());
+                Optional<DecisionModels.CandidateSet> set =
+                        decisions.loadCandidateSet(bookId, evidence.get().candidateSetHash());
+                if (set.isPresent()) {
+                    List<Map<String, Object>> candidates = new ArrayList<>();
+                    List<DecisionModels.Candidate> list = set.get().candidates();
+                    for (int i = 0; i < list.size(); i++) {
+                        DecisionModels.Candidate candidate = list.get(i);
+                        Map<String, Object> entry = new LinkedHashMap<>();
+                        entry.put("alias", "C" + i);
+                        entry.put("candidateId", candidate.candidateId());
+                        entry.put("displayText", candidate.simplifiedDisplayText() == null
+                                ? "" : candidate.simplifiedDisplayText());
+                        entry.put("originalText", candidate.originalScriptText());
+                        entry.put("sourceKind", candidate.sourceKind().name());
+                        entry.put("alignment", candidate.alignmentStatus().name());
+                        candidates.add(entry);
+                    }
+                    summary.put("candidates", candidates);
+                    String selected = evidence.get().choice() == null ? null
+                            : evidence.get().choice().selectedAlias();
+                    summary.put("recommendedCandidateId",
+                            DecisionStateBuilder.candidateIdForAlias(set.get(), selected));
+                }
+            }
+        } catch (IOException ignored) {
+        }
+        return summary;
+    }
+
     private void drain() {
         while (!Thread.currentThread().isInterrupted()) {
             try {

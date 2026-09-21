@@ -37,11 +37,12 @@ function issueRange(issue, script) {
   return [Number(start), Number(end)];
 }
 
-function appendIssueAwareText(element, block, page, script, onIssueSelect, pageImageSrc) {
+function appendIssueAwareText(element, block, page, script, onIssueSelect, pageImageSrc, evidence) {
   const text = blockText(block, script);
   const issues = (block.issues || []).map(issue => ({ issue, range: issueRange(issue, script) }))
     .filter(({ range }) => Number.isInteger(range[0]) && Number.isInteger(range[1]) && range[0] >= 0 && range[1] > range[0] && range[1] <= text.length)
     .sort((a, b) => a.range[0] - b.range[0] || a.range[1] - b.range[1]);
+  const assisted = evidence && evidence.mode === 'assisted';
   let cursor = 0;
   issues.forEach(({ issue, range: [start, end] }) => {
     if (start < cursor) return;
@@ -52,10 +53,20 @@ function appendIssueAwareText(element, block, page, script, onIssueSelect, pageI
       resolved.className = 'content-issue resolved';
       readingLayout.appendText(resolved, readingLayout.displayIssueText(issue, sourceText, script), block);
       element.append(resolved);
-    } else readingLayout.appendIssueText(element, {
-      page, block, issue, sourceText, script, pageImageSrc,
-      onEdit: () => onIssueSelect?.(block.id, issue.id)
-    });
+    } else if (assisted && evidence.assistMap && evidence.assistMap[issue.id]) {
+      // 辅助阅读：显示当前有效的首选候选，带未确认标记；resolved 仍为 false
+      readingLayout.appendAssistedIssueText(element, {
+        page, block, issue, sourceText, script, pageImageSrc,
+        recommendation: evidence.assistMap[issue.id].text,
+        onEdit: () => onIssueSelect?.(block.id, issue.id)
+      });
+    } else {
+      // 保真阅读（默认）：未确认推测不进入正文，只显示原始转录
+      readingLayout.appendConfirmedIssueText(element, {
+        page, block, issue, sourceText, script, pageImageSrc,
+        onEdit: () => onIssueSelect?.(block.id, issue.id)
+      });
+    }
     cursor = end;
   });
   readingLayout.appendText(element, text.slice(cursor), block);
@@ -149,7 +160,7 @@ function renderReading(container, ctx) {
         const summary = document.createElement('summary');
         summary.textContent = pending ? `图内识别文字（${pending} 处待核对）` : '图内识别文字（展开查看）';
         const transcript = document.createElement('p');
-        appendIssueAwareText(transcript, block, page, script, ctx.onIssueSelect, pageImageSrc);
+        appendIssueAwareText(transcript, block, page, script, ctx.onIssueSelect, pageImageSrc, ctx.evidence);
         details.append(summary, transcript);
         figure.append(details);
       }
@@ -158,14 +169,14 @@ function renderReading(container, ctx) {
     }
     if (!text) return;
     if (readingLayout.canJoin(previousPlain, block, previousText, text) && paragraph) {
-      appendIssueAwareText(paragraph, block, page, script, ctx.onIssueSelect, pageImageSrc);
+      appendIssueAwareText(paragraph, block, page, script, ctx.onIssueSelect, pageImageSrc, ctx.evidence);
       previousPlain = block; previousText = text;
       return;
     }
     const element = document.createElement(block.type === 'heading' ? `h${Math.min(4, Math.max(2, Number(block.headingLevel || 2)))}` : block.type === 'caption' ? 'aside' : 'p');
     element.className = `flow-${block.type}${block.uncertain ? ' is-uncertain' : ''}`;
     element.dataset.blockId = block.id;
-    appendIssueAwareText(element, block, page, script, ctx.onIssueSelect, pageImageSrc);
+    appendIssueAwareText(element, block, page, script, ctx.onIssueSelect, pageImageSrc, ctx.evidence);
     flow.append(element);
     previousPlain = block.type === 'text' ? block : null;
     previousText = text;

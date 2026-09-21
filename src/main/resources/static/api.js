@@ -61,6 +61,12 @@ export const api = {
   job: id => request(`/books/${encodeURIComponent(id)}/job`),
   cancelJob: id => request(`/books/${encodeURIComponent(id)}/job/cancel`, { method: 'POST' }),
   savePage: (id, n, body, timeoutMs) => request(`/books/${encodeURIComponent(id)}/pages/${n}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, timeoutMs ?? 30000),
+  // J07/J08：决策作业独立作用域，不复用 saveInFlight；取消与完整响应期限。
+  decisionJobsCreate: (id, n, issueId, body, signal, timeoutMs) => request(`/books/${encodeURIComponent(id)}/pages/${n}/issues/${encodeURIComponent(issueId)}/decision-jobs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), ...(signal ? { signal } : {}) }, timeoutMs ?? 30000),
+  decisionJob: (id, jobId, signal) => request(`/books/${encodeURIComponent(id)}/decision-jobs/${encodeURIComponent(jobId)}`, signal ? { signal } : {}),
+  decisionJobCancel: (id, jobId, body) => request(`/books/${encodeURIComponent(id)}/decision-jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  decisions: (id, n, issueId, signal) => request(`/books/${encodeURIComponent(id)}/pages/${n}/issues/${encodeURIComponent(issueId)}/decisions`, signal ? { signal } : {}),
+  decisionAccept: (id, n, issueId, decisionId, body, timeoutMs) => request(`/books/${encodeURIComponent(id)}/pages/${n}/issues/${encodeURIComponent(issueId)}/decisions/${encodeURIComponent(decisionId)}/accept`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, timeoutMs ?? 30000),
   revisions: (id, n) => request(`/books/${encodeURIComponent(id)}/pages/${n}/revisions`),
   revertPage: (id, n, revision, expectedRevision) => request(`/books/${encodeURIComponent(id)}/pages/${n}/revert`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(expectedRevision == null ? { revision } : { revision, expectedRevision }) }),
   search: (id, query) => request(`/books/${encodeURIComponent(id)}/search?q=${encodeURIComponent(query)}`),

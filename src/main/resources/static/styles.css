@@ -358,3 +358,20 @@ progress::-moz-progress-bar { background: var(--blue); }
 .conflict-bar strong { display: block; margin-bottom: 6px; }
 .conflict-detail { font-size: 13px; color: #5b4a1e; margin-bottom: 8px; }
 .conflict-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* J08：辅助推荐标记（未确认，绝不与已确认同样式） */
+.content-issue.pending.assist { text-decoration: underline wavy var(--blue) 1px; text-underline-offset: .18em; background: rgb(49 95 144 / .07); }
+/* J08：候选比较面板 */
+.decision-section { border-top: 1px dashed var(--line-strong); margin-top: 12px; padding-top: 10px; }
+.decision-title { font-size: 15px; margin: 0 0 6px; }
+.decision-status, .decision-meta, .decision-reasons, .decision-note, .decision-empty { font-size: 13px; color: var(--ink-soft); }
+.decision-error { font-size: 13px; color: var(--danger); }
+.decision-verdict { font-weight: 650; }
+.decision-candidates { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 6px; }
+.decision-candidate label { display: flex; align-items: baseline; gap: 8px; cursor: pointer; }
+.decision-candidate-text { font-weight: 600; }
+.decision-candidate-kind { font-size: 12px; color: var(--ink-soft); }
+.decision-attest { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 13px; }
+.decision-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+/* J08/T54：新增主要操作至少 44x44 CSS px（本项目目标） */
+.decision-action { min-height: 44px; min-width: 44px; }
+.decision-history-row { font-size: 12px; color: var(--ink-soft); }

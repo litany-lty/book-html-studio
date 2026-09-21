@@ -2,6 +2,7 @@ import { api } from './api.js';
 import { state, loadPreferences, savePreferences, getBookmarks, setBookmarks, cloneBlocks, isSameSession, canonicalJson } from './store.js';
 import { renderPaper, qualityOf } from './reader.js';
 import { renderEditor, renderIssueWorkbench, issueReferences, createOverlay, enableDrawing } from './editor.js';
+import { createDecisionPanel } from './decision.js';
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -323,8 +324,7 @@ function renderReview() {
   $('#review-empty').hidden = available;
   $('#review-content').hidden = !available;
   if (!available) return;
-  renderConflictBar();
-  const reviewImage = $('#review-original');
+  renderConflictBar();  const reviewImage = $('#review-original');
   const imageUrl = api.pageImage(state.book.id, state.currentPage, 900);
   if (reviewImage.getAttribute('src') !== imageUrl) reviewImage.src = imageUrl;
   const refs = issueReferences(state.blocks);
@@ -346,6 +346,7 @@ function renderReview() {
   });
   $('#mark-reviewed').checked = Boolean(state.reviewedDraft);
   $('#save-page').disabled = !state.dirty;
+  renderDecisionSection();
   renderEditor($('#review-list'), state.blocks, {
     selectedId: state.selectedBlockId,
     uncertainOnly: $('#uncertain-only').checked,
@@ -358,6 +359,43 @@ function renderReview() {
       markDirty(); renderCurrent();
     }
   });
+}
+
+// J08：候选比较面板（独立作用域，不复用 saveInFlight；建议不改 page，不写 issues）。
+const decisionPanel = createDecisionPanel({
+  getSession: () => state.book
+    ? { bookId: state.book.id, page: state.currentPage, epoch: state.editorEpoch } : null,
+  hasDirty: () => state.dirty,
+  onAccepted: () => {
+    // 接受已推进服务端版本：失效本页缓存后强制重载，不读回可能被推进的旧版本
+    state.pageCache.delete(state.currentPage);
+    goToPage(state.currentPage, { force: true });
+  },
+  onRecommendation: (issueId, info) => {
+    state.assistMap[issueId] = info;
+    if (state.evidenceMode === 'assisted') renderCurrent(false);
+  },
+  showError,
+});
+
+function renderDecisionSection() {
+  const workbench = $('#issue-workbench');
+  if (!workbench) return;
+  let host = workbench.querySelector('[data-decision-panel]');
+  if (!host) {
+    host = document.createElement('section');
+    host.className = 'decision-section';
+    workbench.append(host);
+  }
+  const block = (state.blocks || []).find(b => b && b.id === state.selectedBlockId);
+  const issue = block?.issues?.find(i => i && i.id === state.selectedIssueId);
+  if (!block || !issue || issue.resolved) {
+    host.replaceChildren();
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  decisionPanel.render(host, block, issue);
 }
 
 function scrollToSelectedBlock(id) {
@@ -461,6 +499,7 @@ function renderCurrent(full = true) {
     blocks: state.blocks,
     view: state.view,
     script: state.script,
+    evidence: { mode: state.evidenceMode, assistMap: state.assistMap },
     fontSize: state.fontSize,
     lineHeight: state.lineHeight,
     onIssueSelect(blockId, issueId) {
@@ -486,6 +525,7 @@ function renderCurrent(full = true) {
   $('#focus-toggle').setAttribute('aria-pressed', String(state.focus));
   $$('.view-switch button').forEach(button => button.classList.toggle('active', button.dataset.view === state.view));
   $('#script-toggle').textContent = `显示：${state.script === 'simplified' ? '简体' : '原文'}`;
+  syncEvidenceToggle();
   renderQuality(); renderBookmarkButton(); renderToc();
   if (full) renderReview();
   if (state.view === 'original') requestAnimationFrame(syncOverlays);
@@ -493,7 +533,16 @@ function renderCurrent(full = true) {
 
 function saveReadingPosition() {
   if (!state.book) return;
-  savePreferences(state.book.id, { page: state.currentPage, view: state.view, script: state.script, fontSize: state.fontSize, lineHeight: state.lineHeight, focus: state.focus, scrollTop: $('#reader').scrollTop });
+  savePreferences(state.book.id, { page: state.currentPage, view: state.view, script: state.script, evidenceMode: state.evidenceMode, fontSize: state.fontSize, lineHeight: state.lineHeight, focus: state.focus, scrollTop: $('#reader').scrollTop });
+}
+
+// J08：阅读依据切换（语言脚本与证据状态分离）。默认保真阅读；辅助阅读显式开启并带标记。
+function syncEvidenceToggle() {
+  const button = $('#evidence-toggle');
+  if (!button) return;
+  const assisted = state.evidenceMode === 'assisted';
+  button.textContent = `阅读依据：${assisted ? '辅助阅读' : '已确认'}`;
+  button.setAttribute('aria-pressed', String(assisted));
 }
 
 async function goToPage(n, options = {}) {
@@ -511,6 +560,8 @@ async function goToPage(n, options = {}) {
   state.currentPage = n; state.page = null; state.blocks = []; state.selectedBlockId = null; state.selectedIssueId = null; state.dirty = false; state.activeOutlineBlockId = options.outlineBlockId || null;
   // A1-01：进入新页面即开启新编辑会话，旧保存响应不得回写
   state.editorEpoch++; state.conflict = null;
+  // J08：切页换作用域，辅助推荐映射清空，迟到决策响应只能丢弃（关闭面板不等同取消任务）
+  state.assistMap = {};
   const requestId = ++pageRequest, bookId = state.book.id;
   // 阶段2：取消上一次未完成的正文请求，后端仍以自身预算为准继续或终止解码
   pageFetchController?.abort();
@@ -549,6 +600,8 @@ async function selectBook(id) {
   clearPolling(); ++outlineRequest; state.pageCache.clear(); state.page = null; state.blocks = []; state.selectedIssueId = null; state.dirty = false; state.outline = []; state.outlineStatus = 'idle'; state.activeOutlineBlockId = null;
   // A1-01：切书开启新编辑会话并清空冲突栏
   state.editorEpoch++; state.conflict = null; state.saveInFlight = null;
+  // J08：切书换作用域，辅助推荐映射清空
+  state.assistMap = {};
   if (!id) {
     state.book = null; state.summaries = []; state.focus = false; document.body.classList.remove('focus-reading'); $('#workspace').classList.add('is-empty'); $('#empty-state').hidden = false; $('#reader-shell').hidden = true; renderBookMeta(); renderToc(); return;
   }
@@ -563,6 +616,8 @@ async function selectBook(id) {
     const prefs = loadPreferences(id);
     state.view = ['original', 'facsimile', 'reading'].includes(prefs.view) ? prefs.view : 'reading';
     state.script = prefs.script === 'original' ? 'original' : 'simplified'; state.fontSize = Number(prefs.fontSize || 20); state.lineHeight = Number(prefs.lineHeight || 1.8); state.focus = Boolean(prefs.focus);
+    // J08：阅读依据默认保真（已确认）；旧偏好无此项，不迁移、不把旧显示当自动确认授权
+    state.evidenceMode = prefs.evidenceMode === 'assisted' ? 'assisted' : 'confirmed'; state.assistMap = {};
     $('#font-size').value = state.fontSize; $('#font-output').value = state.fontSize; $('#line-height').value = state.lineHeight; $('#line-output').value = state.lineHeight;
     const page = Math.min(book.totalPages, Math.max(1, Number(prefs.page || 1)));
     state.currentPage = page;
@@ -717,6 +772,23 @@ $('#cancel-job').addEventListener('click', async () => { if (!state.book || !win
 $$('[data-view]').forEach(button => button.addEventListener('click', () => { state.view = button.dataset.view; renderCurrent(); saveReadingPosition(); }));
 $('#focus-toggle').addEventListener('click', () => { state.focus = !state.focus; closeDrawers(); renderCurrent(false); saveReadingPosition(); });
 $('#script-toggle').addEventListener('click', () => { state.script = state.script === 'simplified' ? 'original' : 'simplified'; renderCurrent(); saveReadingPosition(); });
+$('#evidence-toggle').addEventListener('click', () => { state.evidenceMode = state.evidenceMode === 'assisted' ? 'confirmed' : 'assisted'; renderCurrent(); saveReadingPosition(); });
+// J08/12.3：默认复制/检索不冒充推荐为原文；辅助推荐复制时带未确认提示
+$('#paper').addEventListener('copy', event => {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || !event.clipboardData) return;
+  const range = selection.getRangeAt(0);
+  const host = $('#paper');
+  if (!host.contains(range.commonAncestorContainer)) return;
+  const probe = range.cloneContents();
+  const inner = document.createElement('div');
+  inner.append(probe);
+  const marked = Boolean(inner.querySelector('[data-unconfirmed]'));
+  if (!marked) return;
+  event.preventDefault();
+  event.clipboardData.setData('text/plain',
+    `${selection.toString()}\n［注：含未确认的辅助推荐，以原文与已确认文字为准］`);
+});
 $('#font-size').addEventListener('input', event => { state.fontSize = Number(event.target.value); $('#font-output').value = state.fontSize; renderCurrent(false); saveReadingPosition(); });
 $('#line-height').addEventListener('input', event => { state.lineHeight = Number(event.target.value); $('#line-output').value = state.lineHeight; renderCurrent(false); saveReadingPosition(); });
 $('#prev-page').addEventListener('click', () => goToPage(state.currentPage - 1)); $('#next-page').addEventListener('click', () => goToPage(state.currentPage + 1));

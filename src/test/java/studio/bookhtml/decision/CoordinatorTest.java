@@ -5,6 +5,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -231,8 +232,7 @@ class CoordinatorTest {
         assertEquals(HttpStatus.NOT_FOUND, missing.status());
     }
 
-    @Test void preconditionsAndCodes() {
-        // 11.2：404/409/400 固定语义
+    @Test void preconditionsAndCodes() {        // 11.2：404/409/400 固定语义
         Fixture f;
         try {
             f = fixture(false);
@@ -260,5 +260,44 @@ class CoordinatorTest {
         } catch (Exception e) {
             fail("断言失败", e);
         }
+    }
+
+    @Test void decisionsViewsWithApplicability() throws Exception {
+        // decisions 查询：服务端基线、当前建议、历史与过期原因
+        Fixture f = fixture(true);
+        Page page = f.store.readPage(BOOK, 3);
+        Block block = page.blocks().stream().filter(b -> b.id().equals("b1")).findFirst().orElseThrow();
+        ContentIssue issue = block.issues().get(0);
+        Map<String, Object> basis = f.coordinator.issueBasisView(BOOK, 3, "i-b1");
+        assertEquals("b1", basis.get("blockId"));
+        assertEquals(IssueBasis.basisHash(block, issue), basis.get("issueBasisHash"));
+        assertEquals(BookStore.revisionOrZero(page), basis.get("pageRevision"));
+        DecisionCoordinator.CreateResult created = f.coordinator.createOrReuse(BOOK, 3, "i-b1",
+                new DecisionCoordinator.CreateBody("op-view", "b1",
+                        BookStore.revisionOrZero(page), IssueBasis.basisHash(block, issue), false));
+        f.coordinator.runInline(BOOK, created.job().jobId());
+        Map<String, Object> current = f.coordinator.currentDecisionView(BOOK, 3, "i-b1");
+        assertNotNull(current);
+        assertNotNull(current.get("decisionId"));
+        assertFalse(((List<?>) current.get("candidates")).isEmpty());
+        List<Map<String, Object>> history =
+                f.coordinator.decisionHistory(BOOK, 3, "i-b1", 10);
+        assertEquals(1, history.size());
+        assertEquals("CURRENT", history.get(0).get("applicability"));
+        // 页面推进后当前失效，历史标 STALE 并保留原因
+        Page saved = f.store.readPage(BOOK, 3);
+        Block changed = new Block("b1", "text", 0, new double[]{0, 0, 0.4, 0.2},
+                "horizontal-tb", "甲乙改", "甲乙改", 0.9, true, false, null, "manual",
+                List.of("b1"), null, new double[]{0, 0, 40, 20}, saved.blocks().get(0).issues());
+        Page proposed = new Page(3, 600, 800, "READY", "manual", List.of(changed, saved.blocks().get(1)),
+                List.of(), false, null, saved.sourceRecords(), null);
+        f.store.commitPage(BOOK, proposed, BookStore.revisionOrZero(saved),
+                studio.bookhtml.store.CommitActor.MANUAL, null,
+                studio.bookhtml.store.CommitOp.MANUAL_SAVE);
+        assertNull(f.coordinator.currentDecisionView(BOOK, 3, "i-b1"));
+        List<Map<String, Object>> staleHistory =
+                f.coordinator.decisionHistory(BOOK, 3, "i-b1", 10);
+        assertEquals(1, staleHistory.size());
+        assertEquals("STALE", staleHistory.get(0).get("applicability"));
     }
 }

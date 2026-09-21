@@ -120,7 +120,9 @@ public class ReviewDecisionController {
         response.put("bookId", bookId);
         response.put("sourcePageNumber", page);
         response.put("issueId", issueId);
-        response.put("decisions", List.of());
+        response.put("basis", coordinator.issueBasisView(bookId, page, issueId));
+        response.put("current", coordinator.currentDecisionView(bookId, page, issueId));
+        response.put("history", coordinator.decisionHistory(bookId, page, issueId, 10));
         return response;
     }
 

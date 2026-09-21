@@ -1,0 +1,17 @@
+const fs = require('fs');
+const src = fs.readFileSync('src/main/resources/static/reading-layout.js', 'utf8');
+const sandbox = { console };
+sandbox.globalThis = sandbox;
+sandbox.window = sandbox;
+sandbox.document = { createElement: () => { throw new Error('no-dom'); } };
+const vm = require('vm');
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox);
+const R = sandbox.BookReadingLayout;
+const assert = require('assert');
+const eq = (a, b) => assert.strictEqual(JSON.stringify(a), JSON.stringify(b));
+eq(R.resolveReadingText({resolved: false}, '末', '末', 'original', {mode: 'confirmed'}), {text: '末', provenance: 'SOURCE', unresolved: true});
+eq(R.resolveReadingText({resolved: false, inferredText: '未'}, '末', '末', 'simplified', {mode: 'confirmed'}), {text: '末', provenance: 'SOURCE', unresolved: true});
+eq(R.resolveReadingText({resolved: false, inferredText: '未'}, '末', '末', 'simplified', {mode: 'assisted', recommendation: '本'}), {text: '本', provenance: 'ASSISTED', unresolved: true});
+eq(R.resolveReadingText({resolved: true, replacement: '本', inferredText: '未'}, '末', '末', 'simplified', {mode: 'assisted', recommendation: '甲'}), {text: '本', provenance: 'CONFIRMED', unresolved: false});
+console.log('RESOLVE_READING_TEXT_ALL_PASS');

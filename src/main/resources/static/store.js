@@ -58,6 +58,9 @@ export const state = {
   saveInFlight: null,
   // A1-01：真冲突比较栏（与当前书页绑定）
   conflict: null,
+  // J08：阅读依据（语言脚本与证据状态分离；默认保真阅读）与辅助推荐映射（内存态，不写 page JSON）
+  evidenceMode: 'confirmed',
+  assistMap: {},
   // 阶段2：已读页有限 LRU（默认 8 页，可调整的暂定参数）；当前页不得淘汰
   pageCache: new LruPageCache(PAGE_CACHE_LIMIT, key => key === state.currentPage)
 };
