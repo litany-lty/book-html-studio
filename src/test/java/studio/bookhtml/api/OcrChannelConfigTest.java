@@ -15,6 +15,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
+import org.springframework.http.HttpStatus;
 
 class OcrChannelConfigTest {
     @Test
@@ -77,6 +78,27 @@ class OcrChannelConfigTest {
 
         Map<String, Object> none = controller(false, false).config();
         assertEquals(false, provider(none, "ppocr").get("available"));
+    }
+
+    @Test
+    void revertRejectsNonIntegerOverflowAndMissingRevisions() {
+        // A1-C09：小数、溢出、缺失一律可预测 400，不经 intValue 截断；非法输入到不了 service
+        ApiController controller = controller(true, true);
+        assertRevisionBad(controller, Map.of("revision", 1.5, "expectedRevision", 1));
+        assertRevisionBad(controller, Map.of("revision", 1, "expectedRevision", 2.5));
+        assertRevisionBad(controller, Map.of("revision", Long.MAX_VALUE, "expectedRevision", 1));
+        assertRevisionBad(controller, Map.of("revision", 1));
+        assertRevisionBad(controller, Map.of());
+        assertRevisionBad(controller, null);
+    }
+
+    private static void assertRevisionBad(ApiController controller, Map<String, Object> body) {
+        try {
+            controller.revert("book", 1, body);
+            fail("非法 revision 必须 400");
+        } catch (ApiException e) {
+            assertEquals(HttpStatus.BAD_REQUEST, e.status());
+        }
     }
 
     private static ApiController controller(boolean baiduConfigured, boolean studioConfigured) {

@@ -85,4 +85,20 @@ class HistoryNumericOrderTest {
         assertTrue(after > before, "回退必须生成更高的新 revision");
         assertTrue(store.listRevisions(id, 1).contains(before), "回退前的当前版本必须保留在历史中");
     }
+
+    @Test void hugeAndNonRegularHistoryNamesDoNotBreakSaving() throws Exception {
+        // A1-C08：超 int 范围数字、目录伪装文件均不参与淘汰、不被删除，正常保存不受影响
+        BookStore store = store();
+        String id = book(store);
+        for (int i = 0; i < 3; i++) store.writePage(id, ready(1, "v" + i), false);
+        Path dir = store.historyDir(id, 1);
+        Files.writeString(dir.resolve("rev-2147483648.json"), "{}");
+        Files.createDirectory(dir.resolve("rev-9.json"));
+        int rev = BookStore.revisionOrZero(store.readPage(id, 1));
+        store.writePage(id, ready(1, "v3"), false);
+        assertEquals(rev + 1, BookStore.revisionOrZero(store.readPage(id, 1)), "正常保存必须完成");
+        assertTrue(Files.exists(dir.resolve("rev-2147483648.json")), "超范围版本不得被清理");
+        assertTrue(Files.isDirectory(dir.resolve("rev-9.json")), "非普通文件不得被清理");
+        assertTrue(store.listRevisions(id, 1).containsAll(List.of(0, 1, 2, 3)));
+    }
 }

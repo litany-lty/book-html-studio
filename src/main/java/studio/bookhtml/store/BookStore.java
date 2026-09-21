@@ -70,7 +70,7 @@ public class BookStore {
     public Path pagePath(String id, int page) { return bookDir(id).resolve("pages").resolve(page + ".json"); }
     public Path originalPagePath(String id, int page) { return bookDir(id).resolve("pages").resolve(page + ".original.json"); }
 
-    public void writeBook(Book book) throws IOException { synchronized (dirLock) { atomic(bookDir(book.id()).resolve("book.json"), book); } }
+    public void writeBook(Book book) throws IOException { synchronized (dirLock) { checkInjected("book"); atomic(bookDir(book.id()).resolve("book.json"), book); } }
     public Book readBook(String id) { return read(bookDir(id).resolve("book.json"), Book.class, "未找到该书籍"); }
     public List<Book> listBooks() {
         if (!Files.isDirectory(booksRoot)) return List.of();
@@ -92,11 +92,11 @@ public class BookStore {
     }
 
     /**
-     * R03：条件提交——读取当前页、校验 expectedRevision 与操作者资格、
-     * 归档旧版本、写入新版本在同一目录锁内完成。
+     * R03/A1-04：条件提交——读取当前页、校验 expectedRevision、按操作类别校验
+     * 任务状态与页集合资格、归档旧版本、写入新版本在同一目录锁内完成。
      * 成功返回此次真正提交的不可变结果；调用方不得再 readPage。
      */
-    public Page commitPage(String id, Page proposed, int expectedRevision, CommitActor actor, String expectedJobId) throws IOException {
+    public Page commitPage(String id, Page proposed, int expectedRevision, CommitActor actor, String expectedJobId, CommitOp op) throws IOException {
         synchronized (dirLock) {
             if (proposed == null) throw new ApiException(HttpStatus.BAD_REQUEST, "缺少页面内容");
             Path target = pagePath(id, proposed.pageNumber());
@@ -105,21 +105,59 @@ public class BookStore {
             int currentRev = revisionOrZero(current);
             if (currentRev != expectedRevision)
                 throw new PageConflictException(currentRev, "页面已被更新，请刷新后重试");
-            switch (actor) {
-                case MANUAL, REVERT -> {
-                    if ("PROCESSING".equals(current.status()))
-                        throw new PageConflictException(currentRev, "本页正在识别，请等待完成或先取消任务再操作");
-                }
-                case JOB -> {
-                    if (expectedJobId == null) throw new ApiException(HttpStatus.BAD_REQUEST, "任务提交缺少任务标识");
-                    Job job = readJob(id);
-                    if (job == null || !expectedJobId.equals(job.id()))
-                        throw new PageConflictException(currentRev, "任务已被取代，本页不再写入");
-                }
-                case SYSTEM -> { }
-            }
+            checkCommitEligibility(id, current, proposed, currentRev, actor, expectedJobId, op);
             return persistNewRevision(id, current, proposed);
         }
+    }
+
+    /** A1-04：同一锁内的操作资格判断。任务登记、状态与页集合在此统一裁定。 */
+    private void checkCommitEligibility(String id, Page current, Page proposed, int currentRev, CommitActor actor, String expectedJobId, CommitOp op) {
+        switch (op) {
+            case MANUAL_SAVE, MANUAL_REVERT -> {
+                if ("PROCESSING".equals(current.status()))
+                    throw new PageConflictException(currentRev, "本页正在识别，请等待完成或先取消任务再操作");
+                Job job = readJob(id);
+                if (job != null && List.of("QUEUED", "RUNNING", "CANCELLING").contains(job.status())
+                        && job.pages() != null && job.pages().contains(current.pageNumber()))
+                    throw new PageConflictException(currentRev, "本页正在识别，请等待完成或先取消任务再操作");
+            }
+            case JOB_START -> {
+                if (!"PROCESSING".equals(proposed.status()))
+                    throw new ApiException(HttpStatus.BAD_REQUEST, "任务开始提交必须为 PROCESSING 页");
+                Job job = requireCurrentJob(id, currentRev, expectedJobId, current.pageNumber());
+                if (!List.of("QUEUED", "RUNNING").contains(job.status()))
+                    throw new PageConflictException(currentRev, "任务已不在可开始状态，本页不再写入");
+                requirePageInJob(job, current, currentRev);
+            }
+            case JOB_COMPLETE -> {
+                Job job = requireCurrentJob(id, currentRev, expectedJobId, current.pageNumber());
+                if (!"RUNNING".equals(job.status()))
+                    throw new PageConflictException(currentRev, "任务已结束或取消，本页结果不再写入");
+                requirePageInJob(job, current, currentRev);
+            }
+            case JOB_RESTORE -> {
+                Job job = requireCurrentJob(id, currentRev, expectedJobId, current.pageNumber());
+                if (List.of("COMPLETED", "COMPLETED_WITH_ERRORS", "FAILED", "CANCELLED", "IDLE", "INTERRUPTED").contains(job.status()))
+                    throw new PageConflictException(currentRev, "任务已终态，恢复写入不再执行");
+                requirePageInJob(job, current, currentRev);
+            }
+            case SYSTEM_RECOVERY -> { }
+        }
+        if (actor == CommitActor.JOB && expectedJobId == null)
+            throw new ApiException(HttpStatus.BAD_REQUEST, "任务提交缺少任务标识");
+    }
+
+    private Job requireCurrentJob(String id, int currentRev, String expectedJobId, int pageNumber) {
+        if (expectedJobId == null) throw new ApiException(HttpStatus.BAD_REQUEST, "任务提交缺少任务标识");
+        Job job = readJob(id);
+        if (job == null || !expectedJobId.equals(job.id()))
+            throw new PageConflictException(currentRev, "任务已被取代，本页不再写入");
+        return job;
+    }
+
+    private static void requirePageInJob(Job job, Page current, int currentRev) {
+        if (job.pages() == null || !job.pages().contains(current.pageNumber()))
+            throw new PageConflictException(currentRev, "本页不属于当前任务，不再写入");
     }
 
     private Page persistNewRevision(String id, Page current, Page proposed) throws IOException {
@@ -158,9 +196,14 @@ public class BookStore {
                             if (readyHistory != null) {
                                 List<String> merged = new java.util.ArrayList<>(readyHistory.warnings()==null?List.of():readyHistory.warnings());
                                 merged.add("应用重启导致本页处理中断，已回退到上一个可读版本");
-                                writePage(book.id(),new Page(readyHistory.pageNumber(),readyHistory.width(),readyHistory.height(),"READY",readyHistory.provider(),readyHistory.blocks()==null?List.of():readyHistory.blocks(),List.copyOf(merged),readyHistory.reviewed(),null,readyHistory.sourceRecords(),null),false);
+                                Page restored = new Page(readyHistory.pageNumber(),readyHistory.width(),readyHistory.height(),"READY",readyHistory.provider(),readyHistory.blocks()==null?List.of():readyHistory.blocks(),List.copyOf(merged),readyHistory.reviewed(),null,readyHistory.sourceRecords(),null);
+                                // A1-04：启动恢复走专用恢复提交（启动期单线程，不与其他写入竞争）
+                                Page current = readPage(book.id(), n);
+                                commitPage(book.id(), restored, revisionOrZero(current), CommitActor.SYSTEM, null, CommitOp.SYSTEM_RECOVERY);
                             } else {
-                                writePage(book.id(),new Page(p.pageNumber(),p.width(),p.height(),"PENDING",p.provider(),List.of(),List.copyOf(warnings),p.reviewed(),null,p.sourceRecords(),null),false);
+                                Page restored = new Page(p.pageNumber(),p.width(),p.height(),"PENDING",p.provider(),List.of(),List.copyOf(warnings),p.reviewed(),null,p.sourceRecords(),null);
+                                Page current = readPage(book.id(), n);
+                                commitPage(book.id(), restored, revisionOrZero(current), CommitActor.SYSTEM, null, CommitOp.SYSTEM_RECOVERY);
                             }
                         }
                     }
@@ -179,18 +222,41 @@ public class BookStore {
     }
     public Path historyDir(String id, int page) { return bookDir(id).resolve("pages").resolve("history").resolve(String.valueOf(page)); }
     public Path candidatePath(String id, int page) { return bookDir(id).resolve("pages").resolve(page + ".candidate.json"); }
+    /** A1-C06 测试注入点：仅测试使用。设为阶段名则下一次对应落盘抛 IOException，用后必须清零。 */
+    public static volatile String injectIoFailureAt = null;
+    public static void failNextIoAt(String stage) { injectIoFailureAt = stage; }
+    public static void clearIoFailure() { injectIoFailureAt = null; }
+    private static void checkInjected(String stage) throws IOException {
+        if (stage.equals(injectIoFailureAt)) throw new IOException("injected failure at " + stage);
+    }
     private static final java.util.regex.Pattern HISTORY_FILE = java.util.regex.Pattern.compile("^rev-(\\d+)\\.json$");
     private void archiveHistory(String id, Page existing) throws IOException {
+        checkInjected("history");
         Path dir = historyDir(id, existing.pageNumber());
         Files.createDirectories(dir);
         Path target = dir.resolve("rev-" + revisionOrZero(existing) + ".json");
         if (!Files.exists(target)) atomic(target, existing);
-        // R04：按数值保留最新 5 个有效历史版本；异常命名文件不参与排序、不被清理
+        // R04/A1-C08：按数值保留最新 5 个有效历史版本；异常命名、非普通文件、
+        // 超出 int 范围的版本号不参与排序、不被清理
         try (Stream<Path> files = Files.list(dir)) {
-            List<Path> revs = files.filter(p -> HISTORY_FILE.matcher(p.getFileName().toString()).matches())
-                .sorted(Comparator.comparingInt(p -> Integer.parseInt(HISTORY_FILE.matcher(p.getFileName().toString()).replaceFirst("$1")))).toList();
-            for (int i = 0; i + 5 < revs.size(); i++) Files.deleteIfExists(revs.get(i));
+            List<RevisionFile> revs = files.filter(Files::isRegularFile)
+                .map(p -> RevisionFile.parse(p)).filter(java.util.Objects::nonNull).toList();
+            List<RevisionFile> effective = revs.stream()
+                .filter(r -> r.number <= Integer.MAX_VALUE)
+                .sorted(Comparator.comparingLong(r -> r.number)).toList();
+            for (int i = 0; i + 5 < effective.size(); i++) Files.deleteIfExists(effective.get(i).path);
         } catch (IOException ignored) { }
+    }
+    private record RevisionFile(Path path, long number) {
+        static RevisionFile parse(Path path) {
+            java.util.regex.Matcher matcher = HISTORY_FILE.matcher(path.getFileName().toString());
+            if (!matcher.matches()) return null;
+            try {
+                return new RevisionFile(path, Long.parseLong(matcher.group(1)));
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
     }
     public List<Integer> listRevisions(String id, int page) {
         Path dir = historyDir(id, page);
@@ -223,8 +289,8 @@ public class BookStore {
             warnings.add("已回退到版本 " + targetRevision);
             Page proposed = new Page(target.pageNumber(), target.width(), target.height(), target.status(), target.provider(),
                 target.blocks(), List.copyOf(warnings), target.reviewed(), null, target.sourceRecords(), null);
-            // R03：回退同样走条件提交，成功生成更高的新 revision
-            return commitPage(id, proposed, expectedRevision, CommitActor.REVERT, null);
+            // R03/A1-04：回退同样走条件提交，成功生成更高的新 revision
+            return commitPage(id, proposed, expectedRevision, CommitActor.REVERT, null, CommitOp.MANUAL_REVERT);
         }
     }
     public void writeCandidate(String id, Page candidate) throws IOException {
@@ -239,6 +305,7 @@ public class BookStore {
     /** 首次成功结果缺失原始快照时补留（与旧 writePage preserveOriginal 语义一致）。 */
     public void preserveOriginal(String id, Page page) throws IOException {
         synchronized (dirLock) {
+            checkInjected("original");
             Path original = originalPagePath(id, page.pageNumber());
             if (!Files.exists(original)) atomic(original, page);
         }
@@ -261,6 +328,7 @@ public class BookStore {
         catch (IOException e) { throw new ApiException(Files.exists(path) ? HttpStatus.INTERNAL_SERVER_ERROR : HttpStatus.NOT_FOUND, message); }
     }
     private void atomic(Path target, Object value) throws IOException {
+        checkInjected("atomic");
         Files.createDirectories(target.getParent());
         Path tmp = Files.createTempFile(target.getParent(), target.getFileName().toString(), ".tmp");
         try {

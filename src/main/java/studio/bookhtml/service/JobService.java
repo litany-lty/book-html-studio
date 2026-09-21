@@ -9,6 +9,7 @@ import studio.bookhtml.api.JobRequest;
 import studio.bookhtml.domain.*;
 import studio.bookhtml.store.BookStore;
 import studio.bookhtml.store.CommitActor;
+import studio.bookhtml.store.CommitOp;
 import studio.bookhtml.store.PageConflictException;
 
 import java.io.IOException;
@@ -47,9 +48,9 @@ public class JobService {
             Page baseline=force?strongestBaseline(old,store.readOriginalPage(running.bookId,pageNumber)):old;
             if("READY".equals(old.status())&&!force){completed++;writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",completed,pages.size(),pageNumber,null,List.copyOf(errors)));continue;}
             Page processing=new Page(old.pageNumber(),old.width(),old.height(),"PROCESSING",provider,old.blocks(),old.warnings(),old.reviewed(),null,old.sourceRecords(),null);
-            // R03：PROCESSING 标记同样走条件提交；基线已被并发修改时不覆盖，直接跳过
+            // R03/A1-04：PROCESSING 标记走条件提交（JOB_START）；基线已被并发修改时不覆盖，直接跳过
             try {
-                store.commitPage(running.bookId,processing,baselineRev,CommitActor.JOB,initial.id());
+                store.commitPage(running.bookId,processing,baselineRev,CommitActor.JOB,initial.id(),CommitOp.JOB_START);
             } catch (PageConflictException conflict) {
                 String message="第 "+pageNumber+" 页在识别开始前已被更新，已保留较新版本，跳过本页";
                 errors.add(message);completed++;writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",completed,pages.size(),pageNumber,null,List.copyOf(errors)));continue;
@@ -72,14 +73,15 @@ public class JobService {
                         fallback=new Page(old.pageNumber(),old.width(),old.height(),"FAILED",old.provider(),old.blocks(),List.copyOf(warnings),old.reviewed(),message,old.sourceRecords(),null);
                     }
                     try {
-                        store.commitPage(running.bookId,fallback,baselineRev+1,CommitActor.JOB,initial.id());
+                        store.commitPage(running.bookId,fallback,baselineRev+1,CommitActor.JOB,initial.id(),CommitOp.JOB_RESTORE);
                     } catch (PageConflictException conflict) {
                         errors.add("第 "+pageNumber+" 页在识别期间又被更新，已保留最新版本");
                     }
                 }else{
-                    try{store.preserveOriginal(running.bookId,page);}catch(IOException ignored){}
+                    // A1-04：先提交成功结果，通过后再补原始快照；被拒绝的结果不写快照
                     try {
-                        store.commitPage(running.bookId,page,baselineRev+1,CommitActor.JOB,initial.id());
+                        store.commitPage(running.bookId,page,baselineRev+1,CommitActor.JOB,initial.id(),CommitOp.JOB_COMPLETE);
+                        try{store.preserveOriginal(running.bookId,page);}catch(IOException ignored){}
                     } catch (PageConflictException conflict) {
                         String message="第 "+pageNumber+" 页在识别期间已被手工保存，已保留手工版本，识别候选另存备查";
                         errors.add(message);
@@ -91,7 +93,7 @@ public class JobService {
                 if(!stillCurrent(running,initial.id()))return;
                 // 恢复旧状态为新版本，不降低可读性；并发写入优先保留
                 try {
-                    store.commitPage(running.bookId,new Page(old.pageNumber(),old.width(),old.height(),old.status(),old.provider(),old.blocks(),old.warnings(),old.reviewed(),old.error(),old.sourceRecords(),null),baselineRev+1,CommitActor.JOB,initial.id());
+                    store.commitPage(running.bookId,new Page(old.pageNumber(),old.width(),old.height(),old.status(),old.provider(),old.blocks(),old.warnings(),old.reviewed(),old.error(),old.sourceRecords(),null),baselineRev+1,CommitActor.JOB,initial.id(),CommitOp.JOB_RESTORE);
                 } catch (PageConflictException ignored) { }
                 throw e;}
             catch(Exception e){
@@ -106,7 +108,7 @@ public class JobService {
                     failed=new Page(old.pageNumber(),old.width(),old.height(),"FAILED",provider,old.blocks(),old.warnings(),old.reviewed(),message,old.sourceRecords(),null);
                 }
                 try {
-                    store.commitPage(running.bookId,failed,baselineRev+1,CommitActor.JOB,initial.id());
+                    store.commitPage(running.bookId,failed,baselineRev+1,CommitActor.JOB,initial.id(),CommitOp.JOB_RESTORE);
                 } catch (PageConflictException ignored) { }
             }
             completed++;writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",completed,pages.size(),pageNumber,null,List.copyOf(errors)));

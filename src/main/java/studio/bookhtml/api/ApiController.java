@@ -62,7 +62,14 @@ public class ApiController {
     @PostMapping("/books/{id}/job/cancel") public Job cancel(@PathVariable String id){return jobs.cancel(id);}
     @PutMapping("/books/{id}/pages/{n}") public Map<String,Object> update(@PathVariable String id,@PathVariable int n,@Valid@RequestBody PageUpdateRequest request){return pagePayload(id,books.update(id,n,request));}
     @GetMapping("/books/{id}/pages/{n}/revisions") public Map<String,Object> revisions(@PathVariable String id,@PathVariable int n){return Map.of("revisions",books.revisions(id,n));}
-    @PostMapping("/books/{id}/pages/{n}/revert") public Map<String,Object> revert(@PathVariable String id,@PathVariable int n,@RequestBody Map<String,Object> body){Object rev=body==null?null:body.get("revision");if(!(rev instanceof Number))throw new ApiException(HttpStatus.BAD_REQUEST,"缺少 revision");Object expected=body==null?null:body.get("expectedRevision");if(!(expected instanceof Number))throw new ApiException(HttpStatus.BAD_REQUEST,"缺少 expectedRevision，请刷新后重试");return pagePayload(id,books.revert(id,n,((Number)rev).intValue(),((Number)expected).intValue()));}
+    @PostMapping("/books/{id}/pages/{n}/revert") public Map<String,Object> revert(@PathVariable String id,@PathVariable int n,@RequestBody Map<String,Object> body){int target=requiredRevision(body==null?null:body.get("revision"),"缺少 revision");int expected=requiredRevision(body==null?null:body.get("expectedRevision"),"缺少 expectedRevision，请刷新后重试");return pagePayload(id,books.revert(id,n,target,expected));}
+    // A1-C09：只接受整数范围内的版本号；小数、溢出、负数一律可预测 400，不经 intValue 截断
+    private static int requiredRevision(Object value,String missingMessage){
+        if(value==null)throw new ApiException(HttpStatus.BAD_REQUEST,missingMessage);
+        if(value instanceof Integer i)return i;
+        if(value instanceof Long l&&l>=Integer.MIN_VALUE&&l<=Integer.MAX_VALUE)return l.intValue();
+        throw new ApiException(HttpStatus.BAD_REQUEST,"revision 非法");
+    }
     @GetMapping("/books/{id}/search") public List<Map<String,Object>> search(@PathVariable String id,@RequestParam String q){return books.search(id,q);}
     @GetMapping(value="/books/{id}/export",produces="application/zip") public void export(@PathVariable String id,@RequestParam(required=false)String pages,HttpServletResponse response)throws IOException{Book book=books.get(id);String ascii="book-"+book.id()+".zip";response.setHeader(HttpHeaders.CONTENT_DISPOSITION,"attachment; filename=\""+ascii+"\"; filename*=UTF-8''"+java.net.URLEncoder.encode(book.title()+".zip",StandardCharsets.UTF_8).replace("+","%20"));export.writeZip(id,response.getOutputStream(),pages);}
     private Map<String,Object> pagePayload(String bookId,Page page){Page readingPage=ReadingStructureNormalizer.normalize(page);LinkedHashMap<String,Object>payload=json.convertValue(readingPage,new TypeReference<>(){});LinkedHashMap<String,Object>metadata=new LinkedHashMap<>();
