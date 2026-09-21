@@ -1,0 +1,68 @@
+{
+  "_comment": "TypeSafe System One 契约冻结版本。依据 docs.typesafe.ai/api、llms.txt、primitives/choice、noul、score（读取日期见 README）。未核实项见 unverified，绝不能用于生产断言。",
+  "contractName": "typesafe-systemone",
+  "contractVersion": "v1-2026-09-21",
+  "readDate": "2026-09-21",
+  "sources": [
+    "https://docs.typesafe.ai/llms.txt",
+    "https://docs.typesafe.ai/api",
+    "https://docs.typesafe.ai/primitives/choice",
+    "https://docs.typesafe.ai/primitives/noul",
+    "https://docs.typesafe.ai/primitives/score"
+  ],
+  "endpoint": {
+    "method": "POST",
+    "url": "https://api.typesafe.ai/v1/systemone",
+    "auth": "Authorization: Bearer <server-side-key>",
+    "note": "密钥只存后端，绝不经过前端、离线包、日志与导出"
+  },
+  "request": {
+    "model": {
+      "field": "model (required)",
+      "knownAlias": "jev-latest",
+      "rule": "模型 ID 必须由账户可用模型核实后配置；空值时禁用外呼。占位符绝不发送。"
+    },
+    "state": "string | object | array：待评估内容（文本或结构化 JSON）。本项目只发文本/JSON，不发图片 base64 或 PDF 地址。",
+    "questions": "map<string, Question>：每题 {type, instructions, criteria}。instructions 可为 string/object/array；问题语义写进 instructions，不依赖问题 ID。"
+  },
+  "primitives": {
+    "choice": {
+      "use": "有限候选二选一；答案含 choice（最高概率选项）、probabilities（全分布，和为 1）、confidence（0-1，由分布形状计算）",
+      "rule": "choice=argmax 未被官方承诺时不得作为协议解析依据；排名矛盾由策略层降级"
+    },
+    "noul": {
+      "use": "是否需要更多源图证据/人工复核；返回 P(yes)",
+      "rule": "noul 没有独立 confidence；缺失绝不能当 0；不因缺 confidence 判失败"
+    },
+    "score": {
+      "use": "有序等级期望分值及分布；可能为小数",
+      "rule": "不强制转 int，不默认 0-1 概率；首版文字选择不依赖 score"
+    }
+  },
+  "response": {
+    "answers": "每题在 answers 下按请求 ID 各一项",
+    "usage": { "input_tokens": "integer", "output_tokens": "integer" },
+    "usageRule": "usage 缺失记 UNKNOWN，绝不记 0；费用结算以真实合同为准"
+  },
+  "errors": {
+    "401": "缺失或无效 API key，检查 Authorization",
+    "422": "请求体校验失败，body 说明违规字段",
+    "429": "限流，退避重试（首版不隐式重试，由用户明确重试产生新 attempt）",
+    "529": "服务端过载，稍后重试"
+  },
+  "transportRules": [
+    "固定官方 endpoint；自定义地址仅后端管理员受控配置，测试 loopback 用测试 profile",
+    "禁止模型/OCR 内容改变 URL、headers、文件路径、工具或权限",
+    "跨主机重定向绝不携带 Authorization",
+    "总 deadline 覆盖排队、发送、响应体读取与解析；单调时钟计时",
+    "响应设最大字节、分块慢响应与断流保护；取消同时关闭 body、取消 HTTP future"
+  ],
+  "unverified": [
+    "图像输入合同（未证明支持视觉输入；本项目按文本/JSON 接入）",
+    "当前模型清单与别名（models 文档本次未取得）",
+    "价格与计费上界（不引用历史公开价格；无 pricingVersion 不真实外呼）",
+    "数据保留、训练用途与地域条款（启用前说明只写已核实项）",
+    "概率分布求和容差与截断语义（以 J00 冻结的真实合同为准，不猜测）"
+  ],
+  "liveStatus": "BLOCKED：无 API key、无费用/外发授权，真实 smoke 未执行。本目录夹具均为人工编写的合成样本（synthetic:true），不是供应商真实返回。"
+}
