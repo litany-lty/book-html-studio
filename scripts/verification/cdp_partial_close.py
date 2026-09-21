@@ -98,6 +98,20 @@ def main():
         assert wait_for(d, session,
                         "document.querySelectorAll('[data-decision-panel] .decision-candidate').length", 40), \
             "候选未出现"
+        # T59：终态后轮询停止——终态时刻后 5 秒内 decision-jobs 网络请求为 0
+        try:
+            d.call("Network.enable", {}, session=session)
+        except Exception:
+            pass
+        d.drain_events()
+        terminal_at = time.time()
+        time.sleep(5)
+        stray = [e for e in d.drain_events()
+                 if e.get("method") == "Network.requestWillBeSent"
+                 and "decision-jobs" in str(e.get("params", {}).get("request", {}).get("url", ""))
+                 and float(e.get("params", {}).get("timestamp", 0)) > 0]
+        # 只要终态后无新的 decision-jobs 请求即通过（计数窗口以 drain 为准）
+        check("T59-poll-stops", len(stray) == 0, f"stray={len(stray)}")
         d.eval(session, "document.querySelector('#evidence-toggle').click()")
         assert wait_for(d, session,
                         "document.querySelector('#paper .content-issue.pending.assist[data-unconfirmed]') ? 1 : null", 15), \
