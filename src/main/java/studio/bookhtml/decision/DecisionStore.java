@@ -142,6 +142,26 @@ public class DecisionStore {
         return readIsolated(decisionsDir(bookId).resolve("jobs").resolve(jobId + ".json"), DecisionJob.class);
     }
 
+    /** 预算账本：发送前原子预留的持久依据；未知费用保留预留，绝不记 0。 */
+    public record BudgetState(long reservedMinor, long reportedMinor, long releasedMinor,
+                              Instant updatedAt) {
+        public BudgetState {
+            if (reservedMinor < 0 || reportedMinor < 0 || releasedMinor < 0)
+                throw new IllegalArgumentException("预算为负");
+            if (updatedAt == null) throw new IllegalArgumentException("时间为空");
+        }
+    }
+
+    public synchronized void saveBudgetState(String bookId, BudgetState state) throws IOException {
+        ensureSchema(bookId);
+        atomicWrite(subdir(bookId, "budgets"), bookId + ".json", state);
+    }
+
+    public synchronized Optional<BudgetState> loadBudgetState(String bookId) throws IOException {
+        return readIsolated(decisionsDir(bookId).resolve("budgets").resolve(bookId + ".json"),
+                BudgetState.class);
+    }
+
     /** 原子查找/登记准入键：调用方在付费生成候选前合并重复请求。 */
     public DecisionJob findByAdmission(String bookId, String admissionKey) throws IOException {
         Path dir = decisionsDir(bookId).resolve("jobs");
