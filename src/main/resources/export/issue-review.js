@@ -618,7 +618,14 @@
           return `应用失败：${String((error && error.message) || error)}，部分条目可能已写入，请核对。`;
         }
         render(); refresh();
-        return `预览：可应用 ${ok}，待核验 ${pending}，冲突 ${conflict}，无效 ${invalid}；已应用 ${applied}。冲突条目未覆盖。`;
+        const message = `预览：可应用 ${ok}，待核验 ${pending}，冲突 ${conflict}，无效 ${invalid}；已应用 ${applied}。冲突条目未覆盖。`;
+        try {
+          await refreshIdbPending(getPage());
+          draw();
+          const box = dialog.querySelector('.import-preview');
+          if (box) box.textContent = message;
+        } catch (_) { /* 保持预览结果 */ }
+        return message;
       }
       function appendText(container, block, text, page = getPage()) {
         const original = getScript() === 'original';
