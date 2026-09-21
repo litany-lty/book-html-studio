@@ -22,6 +22,35 @@ public class QwenOcrClient {
     @Autowired public QwenOcrClient(AppProperties config,ObjectMapper json){this(config,json,request->HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build().send(request,HttpResponse.BodyHandlers.ofString()));}
     QwenOcrClient(AppProperties config,ObjectMapper json,Transport transport){this.config=config;this.json=json;this.transport=transport;}
     public boolean configured(){return !config.dashscopeApiKey().isBlank()&&!config.qwenModel().isBlank();}
+    /**
+     * JR-04：JEV 路径单次有界复识别。无隐藏重试（429 立即返回受限，不循环三次）；
+     * 经调用方传入的共享有界传输发送，带总期限、最大字节与取消。
+     * 旧 recognize() 的 429×3 循环是既有 OCR 业务的显式策略，不用于 JEV。
+     */
+    public List<Block> recognizeBounded(byte[] png,int imageWidth,int imageHeight,String layout,
+                                        long deadlineNanos,int maxResponseBytes,BooleanSupplier cancelled,
+                                        studio.bookhtml.decision.DecisionTransport transport)throws OcrException{
+        if(!configured())throw new ApiException(HttpStatus.BAD_REQUEST,"Qwen OCR 尚未配置 DASHSCOPE_API_KEY");
+        if(png.length>MAX_IMAGE_BYTES)throw new ApiException(HttpStatus.BAD_REQUEST,"送识图片超过 Qwen 10MB 限制");
+        if((long)imageWidth*imageHeight>8_388_608L)throw new ApiException(HttpStatus.BAD_REQUEST,"送识图片超过 Qwen 800 万像素限制");
+        try{
+            Map<String,Object> image=Map.of("image","data:image/png;base64,"+Base64.getEncoder().encodeToString(png),"min_pixels",3072,"max_pixels",8388608,"enable_rotate",false);
+            Map<String,Object> body=Map.of("model",config.qwenModel(),"input",Map.of("messages",List.of(Map.of("role","user","content",List.of(image)))),"parameters",Map.of("ocr_options",Map.of("task","advanced_recognition")));
+            byte[] payload=json.writeValueAsBytes(body);
+            HttpRequest request=HttpRequest.newBuilder(URI.create(config.qwenBaseUrl().replaceAll("/+$","")+"/services/aigc/multimodal-generation/generation")).header("Authorization","Bearer "+config.dashscopeApiKey()).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofByteArray(payload)).build();
+            BoundedHttp.Response response;
+            try{response=transport.send(request,deadlineNanos,maxResponseBytes,cancelled);}
+            catch(BoundedHttp.BoundedHttpException e){throw switch(e.kind()){
+                case TIMEOUT->new OcrException("Qwen 局部复识别总时限耗尽");
+                case CANCELLED->new CancelledException();
+                case TOO_LARGE->new OcrException("Qwen 局部复识别响应超过上限");
+                case IO->new OcrException("Qwen 局部复识别网络读写失败",e);};}
+            catch(java.io.IOException e){throw new OcrException("Qwen 局部复识别网络读写失败",e);}
+            if(response.status()==429)throw new OcrException("Qwen 局部复识别请求频率受限");
+            if(response.status()<200||response.status()>=300)throw new OcrException("Qwen 局部复识别失败（HTTP "+response.status()+"）");
+            return parse(new String(response.body(),java.nio.charset.StandardCharsets.UTF_8),imageWidth,imageHeight,layout);
+        }catch(ApiException|CancelledException|OcrException e){throw e;}catch(Exception e){throw new OcrException("Qwen 局部复识别请求失败",e);}
+    }
     public List<Block> recognize(byte[] png,int imageWidth,int imageHeight,String layout,BooleanSupplier cancelled)throws OcrException{
         if(!configured())throw new ApiException(HttpStatus.BAD_REQUEST,"Qwen OCR 尚未配置 DASHSCOPE_API_KEY");
         if(png.length>MAX_IMAGE_BYTES)throw new ApiException(HttpStatus.BAD_REQUEST,"送识图片超过 Qwen 10MB 限制");
