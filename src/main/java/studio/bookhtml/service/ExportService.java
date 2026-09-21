@@ -45,12 +45,12 @@ public class ExportService {
         this(books, store, pdf, json, null, null);
     }
 
-    @Autowired
     public ExportService(BookService books, BookStore store, PdfService pdf, ObjectMapper json,
                          IssueImageService issueImages) {
         this(books, store, pdf, json, issueImages, null);
     }
 
+    @Autowired
     public ExportService(BookService books, BookStore store, PdfService pdf, ObjectMapper json,
                          IssueImageService issueImages,
                          studio.bookhtml.decision.DecisionCoordinator decisionCoordinator) {
