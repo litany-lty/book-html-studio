@@ -409,6 +409,8 @@ function markDirty() {
   editVersion++;
   state.dirty = true;
   $('#save-page').disabled = false;
+  // J08：草稿变脏即同步决策门禁（轻量，不重绘面板）
+  try { decisionPanel.syncDraftGuard(true); } catch (_) { /* 面板未挂载时忽略 */ }
 }
 
 // A1-01：编辑会话快照与身份判断。相同页号不代表相同会话。
@@ -780,10 +782,17 @@ $('#paper').addEventListener('copy', event => {
   const range = selection.getRangeAt(0);
   const host = $('#paper');
   if (!host.contains(range.commonAncestorContainer)) return;
-  const probe = range.cloneContents();
-  const inner = document.createElement('div');
-  inner.append(probe);
-  const marked = Boolean(inner.querySelector('[data-unconfirmed]'));
+  // 选区可能只含标记内部文字（clone 不含标记本身），沿祖先链判定
+  let marked = false;
+  for (let node = range.commonAncestorContainer; node && node !== host; node = node.parentNode) {
+    if (node.hasAttribute?.('data-unconfirmed')) { marked = true; break; }
+  }
+  if (!marked) {
+    const probe = range.cloneContents();
+    const inner = document.createElement('div');
+    inner.append(probe);
+    marked = Boolean(inner.querySelector('[data-unconfirmed]'));
+  }
   if (!marked) return;
   event.preventDefault();
   event.clipboardData.setData('text/plain',

@@ -300,4 +300,67 @@ class CoordinatorTest {
         assertEquals(1, staleHistory.size());
         assertEquals("STALE", staleHistory.get(0).get("applicability"));
     }
+
+    @Test void terminalQueryStableWithoutNewCalls() throws Exception {
+        // T59：终态后轮询只读，不触发补算、不推进版本、不新增外呼
+        Fixture f = fixture(true);
+        Page page = f.store.readPage(BOOK, 3);
+        Block block = page.blocks().stream().filter(b -> b.id().equals("b1")).findFirst().orElseThrow();
+        ContentIssue issue = block.issues().get(0);
+        DecisionCoordinator.CreateResult created = f.coordinator.createOrReuse(BOOK, 3, "i-b1",
+                new DecisionCoordinator.CreateBody("op-stable", "b1",
+                        BookStore.revisionOrZero(page), IssueBasis.basisHash(block, issue), false));
+        f.coordinator.runInline(BOOK, created.job().jobId());
+        int calls = f.transport.calls.get();
+        DecisionStore.DecisionJob first = f.coordinator.queryJob(BOOK, created.job().jobId());
+        Thread.sleep(1100);
+        DecisionStore.DecisionJob second = f.coordinator.queryJob(BOOK, created.job().jobId());
+        assertEquals(first.stateVersion(), second.stateVersion());
+        assertEquals("SUCCEEDED", second.state());
+        assertEquals(calls, f.transport.calls.get());
+    }
+
+    @Test void offRestartRequeuesWithoutCalls() throws Exception {
+        // T64：OFF 后重启恢复可执行，重排的 QUEUED 走 UNAVAILABLE，不外呼、不崩溃
+        Fixture f = fixture(false);
+        Page page = f.store.readPage(BOOK, 3);
+        Block block = page.blocks().stream().filter(b -> b.id().equals("b1")).findFirst().orElseThrow();
+        ContentIssue issue = block.issues().get(0);
+        DecisionCoordinator.CreateResult created = f.coordinator.createOrReuse(BOOK, 3, "i-b1",
+                new DecisionCoordinator.CreateBody("op-off", "b1",
+                        BookStore.revisionOrZero(page), IssueBasis.basisHash(block, issue), false));
+        f.coordinator.recoverBook(BOOK);
+        f.coordinator.runInline(BOOK, created.job().jobId());
+        DecisionStore.DecisionJob done = f.coordinator.queryJob(BOOK, created.job().jobId());
+        assertEquals("SUCCEEDED", done.state());
+        assertTrue(done.reasonCodes().stream().anyMatch(c -> c.startsWith("UNAVAILABLE_")));
+        assertEquals(0, f.transport.calls.get());
+    }
+
+    @Test void hundredRoundCreateCancelTransitions() throws Exception {
+        // T15 回归压力样本（100 轮创建/取消/终态不断言穷尽竞态）：无卡死、无泄漏、无半写
+        Fixture f = fixture(false);
+        f.config.setMaxQueueEntries(10000);
+        for (int round = 0; round < 100; round++) {
+            Page page = f.store.readPage(BOOK, 3);
+            Block block = page.blocks().stream().filter(b -> b.id().equals("b1")).findFirst().orElseThrow();
+            ContentIssue issue = block.issues().get(0);
+            DecisionCoordinator.CreateResult created = f.coordinator.createOrReuse(BOOK, 3, "i-b1",
+                    new DecisionCoordinator.CreateBody("op-" + round, "b1",
+                            BookStore.revisionOrZero(page), IssueBasis.basisHash(block, issue), false));
+            DecisionStore.DecisionJob job = created.job();
+            if ("QUEUED".equals(job.state())) {
+                DecisionStore.DecisionJob cancelling =
+                        f.coordinator.cancel(BOOK, job.jobId(), job.stateVersion());
+                assertEquals("CANCEL_REQUESTED", cancelling.state());
+                f.coordinator.runInline(BOOK, job.jobId());
+                assertEquals("CANCELLED", f.coordinator.queryJob(BOOK, job.jobId()).state());
+            } else {
+                f.coordinator.runInline(BOOK, job.jobId());
+                String state = f.coordinator.queryJob(BOOK, job.jobId()).state();
+                assertTrue("SUCCEEDED".equals(state) || "CANCELLED".equals(state), "终态：" + state);
+            }
+        }
+        assertEquals(0, f.transport.calls.get());
+    }
 }

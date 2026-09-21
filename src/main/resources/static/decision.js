@@ -77,6 +77,17 @@ export function createDecisionPanel(deps) {
     abortFlight();
   }
 
+  /** 草稿门禁轻量同步：只切换需干净态按钮的禁用与提示，不重绘面板（保轮询与焦点）。 */
+  function syncDraftGuard(dirty) {
+    const titles = { compare: '零新增视觉调用', vision: '将使用实际能力及预算条件（默认最多一次）', accept: '' };
+    document.querySelectorAll('[data-decision-panel] [data-needs-clean]').forEach(button => {
+      const action = button.dataset.action;
+      if (action !== 'compare' && action !== 'vision' && action !== 'accept') return;
+      button.disabled = Boolean(dirty);
+      button.title = dirty ? '有未保存草稿，请先保存' : (titles[action] || '');
+    });
+  }
+
   function el(tag, className, text) {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -291,6 +302,7 @@ export function createDecisionPanel(deps) {
       host.append(checkRow);
       const acceptRow = el('div', 'decision-actions');
       const acceptButton = el('button', 'button primary decision-action', '对照原图并确认');
+      acceptButton.dataset.needsClean = '1'; acceptButton.dataset.action = 'accept';
       acceptButton.addEventListener('click', () => {
         const picked = radios.find(r => r.checked)?.value || decision.recommendedCandidateId;
         if (!picked) { showError(new Error('请先选择一个候选。')); return; }
@@ -307,10 +319,12 @@ export function createDecisionPanel(deps) {
     }
     const actions = el('div', 'decision-actions');
     const compareButton = el('button', 'button decision-action', '比较现有候选');
+    compareButton.dataset.needsClean = '1'; compareButton.dataset.action = 'compare';
     compareButton.disabled = hasDirty();
     compareButton.title = hasDirty() ? '有未保存草稿，请先保存' : '零新增视觉调用';
     compareButton.addEventListener('click', () => createJob(false));
     const visionButton = el('button', 'button decision-action', '补充一次原图复识别');
+    visionButton.dataset.needsClean = '1'; visionButton.dataset.action = 'vision';
     visionButton.disabled = hasDirty();
     visionButton.title = hasDirty() ? '有未保存草稿，请先保存' : '将使用实际能力及预算条件（默认最多一次）';
     visionButton.addEventListener('click', () => createJob(true));
@@ -345,5 +359,5 @@ export function createDecisionPanel(deps) {
     refresh();
   }
 
-  return { render, refresh, dispose };
+  return { render, refresh, dispose, syncDraftGuard };
 }

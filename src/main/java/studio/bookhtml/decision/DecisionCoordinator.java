@@ -74,7 +74,7 @@ public class DecisionCoordinator {
         this.config = config;
         this.transport = transport;
         this.json = json;
-        this.queue = new LinkedBlockingQueue<>(Math.max(1, config.getMaxQueueEntries()));
+        this.queue = new LinkedBlockingQueue<>();
     }
 
     @PostConstruct
@@ -157,6 +157,7 @@ public class DecisionCoordinator {
                     return new CreateResult(
                             "SUCCEEDED".equals(existing.state()) ? 200 : 200, existing);
                 }
+                // 队列界限由显式 size 检查执行（创建时 429）；队列本身无界，避免容量与配置漂移
                 if (queue.size() >= config.getMaxQueueEntries())
                     throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "决策队列已满");
                 Instant now = Instant.now();

@@ -244,7 +244,8 @@
         const all = readAll();
         const k = recordKey(bookUid, entry.sourcePage, entry.blockId, entry.issueId);
         const currentRev = all[k] ? all[k].editRevision : 0;
-        all[k] = { ...entry, key: k, bookUid, editRevision: currentRev + 1, updatedAt: Date.now() };
+        all[k] = { ...entry, resolution: sanitizeResolution(entry.resolution),
+          key: k, bookUid, editRevision: currentRev + 1, updatedAt: Date.now() };
         try {
           localStorage.setItem(key, JSON.stringify(all));
         } catch (error) {
