@@ -47,6 +47,74 @@ class ExportDecisionsTest {
 
     private static final String BOOK = "11111111-2222-3333-4444-555555555555";
 
+    /** JR-08-T06：高分合成传输，仅导出测试用，产生可放行正式推荐（不改全局 Mock）。 */
+    static class HighScoreTransport extends MockDecisionTransport {
+        @Override
+        public studio.bookhtml.service.BoundedHttp.Response send(java.net.http.HttpRequest request,
+                long deadlineNanos, int maxBytes, java.util.function.BooleanSupplier cancelled)
+                throws java.io.IOException {
+            calls.incrementAndGet();
+            try {
+                java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+                request.bodyPublisher().ifPresent(publisher -> publisher.subscribe(
+                        new java.util.concurrent.Flow.Subscriber<java.nio.ByteBuffer>() {
+                            public void onSubscribe(java.util.concurrent.Flow.Subscription s) {
+                                s.request(Long.MAX_VALUE);
+                            }
+                            public void onNext(java.nio.ByteBuffer item) {
+                                byte[] chunk = new byte[item.remaining()];
+                                item.get(chunk);
+                                out.write(chunk, 0, chunk.length);
+                            }
+                            public void onError(Throwable t) { done.countDown(); }
+                            public void onComplete() { done.countDown(); }
+                        }));
+                done.await(5, java.util.concurrent.TimeUnit.SECONDS);
+                com.fasterxml.jackson.databind.ObjectMapper json = new com.fasterxml.jackson.databind.ObjectMapper();
+                @SuppressWarnings("unchecked")
+                Map<String, Object> body = json.readValue(out.toByteArray(), Map.class);
+                @SuppressWarnings("unchecked")
+                Map<String, Object> questions =
+                        (Map<String, Object>) body.getOrDefault("questions", Map.of());
+                Map<String, Object> answers = new java.util.LinkedHashMap<>();
+                for (Map.Entry<String, Object> e : questions.entrySet()) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> question = (Map<String, Object>) e.getValue();
+                    String type = String.valueOf(question.getOrDefault("type", ""));
+                    @SuppressWarnings("unchecked")
+                    Map<String, String> criteria =
+                            (Map<String, String>) question.getOrDefault("criteria", Map.of());
+                    if ("choice".equals(type)) {
+                        String first = criteria.keySet().stream().sorted().findFirst().orElse("C0");
+                        Map<String, Double> distribution = new java.util.LinkedHashMap<>();
+                        double rest = criteria.isEmpty() ? 0 : 0.05 / Math.max(1, criteria.size() - 1);
+                        for (String key : criteria.keySet())
+                            distribution.put(key, key.equals(first) ? 0.95 : rest);
+                        answers.put(e.getKey(), Map.of("type", "choice", "choice", first,
+                                "probabilities", distribution, "confidence", 0.9));
+                    } else if ("noul".equals(type)) {
+                        answers.put(e.getKey(), Map.of("type", "noul", "noul", 0.0));
+                    } else if ("score".equals(type)) {
+                        answers.put(e.getKey(), Map.of("type", "score", "score", 2.0,
+                                "probabilities", Map.of("2", 1.0), "confidence", 0.9));
+                    } else {
+                        answers.put(e.getKey(), Map.of("type", type));
+                    }
+                }
+                Map<String, Object> response = new java.util.LinkedHashMap<>();
+                response.put("answers", answers);
+                response.put("model", "mock-synthetic-high");
+                byte[] bytes = json.writeValueAsBytes(response);
+                return new studio.bookhtml.service.BoundedHttp.Response(200, bytes);
+            } catch (RuntimeException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new RuntimeException("mock transport 失败", e);
+            }
+        }
+    }
+
     private static Block block(String id, String original) {
         return new Block(id, "text", 0, new double[]{0, 0, 0.4, 0.2}, "horizontal-tb",
                 original, original, 0.9, true, false, null, "paddle", List.of(id),
@@ -76,13 +144,18 @@ class ExportDecisionsTest {
         when(qwen.configured()).thenReturn(false);
         IssueImageService images = mock(IssueImageService.class);
         DecisionProperties config = new DecisionProperties();
-        config.setMode("SHADOW");
+        config.setMode("ASSIST");
         config.setProvider("MOCK");
         config.setApiKey("test-key");
         config.setModel("mock-model");
         config.setAllowCloudData(true);
         config.setMonetaryBudgetMinor(100L);
-        MockDecisionTransport transport = new MockDecisionTransport();
+        // JR-08-T03/T06：导出仅含正式推荐；测试用匹配档产生 RECOMMEND/KEEP_CURRENT
+        config.setCalibrationStatus("VALIDATED");
+        config.setCalibrationProfile("cal-v1|model=mock-model|template=question-template-v2"
+                + "|candidate=candidate-config-v3|policy=decision-policy-v1"
+                + "|threshold=pilot-default-v1|dataset=test|result=test-ok");
+        MockDecisionTransport transport = new HighScoreTransport();
         EvidenceCollector evidence = new EvidenceCollector(resolution, images, qwen, budget, config);
         JevDecisionClient jev = new JevDecisionClient(mapper, transport);
         DecisionCoordinator coordinator = new DecisionCoordinator(store, decisions, budget,
@@ -129,7 +202,8 @@ class ExportDecisionsTest {
         assertEquals("甲", entry.get("originalQuote"));
         assertNotNull(entry.get("candidateId"));
         assertNotNull(entry.get("displayText"));
-        assertEquals("CANDIDATES_ONLY", entry.get("verdict"));
+        // JR-08：高分匹配档下正式推荐为 KEEP_CURRENT（当前转录正确时保持）；仅 admitted 导出
+        assertEquals("KEEP_CURRENT", entry.get("verdict"));
         assertNotNull(entry.get("candidateSetHash"));
         assertNotNull(entry.get("decisionId"));
         assertEquals("question-template-v2", entry.get("templateVersion"));
@@ -156,7 +230,7 @@ class ExportDecisionsTest {
                 Instant.now(), 0, 0));
         PdfService pdf = mock(PdfService.class);
         Path source = f.store.pdf(BOOK);
-        Files.writeString(source, "%PDF-decision");
+        // JR-01：来源 PDF 已在 fixture 写入；此处不覆盖，避免决策快照 STALE（render 已 mock）
         java.awt.image.BufferedImage image =
                 new java.awt.image.BufferedImage(120, 160, java.awt.image.BufferedImage.TYPE_INT_RGB);
         when(pdf.render(eq(source), eq(3), anyInt())).thenReturn(image);

@@ -166,7 +166,42 @@ public final class QualityGate {
                 }
             }
             StringBuilder expected = new StringBuilder();
-            for (String ref : refs) expected.append(sources.get(ref).original() == null ? "" : sources.get(ref).original());
+            // JR-12-T03：旧 span→新 span 映射；每个来源的已确认疑点在新块中的起止必须等于来源偏移+原起止
+            Map<String, Integer> sourceOffset = new java.util.LinkedHashMap<>();
+            for (String ref : refs) {
+                sourceOffset.put(ref, expected.length());
+                expected.append(sources.get(ref).original() == null ? "" : sources.get(ref).original());
+            }
+            for (String ref : refs) {
+                Block src = sources.get(ref);
+                if (src == null || src.issues() == null || src.original() == null) continue;
+                int offset = sourceOffset.getOrDefault(ref, 0);
+                for (var issue : src.issues()) {
+                    if (issue == null || !issue.resolved()) continue;
+                    var outIssue = out.issues() == null ? null : out.issues().stream()
+                            .filter(i -> i != null && issue.id().equals(i.id()))
+                            .findFirst().orElse(null);
+                    if (outIssue == null) continue; // 丢弃已在上文拒绝
+                    // 新范围必须可解释为旧范围平移；不可靠映射时拒绝变换
+                    if (outIssue.start() != offset + issue.start()
+                            || outIssue.end() != offset + issue.end()) {
+                        // 允许纯空白差异导致的整体偏移？不允许单疑点偏移，必须精确
+                        return GateVerdict.no("合并后已确认疑点 " + issue.id()
+                                + " 的新范围无可靠 span 映射");
+                    }
+                    // 新范围截出的正文必须与旧范围一致（防串位）
+                    try {
+                        String outOriginal = out.original() == null ? "" : out.original();
+                        String srcOriginal = src.original();
+                        String oldSpan = srcOriginal.substring(issue.start(), issue.end());
+                        String newSpan = outOriginal.substring(outIssue.start(), outIssue.end());
+                        if (!oldSpan.equals(newSpan))
+                            return GateVerdict.no("合并后已确认疑点 " + issue.id() + " 的正文不一致");
+                    } catch (Exception e) {
+                        return GateVerdict.no("合并后已确认疑点 " + issue.id() + " 的范围越界");
+                    }
+                }
+            }
             if (!stripWhitespace(expected.toString()).equals(stripWhitespace(out.original() == null ? "" : out.original())))
                 return GateVerdict.no("块 " + out.id() + " 原文不是来源串联");
         }

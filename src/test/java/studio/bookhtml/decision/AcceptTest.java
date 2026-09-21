@@ -82,7 +82,7 @@ class AcceptTest {
                 decisions, config, transport);
     }
 
-    /** 走完整协调器拿到可接受 decision（MOCK 通道，UNVALIDATED → CANDIDATES_ONLY 可接受）。 */
+    /** 走完整协调器拿到可接受 decision（MOCK 通道）。 */
     private String prepareDecision(Fixture f) throws Exception {
         DecisionBudget budget = new DecisionBudget(f.decisions);
         CandidateResolutionService resolution =
@@ -451,6 +451,38 @@ class AcceptTest {
         ApiException setRejected = assertThrows(ApiException.class,
                 () -> f.accept.accept(BOOK, 3, "i1", decisionId, tamperedSetHash));
         assertEquals(HttpStatus.CONFLICT, setRejected.status());
+    }
+
+    @Test void snapshotEvidenceSwapAndSpanMismatchRejected() throws Exception {
+        // JR-01-T05 补：snapshot/evidence 串换、范围不匹配、hash 不符一律拒绝
+        Fixture f = fixture();
+        String decisionIdA = prepareDecision(f);
+        String candidateIdA = currentCandidate(f, decisionIdA);
+        DecisionModels.DecisionEvidence evidenceA =
+                f.decisions.loadResult(BOOK, decisionIdA).orElseThrow();
+        // 1. 用 A 的 decisionId 配 B 位置的请求目标（跨疑点）→ 409
+        Page page = f.store.readPage(BOOK, 3);
+        Block blockB = page.blocks().stream().filter(b -> b.id().equals("b2")).findFirst().orElseThrow();
+        ContentIssue issueB = blockB.issues().get(0);
+        DecisionAcceptService.AcceptBody crossBody = new DecisionAcceptService.AcceptBody(
+                "op-cross", "b2", BookStore.revisionOrZero(page),
+                IssueBasis.basisHash(blockB, issueB),
+                evidenceA.candidateSetHash(), candidateIdA, true);
+        ApiException cross = assertThrows(ApiException.class,
+                () -> f.accept.accept(BOOK, 3, "i2", decisionIdA, crossBody));
+        assertEquals(HttpStatus.CONFLICT, cross.status());
+        // 2. 候选 ID 不在集合中 → 409
+        DecisionAcceptService.AcceptBody body = acceptBody(f, decisionIdA, candidateIdA);
+        DecisionAcceptService.AcceptBody unknownCand = new DecisionAcceptService.AcceptBody(
+                body.clientOperationId(), body.blockId(), body.expectedPageRevision(),
+                body.issueBasisHash(), body.candidateSetHash(), "cand-unknown-xyz", true);
+        ApiException unknown = assertThrows(ApiException.class,
+                () -> f.accept.accept(BOOK, 3, "i1", decisionIdA, unknownCand));
+        assertEquals(HttpStatus.CONFLICT, unknown.status());
+        // 3. 快照缺失 → 404（不冒充 500 成功）
+        ApiException missing = assertThrows(ApiException.class,
+                () -> f.accept.accept(BOOK, 3, "i1", "00000000-0000-0000-0000-000000000000", body));
+        assertEquals(HttpStatus.NOT_FOUND, missing.status());
     }
 
     @Test void offOrShadowModeRejectsAcceptance() throws Exception {

@@ -168,8 +168,9 @@ public final class DecisionModels {
             Instant createdAt) {
         public CandidateSet {
             if (issueRef == null) throw new IllegalArgumentException("issueRef 为空");
-            if (candidates == null || candidates.isEmpty() || candidates.size() > 6)
-                throw new IllegalArgumentException("候选数量须为 1..6");
+            // JR-07-T05：候选上限由配置执行（默认 6）；记录层放宽到 1..16，避免配置提升后误拒
+            if (candidates == null || candidates.isEmpty() || candidates.size() > 16)
+                throw new IllegalArgumentException("候选数量须为 1..16");
             long distinct = candidates.stream().map(Candidate::candidateId).distinct().count();
             if (distinct != candidates.size()) throw new IllegalArgumentException("candidateId 重复");
             requireText("candidateSetHash", candidateSetHash);
@@ -182,6 +183,15 @@ public final class DecisionModels {
         public static String computeHash(IssueRef issueRef, List<Candidate> candidates,
                                          String candidateConfigVersion, int rawCount,
                                          boolean truncated, List<String> evidenceGaps) {
+            return computeHash(issueRef, candidates, candidateConfigVersion, rawCount,
+                    truncated, evidenceGaps, List.of());
+        }
+
+        /** JR-07-T05：hash 绑定截断明细（被丢候选），避免不同截断集哈希碰撞。 */
+        public static String computeHash(IssueRef issueRef, List<Candidate> candidates,
+                                         String candidateConfigVersion, int rawCount,
+                                         boolean truncated, List<String> evidenceGaps,
+                                         List<String> truncationReasons) {
             List<Map<String, Object>> stable = new ArrayList<>();
             for (Candidate candidate : candidates) stable.add(candidate.stableMap());
             return DecisionHash.of(Map.of(
@@ -190,6 +200,7 @@ public final class DecisionModels {
                     "candidateConfigVersion", candidateConfigVersion,
                     "rawCount", rawCount,
                     "truncated", truncated,
+                    "truncationReasons", truncationReasons == null ? List.of() : truncationReasons,
                     "evidenceGaps", evidenceGaps == null ? List.of() : evidenceGaps));
         }
     }

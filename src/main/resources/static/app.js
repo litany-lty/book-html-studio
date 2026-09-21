@@ -397,6 +397,8 @@ function renderDecisionSection() {
   const block = (state.blocks || []).find(b => b && b.id === state.selectedBlockId);
   const issue = block?.issues?.find(i => i && i.id === state.selectedIssueId);
   if (!block || !issue || issue.resolved) {
+    // JR-02-T05：关闭面板仅停止读取，不取消服务器后台任务
+    try { decisionPanel.dispose(); } catch (_) {}
     host.replaceChildren();
     host.hidden = true;
     return;

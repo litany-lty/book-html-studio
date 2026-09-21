@@ -130,7 +130,9 @@ class CandidateResolutionTest {
         DecisionModels.Candidate merged = set.candidates().stream()
                 .filter(c -> "乙".equals(c.originalScriptText())).findFirst().orElseThrow();
         assertEquals("G1", merged.acquisitionGroup());
-        assertEquals(3, merged.evidenceRefs().size());
+        // JR-07-T03：同字去重保留全部 acquisition（3 条原始 evidence + 3 条 acq 描述符）
+        assertEquals(6, merged.evidenceRefs().size());
+        assertTrue(merged.evidenceRefs().stream().anyMatch(s -> s.startsWith("acq:producer=")));
         assertEquals(3, merged.upstreamEvidenceIds().size());
         // 当前转录必留
         assertTrue(set.candidates().stream().anyMatch(c -> "甲".equals(c.originalScriptText())));

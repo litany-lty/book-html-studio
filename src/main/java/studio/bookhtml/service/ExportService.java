@@ -92,11 +92,8 @@ public class ExportService {
                         continue;
                     }
                     if (current == null) continue;
-                    Object candidateId = current.get("admittedRecommendationId") != null
-                            ? current.get("admittedRecommendationId")
-                            : (current.get("modelPreferredCandidateId") != null
-                                    ? current.get("modelPreferredCandidateId")
-                                    : current.get("recommendedCandidateId"));
+                    // JR-08-T06：仅正式推荐（admitted）可导出；模型偏好绝不当推荐导出
+                    Object candidateId = current.get("admittedRecommendationId");
                     if (candidateId == null) continue;
                     @SuppressWarnings("unchecked")
                     List<Map<String, Object>> candidates =

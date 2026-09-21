@@ -13,6 +13,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Record tested SHA
+        run: |
+          echo "testedCommit=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "checkoutSHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git status --porcelain
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -36,3 +41,25 @@ jobs:
           python3 scripts/verification/test_shadow_eval.py
       - name: Test and package
         run: mvn --batch-mode verify
+      - name: Build manifest
+        if: always()
+        run: |
+          python3 scripts/verification/build_manifest.py || echo "manifest skipped"
+          echo "testedCommit=${testedCommit:-unknown}" > test-results/sha.txt 2>/dev/null || true
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jev-test-evidence-${{ github.sha }}
+          path: |
+            target/surefire-reports/
+            test-results/
+            manifest.json
+          if-no-files-found: warn
+      - name: Untested items (explicit NOT_RUN/BLOCKED, not simulated)
+        if: always()
+        run: |
+          echo "NOT_RUN: online real-browser CDP (needs GUI/displays, see scripts/verification/cdp_*.py)"
+          echo "NOT_RUN: file:// offline IDB restore/backup-import (needs real browser profile)"
+          echo "NOT_RUN: SHADOW_LIVE real-model runs (needs SHADOW_LIVE=1 + dataset + TYPESAFE_API_KEY)"
+          echo "BLOCKED: none (Ubuntu unit CI); platform-specific faults recorded per-run, not closed by this CI"

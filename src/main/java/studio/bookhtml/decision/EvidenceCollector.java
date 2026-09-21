@@ -32,22 +32,33 @@ public class EvidenceCollector {
     private final DecisionBudget budget;
     private final DecisionProperties config;
     private final DecisionOutboundGate gate;
+    private final DecisionTransport visionTransport;
 
     @org.springframework.beans.factory.annotation.Autowired
     public EvidenceCollector(CandidateResolutionService resolution, IssueImageService images,
                              QwenOcrClient qwen, DecisionBudget budget, DecisionProperties config,
-                             DecisionOutboundGate gate) {
+                             DecisionOutboundGate gate, DecisionTransport visionTransport) {
         this.resolution = resolution;
         this.images = images;
         this.qwen = qwen;
         this.budget = budget;
         this.config = config;
         this.gate = gate != null ? gate : new DecisionOutboundGate(config);
+        this.visionTransport = visionTransport;
+    }
+
+    public EvidenceCollector(CandidateResolutionService resolution, IssueImageService images,
+                             QwenOcrClient qwen, DecisionBudget budget, DecisionProperties config,
+                             DecisionOutboundGate gate) {
+        this(resolution, images, qwen, budget, config, gate, null);
     }
 
     public EvidenceCollector(CandidateResolutionService resolution, IssueImageService images,
                              QwenOcrClient qwen, DecisionBudget budget, DecisionProperties config) {
-        this(resolution, images, qwen, budget, config, new DecisionOutboundGate(config));
+        this(resolution, images, qwen, budget, config, new DecisionOutboundGate(config),
+                (request, deadlineNanos, maxBytes, cancelled) -> {
+                    throw new java.io.IOException("测试默认传输不可用");
+                });
     }
 
     public record Collection(List<CandidateResolutionService.RawCandidate> raws,
@@ -165,8 +176,16 @@ public class EvidenceCollector {
             sent = true;
             attempts++;
             freshCalls.incrementAndGet();
+            // JR-04-T04：JEV 视觉走单次有界 recognizeBounded，无隐藏重试；429 立即受限。
+            // 旧 recognize() 的 3 次重试仅限既有 OCR 业务，JEV 路径禁用。
+            if (visionTransport == null) {
+                throw new IllegalStateException("VISION_TRANSPORT_NOT_CONFIGURED");
+            }
+            long visionNanos = java.time.Duration.ofSeconds(
+                    Math.max(1, config.getVisionAttemptDeadlineSeconds())).toNanos();
             List<studio.bookhtml.domain.Block> reread =
-                    qwen.recognize(snippet.png(), width, height, layout, cancelled);
+                    qwen.recognizeBounded(snippet.png(), width, height, layout,
+                            visionNanos, config.getMaxResponseBytes(), cancelled, visionTransport);
             try {
                 budget.settleReported(bookId, attemptId, RESERVE_PER_VISION_CALL_MINOR);
             } catch (IOException ignored) {}
@@ -187,6 +206,21 @@ public class EvidenceCollector {
                 } else {
                     claimedStart = -1;
                     claimedEnd = -1;
+                }
+            } else {
+                // JR-03：glyph 模式也必须验证文本与目标的唯一映射；
+                // OCR 返回整行/多字时不得直接声明单字 EXACT，转区域定位或丢弃
+                String targetText = frozenOriginal.substring(ref.startUtf16(), ref.endUtf16());
+                if (!text.equals(targetText)) {
+                    CandidateResolutionService.ExpandedSpan located =
+                            CandidateResolutionService.locateScope(frozenOriginal, text);
+                    if (located != null) {
+                        claimedStart = located.startUtf16();
+                        claimedEnd = located.endUtf16();
+                    } else {
+                        claimedStart = -1;
+                        claimedEnd = -1;
+                    }
                 }
             }
             raws.add(new CandidateResolutionService.RawCandidate(text,

@@ -23,7 +23,7 @@ import java.util.Set;
 @Service
 public class CandidateResolutionService {
     static final double LOW_CONFIDENCE_THRESHOLD = 0.5;
-    static final String CANDIDATE_CONFIG_VERSION = "candidate-config-v2";
+    static final String CANDIDATE_CONFIG_VERSION = "candidate-config-v3";
     static final String CONVERTER_VERSION = "opencc4j-ZhConverterUtil-v1";
     static final String NORMALIZER_VERSION = "exact-string-v1";
 
@@ -180,12 +180,25 @@ public class CandidateResolutionService {
 
     /**
      * J02/6.3：候选规范化。当前原始转录（非占位符）必留；精确字符串去重并保留全部来源；
-     * 超六个按规则筛选并记录删选理由；未对齐排除并记缺口。
+     * 按配置上限筛选并记录删选理由；未对齐排除并记缺口。
      */
     public DecisionModels.CandidateSet buildSet(DecisionModels.IssueRef ref, String frozenOriginal,
                                                 String currentTranscription, List<RawCandidate> raws) {
+        return buildSet(ref, frozenOriginal, currentTranscription, raws, List.of(), 6);
+    }
+
+    /** JR-07-T04/T05：调用方传入收集缺口（VISION_* 等）与配置上限；占位/空/截断行为与配置一致。 */
+    public DecisionModels.CandidateSet buildSet(DecisionModels.IssueRef ref, String frozenOriginal,
+                                                String currentTranscription, List<RawCandidate> raws,
+                                                List<String> extraGaps, int maxCandidates) {
         DecisionModels.IssueRef.checkSpan(frozenOriginal, ref.startUtf16(), ref.endUtf16());
         List<String> gaps = new ArrayList<>();
+        if (extraGaps != null) for (String g : extraGaps)
+            if (g != null && !g.isBlank()
+                    && (g.startsWith("VISION_") || g.startsWith("EVIDENCE_")
+                        || g.startsWith("FRESH_VISION_") || g.startsWith("CANCELLED_")
+                        || g.startsWith("PIXEL_") || g.startsWith("CURRENT_"))
+                    && !gaps.contains(g)) gaps.add(g);
         List<AlignedCandidate> aligned = new ArrayList<>();
         int unaligned = 0;
         if (raws != null) for (RawCandidate raw : raws) {
@@ -222,10 +235,11 @@ public class CandidateResolutionService {
         List<DecisionModels.Candidate> substantive = new ArrayList<>();
         if (currentKept != null) substantive.add(currentKept);
         substantive.addAll(kept);
+        int limit = maxCandidates <= 0 ? 6 : maxCandidates;
         List<DecisionModels.Candidate> finalList;
-        if (substantive.size() > 6) {
-            finalList = new ArrayList<>(substantive.subList(0, 6));
-            for (int i = 6; i < substantive.size(); i++) {
+        if (substantive.size() > limit) {
+            finalList = new ArrayList<>(substantive.subList(0, limit));
+            for (int i = limit; i < substantive.size(); i++) {
                 DecisionModels.Candidate dropped = substantive.get(i);
                 truncationReasons.add("OVER_LIMIT_DROPPED:" + dropped.candidateId() + ":"
                         + dropped.sourceKind());
@@ -240,11 +254,16 @@ public class CandidateResolutionService {
         int rawCount = raws == null ? 0 : raws.size();
         if (finalList.isEmpty())
             throw new IllegalArgumentException("NO_USABLE_CANDIDATE：无可用实质候选");
+        // JR-07-T05：占位符/空转录明确标记，不假装正常候选
+        boolean hasPlaceholder = currentBlank
+                || (currentTranscription != null && (currentTranscription.contains("□")
+                        || currentTranscription.contains("�") || currentTranscription.isBlank()));
         String hash = DecisionModels.CandidateSet.computeHash(ref, finalList,
-                CANDIDATE_CONFIG_VERSION, rawCount, !truncationReasons.isEmpty(), gaps);
+                CANDIDATE_CONFIG_VERSION, rawCount, !truncationReasons.isEmpty(), gaps,
+                truncationReasons);
         return new DecisionModels.CandidateSet(hash, ref, finalList, CANDIDATE_CONFIG_VERSION,
                 rawCount, finalList.size(), !truncationReasons.isEmpty(), truncationReasons,
-                gaps, false, allSemantic, Instant.now());
+                gaps, hasPlaceholder, allSemantic, Instant.now());
     }
 
     private static boolean isCurrent(AlignedCandidate a, String current) {
@@ -267,11 +286,23 @@ public class CandidateResolutionService {
         RawCandidate raw = first.raw();
         List<String> evidence = new ArrayList<>();
         List<String> upstream = new ArrayList<>();
+        // JR-07-T03：同字不同来源去重时保留全部 acquisition 可追溯信息；
+        // 结构化字段取首条，同源重试不增加独立支持数（精确文本去重已合并），
+        // 其余来源的 producer/模型/run/组/crop/变换/bbox 编码进 evidenceRefs 保留。
         for (AlignedCandidate a : group) {
             if (a.raw().evidenceRefs() != null) for (String e : a.raw().evidenceRefs())
                 if (e != null && !evidence.contains(e)) evidence.add(e);
             if (a.raw().upstreamEvidenceIds() != null) for (String u : a.raw().upstreamEvidenceIds())
                 if (u != null && !upstream.contains(u)) upstream.add(u);
+            String descriptor = "acq:producer=" + a.raw().producer()
+                    + "|reqModel=" + a.raw().requestedModel()
+                    + "|repModel=" + a.raw().reportedModel()
+                    + "|run=" + a.raw().runId()
+                    + "|group=" + a.raw().acquisitionGroup()
+                    + "|crop=" + a.raw().cropHash()
+                    + "|loc=" + a.raw().locatorMode()
+                    + "|xform=" + a.raw().transformVersion();
+            if (!evidence.contains(descriptor)) evidence.add(descriptor);
         }
         String simplified = raw.text() == null ? null : converter.toSimplified(raw.text());
         return new DecisionModels.Candidate(

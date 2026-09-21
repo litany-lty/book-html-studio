@@ -66,8 +66,16 @@ class EvidenceCollectorTest {
 
     private EvidenceCollector collector(QwenOcrClient qwen, IssueImageService images,
                                         DecisionBudget budget, DecisionProperties config) {
+        DecisionTransport transport = mock(DecisionTransport.class);
         return new EvidenceCollector(new CandidateResolutionService(new TraditionalConverter()),
-                images, qwen, budget, config);
+                images, qwen, budget, config, new DecisionOutboundGate(config), transport);
+    }
+
+    private EvidenceCollector collectorWithTransport(QwenOcrClient qwen, IssueImageService images,
+                                        DecisionBudget budget, DecisionProperties config,
+                                        DecisionTransport transport) {
+        return new EvidenceCollector(new CandidateResolutionService(new TraditionalConverter()),
+                images, qwen, budget, config, new DecisionOutboundGate(config), transport);
     }
 
     private DecisionBudget budget() throws Exception {
@@ -103,7 +111,7 @@ class EvidenceCollectorTest {
             assertTrue(collected.reasons().contains("VISION_CHANNEL_NOT_CONFIGURED"));
         }
         verifyNoInteractions(images);
-        verify(qwen, never()).recognize(any(), anyInt(), anyInt(), anyString(), any());
+        verify(qwen, never()).recognizeBounded(any(), anyInt(), anyInt(), anyString(), anyLong(), anyInt(), any(), any());
     }
 
     @Test void freshVisionCappedAtOneByDefault() throws Exception {
@@ -111,7 +119,7 @@ class EvidenceCollectorTest {
         QwenOcrClient qwen = mock(QwenOcrClient.class);
         when(qwen.configured()).thenReturn(true);
         Block crop = block("r", "不得", "qwen", 0.9);
-        when(qwen.recognize(any(), anyInt(), anyInt(), anyString(), any()))
+        when(qwen.recognizeBounded(any(), anyInt(), anyInt(), anyString(), anyLong(), anyInt(), any(), any()))
                 .thenReturn(List.of(crop));
         IssueImageService.Snippet snippet = new IssueImageService.Snippet("region", 0,
                 new double[]{0, 0, 0.2, 0.1}, List.of(), tinyPng(), new double[]{0, 0, 0.4, 0.2}, tinyPng());
@@ -132,7 +140,7 @@ class EvidenceCollectorTest {
                 "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", page(b), true, false, calls, () -> false);
         assertEquals(0, second.freshVisionAttempts());
         assertTrue(second.reasons().contains("VISION_CALL_CAP_REACHED"));
-        verify(qwen, times(1)).recognize(any(), anyInt(), anyInt(), anyString(), any());
+        verify(qwen, times(1)).recognizeBounded(any(), anyInt(), anyInt(), anyString(), anyLong(), anyInt(), any(), any());
         // 显式授权到 2：配置同步提升后允许第二次，第三次仍停
         config.setMaxFreshVisionCallsPerIssue(2);
         EvidenceCollector.Collection third = collector.collect(ref(), "甲乙", b, b.issues().get(0),
@@ -141,7 +149,31 @@ class EvidenceCollectorTest {
         EvidenceCollector.Collection fourth = collector.collect(ref(), "甲乙", b, b.issues().get(0),
                 "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", page(b), true, true, calls, () -> false);
         assertEquals(0, fourth.freshVisionAttempts());
-        verify(qwen, times(2)).recognize(any(), anyInt(), anyInt(), anyString(), any());
+        verify(qwen, times(2)).recognizeBounded(any(), anyInt(), anyInt(), anyString(), anyLong(), anyInt(), any(), any());
+    }
+
+    @Test void jevVisionSinglePhysicalAttemptNoHiddenRetry() throws Exception {
+        // JR-04-T04：JEV 视觉单次物理发送；Qwen 429 立即受限，无隐藏重试
+        QwenOcrClient qwen = mock(QwenOcrClient.class);
+        when(qwen.configured()).thenReturn(true);
+        when(qwen.recognizeBounded(any(), anyInt(), anyInt(), anyString(), anyLong(), anyInt(), any(), any()))
+                .thenThrow(new studio.bookhtml.service.OcrException("Qwen 局部复识别请求频率受限"));
+        IssueImageService.Snippet snippet = new IssueImageService.Snippet("region", 0,
+                new double[]{0, 0, 0.2, 0.1}, List.of(), tinyPng(), new double[]{0, 0, 0.4, 0.2}, tinyPng());
+        IssueImageService images = mock(IssueImageService.class);
+        when(images.locateOne(any(), any(), any())).thenReturn(snippet);
+        DecisionProperties config = config();
+        DecisionBudget budget = budget();
+        EvidenceCollector collector = collector(qwen, images, budget, config);
+        Block b = block("b1", "甲乙", "paddle", 0.9);
+        EvidenceCollector.Collection collected = collector.collect(ref(), "甲乙", b, b.issues().get(0),
+                "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", page(b), true, false, new AtomicInteger(), () -> false);
+        assertEquals(1, collected.freshVisionAttempts());
+        assertTrue(collected.reasons().contains("VISION_FAILED"));
+        verify(qwen, times(1)).recognizeBounded(any(), anyInt(), anyInt(), anyString(), anyLong(), anyInt(), any(), any());
+        // 已发送失败保留预留（费用未知不记 0），第二次同 book 预留应被 limit 挡住
+        long[] totals = budget.totals("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        assertTrue(totals[0] > 0);
     }
 
     @Test void pixelBudgetCancelAndFailureIsolated() throws Exception {
@@ -162,7 +194,7 @@ class EvidenceCollectorTest {
                 "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", page(b), true, false, new AtomicInteger(), () -> false);
         assertTrue(capped.reasons().contains("PIXEL_BUDGET_EXCEEDED"));
         assertEquals(0, capped.freshVisionAttempts());
-        verify(qwen, never()).recognize(any(), anyInt(), anyInt(), anyString(), any());
+        verify(qwen, never()).recognizeBounded(any(), anyInt(), anyInt(), anyString(), anyLong(), anyInt(), any(), any());
 
         // 取消：不调用 OCR，不预留
         IssueImageService images = mock(IssueImageService.class);
@@ -170,11 +202,11 @@ class EvidenceCollectorTest {
         EvidenceCollector.Collection abort = cancelled.collect(ref(), "甲乙", b, b.issues().get(0),
                 "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", page(b), true, false, new AtomicInteger(), () -> true);
         assertTrue(abort.reasons().contains("CANCELLED_BEFORE_VISION"));
-        verify(qwen, never()).recognize(any(), anyInt(), anyInt(), anyString(), any());
+        verify(qwen, never()).recognizeBounded(any(), anyInt(), anyInt(), anyString(), anyLong(), anyInt(), any(), any());
         verify(images, never()).locateOne(any(), any(), any());
 
         // OCR 抛异常：失败隔离，预留保留（费用未知不记 0）
-        when(qwen.recognize(any(), anyInt(), anyInt(), anyString(), any()))
+        when(qwen.recognizeBounded(any(), anyInt(), anyInt(), anyString(), anyLong(), anyInt(), any(), any()))
                 .thenThrow(new RuntimeException("boom"));
         IssueImageService.Snippet snippet = new IssueImageService.Snippet("region", 0,
                 new double[]{0, 0, 0.2, 0.1}, List.of(), tinyPng(), new double[]{0, 0, 0.4, 0.2}, tinyPng());

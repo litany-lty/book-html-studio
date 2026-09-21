@@ -235,6 +235,30 @@ class QualityGateTest {
         assertTrue(QualityGate.checkMergeTextStructure(List.of(s1, s2), List.of(mKept)).accepted());
     }
 
+    @Test void mergeRejectsWrongSpanRemap() throws Exception {
+        // JR-12-T03 补：旧 span→新 span 无可靠映射时拒绝（偏移错误/正文串位）
+        studio.bookhtml.decision.DecisionModels.ReviewResolution res2 =
+                new studio.bookhtml.decision.DecisionModels.ReviewResolution(
+                        "res-2", "op-2", studio.bookhtml.decision.DecisionModels.Origin.JEV_ASSISTED,
+                        "dec-2", "cand-2", "cs-2", "pdf-1", 0, "basis-2", "丙", "丙",
+                        "conv-v1", true, java.time.Instant.now(), 1);
+        studio.bookhtml.domain.ContentIssue issueS2 =
+                new studio.bookhtml.domain.ContentIssue("i2", "suspected", 0, 1, 0, 1, "r", true, "丙", "推", res2);
+        Block s1 = sourceBlock("s1", "甲乙");
+        Block s2 = new Block("s2", "text", 1, new double[]{0, 0, .4, .2}, "horizontal-tb",
+                "丙丁", "丙丁", 0.9, false, false, null, "paddle", List.of("s2"), null, null, List.of(issueS2));
+        // 正确映射：s2 的 i2 在合并后应为 2,3；错误保留 0,1 → 拒绝
+        Block mWrong = new Block("m1", "text", 0, new double[]{0, 0, .4, .2}, "horizontal-tb",
+                "甲乙丙丁", "甲乙丙丁", 0.9, false, false, null, "assist", List.of("s1", "s2"), null, null, List.of(issueS2));
+        assertFalse(QualityGate.checkMergeTextStructure(List.of(s1, s2), List.of(mWrong)).accepted());
+        // 正确平移 0,1→2,3 → 通过
+        studio.bookhtml.domain.ContentIssue issueShifted =
+                new studio.bookhtml.domain.ContentIssue("i2", "suspected", 2, 3, 2, 3, "r", true, "丙", "推", res2);
+        Block mRight = new Block("m1", "text", 0, new double[]{0, 0, .4, .2}, "horizontal-tb",
+                "甲乙丙丁", "甲乙丙丁", 0.9, false, false, null, "assist", List.of("s1", "s2"), null, null, List.of(issueShifted));
+        assertTrue(QualityGate.checkMergeTextStructure(List.of(s1, s2), List.of(mRight)).accepted());
+    }
+
     @Test void newVisualTranscriptionRejectsInvalidBbox() {
         // JR-12-T04: 新视觉条目 sourceRect 含 NaN/无穷/越界或非正：拒绝
         Block s1 = sourceBlock("s1", "图甲");

@@ -10,6 +10,7 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -29,6 +30,7 @@ public class DecisionStore {
     static final String SCHEMA_VERSION = "decision-sidecar-v1";
     static final long MAX_FILE_BYTES = 256 * 1024;
     static final int MAX_FILES_PER_DIR = 1024;
+    static final long MAX_DIR_BYTES = 64L * 1024 * 1024;
 
     private final BookStore books;
     private final ObjectMapper json;
@@ -56,12 +58,22 @@ public class DecisionStore {
     private void checkLimits(Path dir, byte[] bytes, String name, boolean isNewFile) throws IOException {
         if (bytes.length > MAX_FILE_BYTES)
             throw new IOException("决策文件过大，拒绝写入：" + name);
-        // JR-11：只有新增文件受条目上限约束；已有任务终结/预算结算等覆盖写必须能落盘
+        // JR-11：只有新增文件受条目/总容量上限约束；已有任务终结/预算结算等覆盖写必须能落盘；
+        // tmp/corrupt 不计入活动条目，不挤占配额
         if (!isNewFile) return;
         try (DirectoryStream<Path> entries = Files.newDirectoryStream(dir)) {
             int count = 0;
-            for (Path ignored : entries) {
+            long total = 0;
+            for (Path p : entries) {
+                String fn = p.getFileName() == null ? "" : p.getFileName().toString();
+                if (fn.contains(".tmp-") || fn.contains(".corrupt-")) continue;
                 if (++count >= MAX_FILES_PER_DIR) throw new IOException("决策目录条目超限：" + dir);
+                try {
+                    total += Files.size(p);
+                } catch (IOException ignored) {
+                }
+                if (total + bytes.length > MAX_DIR_BYTES)
+                    throw new IOException("决策目录总容量超限：" + dir);
             }
         }
     }
@@ -127,6 +139,27 @@ public class DecisionStore {
         Files.createDirectories(dir);
         Path schema = dir.resolve("schema.json");
         if (!Files.exists(schema)) atomicWrite(dir, "schema.json", SCHEMA_VERSION);
+        // JR-11-T02/T04：清理遗留 tmp（未提交的半写），不删 corrupt（需审计）与当前确认引用证据
+        try (DirectoryStream<Path> entries = Files.newDirectoryStream(dir)) {
+            for (Path sub : entries) {
+                if (!Files.isDirectory(sub)) continue;
+                try (DirectoryStream<Path> files = Files.newDirectoryStream(sub)) {
+                    for (Path f : files) {
+                        String fn = f.getFileName() == null ? "" : f.getFileName().toString();
+                        if (fn.contains(".tmp-")) {
+                            try {
+                                if (Duration.between(Files.getLastModifiedTime(f).toInstant(),
+                                        Instant.now()).toMinutes() > 10)
+                                    Files.deleteIfExists(f);
+                            } catch (IOException ignored) {
+                            }
+                        }
+                    }
+                } catch (IOException ignored) {
+                }
+            }
+        } catch (IOException ignored) {
+        }
     }
 
     public void saveSnapshot(String bookId, DecisionModels.DecisionSnapshot snapshot) throws IOException {
@@ -154,6 +187,12 @@ public class DecisionStore {
     public void saveResult(String bookId, DecisionModels.DecisionEvidence evidence) throws IOException {
         ensureSchema(bookId);
         atomicWrite(subdir(bookId, "results"), evidence.decisionId() + ".json", evidence);
+        // JR-11-T02：最佳努力更新索引；失败不影响主写（索引可重建）
+        try {
+            updateIndexRequest(bookId, evidence.requestHash(), evidence.decisionId(),
+                    evidence.executionStatus() == DecisionModels.ExecutionStatus.SUCCEEDED);
+        } catch (Exception ignored) {
+        }
     }
 
     public Optional<DecisionModels.DecisionEvidence> loadResult(String bookId, String decisionId) throws IOException {
@@ -165,6 +204,10 @@ public class DecisionStore {
     public void saveJob(String bookId, DecisionJob job) throws IOException {
         ensureSchema(bookId);
         atomicWrite(subdir(bookId, "jobs"), job.jobId() + ".json", job);
+        try {
+            updateIndexAdmission(bookId, job.admissionKey(), job.jobId());
+        } catch (Exception ignored) {
+        }
     }
 
     public Optional<DecisionJob> loadJob(String bookId, String jobId) throws IOException {
@@ -258,6 +301,36 @@ public class DecisionStore {
         return new long[]{reserved, reported};
     }
 
+    /** JR-05-T06：按 purpose 前缀计数物理 attempt（有界扫描；损坏抛异常，不回 0）。 */
+    public synchronized int countAttemptsByPurpose(String bookId, String purposePrefix) throws IOException {
+        Path dir = decisionsDir(bookId).resolve("attempts");
+        if (!Files.exists(dir)) return 0;
+        int count = 0;
+        boolean corrupt = false;
+        try (DirectoryStream<Path> entries = Files.newDirectoryStream(dir, "*.json")) {
+            for (Path file : entries) {
+                AttemptLedger ledger;
+                try {
+                    byte[] bytes = Files.readAllBytes(file);
+                    if (bytes.length > MAX_FILE_BYTES) throw new IOException("文件过大");
+                    ledger = json.readValue(bytes, AttemptLedger.class);
+                } catch (Exception e) {
+                    corrupt = true;
+                    continue;
+                }
+                if (ledger == null) {
+                    corrupt = true;
+                    continue;
+                }
+                if (purposePrefix == null || (ledger.purpose() != null
+                        && ledger.purpose().startsWith(purposePrefix)))
+                    count++;
+            }
+        }
+        if (corrupt) throw new BudgetUnavailableException("预算账本损坏，禁止新外呼");
+        return count;
+    }
+
     public static final class BudgetUnavailableException extends IOException {
         public BudgetUnavailableException(String message) {
             super(message);
@@ -276,6 +349,15 @@ public class DecisionStore {
 
     /** 原子查找/登记准入键：调用方在付费生成候选前合并重复请求；返回最新的一条。 */
     public DecisionJob findByAdmission(String bookId, String admissionKey) throws IOException {
+        // JR-11-T02：先走有界索引，缺失/损坏再扫描重建；原文件保持权威
+        try {
+            Optional<String> indexed = indexLookupAdmission(bookId, admissionKey);
+            if (indexed.isPresent()) {
+                Optional<DecisionJob> job = loadJob(bookId, indexed.get());
+                if (job.isPresent() && admissionKey.equals(job.get().admissionKey())) return job.get();
+            }
+        } catch (Exception ignored) {
+        }
         Path dir = decisionsDir(bookId).resolve("jobs");
         if (!Files.exists(dir)) return null;
         List<DecisionJob> matches = new ArrayList<>();
@@ -394,6 +476,54 @@ public class DecisionStore {
         } catch (IOException ignored) {
         }
         return Optional.empty();
+    }
+
+    private synchronized void updateIndexAdmission(String bookId, String admissionKey, String jobId)
+            throws IOException {
+        Path indexFile = decisionsDir(bookId).resolve("index.json");
+        JobIndex current;
+        try {
+            current = readIsolated(indexFile, JobIndex.class).orElse(null);
+        } catch (IOException e) {
+            current = null;
+        }
+        Map<String, String> admissionToJob = new LinkedHashMap<>(
+                current == null ? Map.of() : current.admissionToJob());
+        Map<String, String> requestToDecision = new LinkedHashMap<>(
+                current == null ? Map.of() : current.requestToDecision());
+        // 同一 admission 保留最新
+        admissionToJob.put(admissionKey, jobId);
+        // 有界：超 2048 条重建（防无限增长）
+        if (admissionToJob.size() > 2048 || requestToDecision.size() > 2048) {
+            repairIndexes(bookId);
+            return;
+        }
+        atomicWrite(decisionsDir(bookId), "index.json",
+                new JobIndex(admissionToJob, requestToDecision, Instant.now()));
+    }
+
+    private synchronized void updateIndexRequest(String bookId, String requestHash, String decisionId,
+                                                 boolean succeeded) throws IOException {
+        if (!succeeded || requestHash == null || decisionId == null) return;
+        if ("none".equals(requestHash)) return;
+        Path indexFile = decisionsDir(bookId).resolve("index.json");
+        JobIndex current;
+        try {
+            current = readIsolated(indexFile, JobIndex.class).orElse(null);
+        } catch (IOException e) {
+            current = null;
+        }
+        Map<String, String> admissionToJob = new LinkedHashMap<>(
+                current == null ? Map.of() : current.admissionToJob());
+        Map<String, String> requestToDecision = new LinkedHashMap<>(
+                current == null ? Map.of() : current.requestToDecision());
+        requestToDecision.putIfAbsent(requestHash, decisionId);
+        if (admissionToJob.size() > 2048 || requestToDecision.size() > 2048) {
+            repairIndexes(bookId);
+            return;
+        }
+        atomicWrite(decisionsDir(bookId), "index.json",
+                new JobIndex(admissionToJob, requestToDecision, Instant.now()));
     }
 
     /** 列出本书全部决策作业（重启恢复与审计用；状态查询走单文件，不用它）。 */

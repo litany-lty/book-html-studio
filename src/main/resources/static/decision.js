@@ -113,7 +113,8 @@ export function createDecisionPanel(deps) {
     fetchController = new AbortController();
     const data = await api.decisions(scope.bookId, scope.page, scope.issueId, fetchController.signal);
     if (!sameScope(scope)) throw Object.assign(new Error('已切换疑点或页面'), { name: 'StaleRequest' });
-    return { basis: data.basis, current: data.current, history: data.history || [] };
+    return { basis: data.basis, current: data.current, history: data.history || [],
+      decisionMode: data.decisionMode || null };
   }
 
   async function createJob(allowFreshVision) {
@@ -205,12 +206,15 @@ export function createDecisionPanel(deps) {
       onAccepted(result);
     } catch (error) {
       acceptInFlight = false;
-      // 超时/断网读回核实：按 operationId 而不是文本碰巧相同判断成功
+      // 超时/断网读回核实：按 target+operationId+candidate/setHash 而不是文本碰巧相同判断成功
       if (error?.name === 'TimeoutError' || error?.name === 'TypeError') {
         try {
           const remote = await api.page(scope.bookId, scope.page);
           const confirmed = (remote.blocks || []).flatMap(b => (b.issues || []).map(i => ({ b, i })))
-            .find(({ i }) => i.id === scope.issueId && i.resolution?.clientOperationId === operationId);
+            .find(({ b, i }) => i.id === scope.issueId && b.id === scope.blockId
+              && i.resolution?.clientOperationId === operationId
+              && i.resolution?.candidateId === candidateId
+              && (scope.candidateSetHash == null || i.resolution?.candidateSetHash === scope.candidateSetHash));
           if (confirmed && sameScope(scope)) {
             inFlightOperationId = null;
             onAccepted({ pageRevision: remote.revision, idempotent: true, resolved: true });
@@ -251,14 +255,18 @@ export function createDecisionPanel(deps) {
     if (!host || !current) return;
     const scope = { ...current };
     try {
-      const { basis, current: decision, history } = await loadBasis(scope);
+      const { basis, current: decision, history, decisionMode } = await loadBasis(scope);
       if (!sameScope(scope)) return;
       current.basis = basis.issueBasisHash;
       current.revision = basis.pageRevision;
       current.candidateSetHash = decision?.candidateSetHash || null;
-      renderPanel(host, { basis, decision, history }, scope);
-      if (decision?.recommendedCandidateId && decision?.candidates) {
-        const hit = decision.candidates.find(c => c.candidateId === decision.recommendedCandidateId);
+      renderPanel(host, { basis, decision, history, decisionMode }, scope);
+      // JR-08-T06：仅正式推荐（admittedRecommendationId + RECOMMEND/KEEP_CURRENT）才触发推荐；
+      // 模型偏好（modelPreferred）绝不当正式推荐。
+      const admittedId = decision?.admittedRecommendationId || null;
+      const verdict = decision?.verdict || null;
+      if (admittedId && (verdict === 'RECOMMEND' || verdict === 'KEEP_CURRENT') && decision?.candidates) {
+        const hit = decision.candidates.find(c => c.candidateId === admittedId);
         if (hit && sameScope(scope)) {
           onRecommendation(scope.issueId, {
             text: hit.originalText || hit.displayText,
@@ -275,7 +283,8 @@ export function createDecisionPanel(deps) {
     }
   }
 
-  function renderPanel(host, { basis, decision, history }) {
+  function renderPanel(host, { basis, decision, history, decisionMode }, scope) {
+    if (!scope || !sameScope(scope)) return;
     host.replaceChildren();
     const title = el('h3', 'decision-title', '候选比较（辅助阅读）');
     host.append(title);
@@ -299,7 +308,8 @@ export function createDecisionPanel(deps) {
         const radio = document.createElement('input');
         radio.type = 'radio'; radio.name = `decision-${decision.decisionId}`;
         radio.value = candidate.candidateId;
-        radio.checked = candidate.candidateId === decision.recommendedCandidateId;
+        // JR-08-T06：默认选中仅用正式推荐 admittedRecommendationId；模型偏好不预选
+        radio.checked = candidate.candidateId === (decision.admittedRecommendationId || null);
         const text = el('span', 'decision-candidate-text', candidate.originalText || candidate.displayText || '（空）');
         const kind = el('span', 'decision-candidate-kind', candidateLabel(candidate));
         label.append(radio, text, kind);
@@ -311,6 +321,17 @@ export function createDecisionPanel(deps) {
       const reasons = el('p', 'decision-reasons',
         `限制：${(decision.reasonCodes || []).map(reasonLabel).join('；') || '无'}`);
       host.append(reasons);
+      // JR-08-T01：SHADOW/OFF 不开放 JEV 接受入口；仅 ASSIST + 正式推荐才可确认
+      const canAdmit = (decisionMode === 'ASSIST' || decisionMode == null)
+        && (decision.verdict === 'RECOMMEND' || decision.verdict === 'KEEP_CURRENT')
+        && Boolean(decision.admittedRecommendationId);
+      if (!canAdmit) {
+        const note = el('p', 'decision-note',
+          decisionMode && decisionMode !== 'ASSIST'
+            ? `当前为${decisionMode}模式：仅展示候选，不开放确认入口。`
+            : '当前结论未形成正式推荐：可对照原图人工输入，不可一键确认。');
+        host.append(note);
+      }
       const checkRow = el('label', 'decision-attest');
       const check = document.createElement('input');
       check.type = 'checkbox';
@@ -319,8 +340,10 @@ export function createDecisionPanel(deps) {
       const acceptRow = el('div', 'decision-actions');
       const acceptButton = el('button', 'button primary decision-action', '对照原图并确认');
       acceptButton.dataset.needsClean = '1'; acceptButton.dataset.action = 'accept';
+      acceptButton.disabled = !canAdmit;
+      acceptButton.title = canAdmit ? '' : '未形成正式推荐或非 ASSIST 模式，不能一键确认';
       acceptButton.addEventListener('click', () => {
-        const picked = radios.find(r => r.checked)?.value || decision.recommendedCandidateId;
+        const picked = radios.find(r => r.checked)?.value || decision.admittedRecommendationId;
         if (!picked) { showError(new Error('请先选择一个候选。')); return; }
         if (!check.checked) { showError(new Error('请先勾选“已对照原图”。没有原图时不能显示已对照，只能普通人工输入。')); return; }
         acceptDecision(decision.decisionId, picked, scope.basis, scope.revision, scope);

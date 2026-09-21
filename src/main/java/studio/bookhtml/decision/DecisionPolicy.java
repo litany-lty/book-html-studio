@@ -126,9 +126,8 @@ public final class DecisionPolicy {
         if (!deltaRisks.isEmpty())
             return out(DecisionModels.Verdict.HUMAN_REQUIRED, candidateId,
                     hardRiskCodes(deltaRisks));
-        boolean isCalibrated = "VALIDATED".equals(input.calibrationStatus())
-                && input.calibrationProfile() != null
-                && !input.calibrationProfile().isBlank();
+        boolean isCalibrated = isCalibrated(input.calibrationStatus(),
+                input.calibrationProfile(), input.snapshot(), input.set());
         if (!isCalibrated)
             return out(DecisionModels.Verdict.CANDIDATES_ONLY, candidateId, List.of("UNCALIBRATED"));
         Thresholds thresholds = input.thresholds() == null ? PILOT_DEFAULT : input.thresholds();
@@ -144,6 +143,41 @@ public final class DecisionPolicy {
                 && selected.originalScriptText().equals(input.currentTranscription()))
             return out(DecisionModels.Verdict.KEEP_CURRENT, candidateId, List.of("KEEP_CURRENT"));
         return out(DecisionModels.Verdict.RECOMMEND, candidateId, List.of("RECOMMEND"));
+    }
+
+    /**
+     * JR-08-T03：校准档必须匹配模型/模板/候选算法/策略/阈值与数据集结果摘要；
+     * 仅配置字符串 VALIDATED 不构成证明，无匹配档时强推荐保持关闭。
+     * 档格式：cal-v1|model=...|template=...|candidate=...|policy=...|threshold=...|dataset=...|result=...
+     * 当前无真实校准档时一律 UNCALIBRATED（返回 false），不误放强推荐。
+     */
+    static boolean isCalibrated(String status, String profile,
+                                DecisionModels.DecisionSnapshot snapshot,
+                                DecisionModels.CandidateSet set) {
+        if (!"VALIDATED".equals(status)) return false;
+        if (profile == null || profile.isBlank()) return false;
+        try {
+            java.util.Map<String, String> fields = new java.util.LinkedHashMap<>();
+            for (String part : profile.split("\\|")) {
+                int eq = part.indexOf('=');
+                if (eq > 0) fields.put(part.substring(0, eq).trim(), part.substring(eq + 1).trim());
+            }
+            if (!profile.startsWith("cal-v1")) return false;
+            // 必须绑定当前模板/候选/策略/阈值版本；模型与数据集结果摘要必须非空
+            if (!DecisionStateBuilder.TEMPLATE_VERSION.equals(fields.get("template"))) return false;
+            String candidateVer = set == null ? null : set.candidateConfigVersion();
+            if (candidateVer == null || !candidateVer.equals(fields.get("candidate"))) return false;
+            if (!POLICY_VERSION.equals(fields.get("policy"))) return false;
+            if (!THRESHOLD_PROFILE.equals(fields.get("threshold"))) return false;
+            String snapshotTemplate = snapshot == null ? null : snapshot.questionTemplateVersion();
+            if (snapshotTemplate == null || !snapshotTemplate.equals(fields.get("template"))) return false;
+            if (fields.get("model") == null || fields.get("model").isBlank()) return false;
+            if (fields.get("dataset") == null || fields.get("dataset").isBlank()) return false;
+            if (fields.get("result") == null || fields.get("result").isBlank()) return false;
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private static List<String> hardRiskCodes(List<String> risks) {

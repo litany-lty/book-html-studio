@@ -18,6 +18,12 @@ import studio.bookhtml.store.CommitOp;
  */
 @Service
 public class DecisionAcceptService {
+    /**
+     * JR-08-T06：可接受 verdict 范围。RECOMMEND/KEEP_CURRENT 为正式推荐；
+     * CANDIDATES_ONLY/HUMAN_REQUIRED/NEED_MORE_EVIDENCE 为用户已对照原图后的手动确认
+     *（仍须满足 JR-01 目标绑定 + JR-03 EXACT 对齐 + 原字已知，不视为程序正式推荐）。
+     * STALE/CANCELLED/UNAVAILABLE 一律拒绝。
+     */
     static final Set<String> ACCEPTABLE_VERDICTS = Set.of(
             "RECOMMEND", "KEEP_CURRENT", "CANDIDATES_ONLY", "HUMAN_REQUIRED", "NEED_MORE_EVIDENCE");
 
@@ -89,7 +95,9 @@ public class DecisionAcceptService {
         DecisionModels.DecisionSnapshot snapshot;
         try {
             snapshot = decisions.loadSnapshot(bookId, evidence.snapshotHash())
-                    .orElseThrow(() -> new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "建议快照不可用"));
+                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "建议快照不存在"));
+        } catch (ApiException e) {
+            throw e;
         } catch (IOException e) {
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "建议读取失败");
         }
@@ -98,7 +106,7 @@ public class DecisionAcceptService {
         if (!evidence.candidateSetHash().equals(body.candidateSetHash()))
             throw new ApiException(HttpStatus.CONFLICT, "候选集合已变化，请刷新后重试");
 
-        // JR-01: 完整目标绑定核验
+        // JR-01: 完整目标绑定核验（请求目标 = 快照目标；锁内当前目标在下文二次核对）
         DecisionModels.IssueRef ref = snapshot.issueRef();
         if (!bookId.equals(ref.bookId())
                 || sourcePage != ref.sourcePageNumber()
@@ -108,6 +116,12 @@ public class DecisionAcceptService {
                 || !body.issueBasisHash().equals(ref.issueBasisHash())) {
             throw new studio.bookhtml.store.PageConflictException(ref.pageRevision(),
                     "建议目标与请求不匹配，拒绝跨位置或跨版本接受");
+        }
+        // 快照目标全量字段（原文/区间/映射）必须与请求隐含目标一致；请求不能用新 basis 重绑旧快照
+        if (ref.startUtf16() < 0 || ref.endUtf16() <= ref.startUtf16()
+                || ref.originalTextHash() == null || ref.sourceSpanHash() == null
+                || ref.mappingVersion() == null || ref.pdfSha256() == null) {
+            throw new ApiException(HttpStatus.CONFLICT, "建议快照目标不完整，拒绝接受");
         }
 
         // JR-01-T04: 核对来源 PDF 内容身份
@@ -125,7 +139,9 @@ public class DecisionAcceptService {
         DecisionModels.CandidateSet set;
         try {
             set = decisions.loadCandidateSet(bookId, evidence.candidateSetHash())
-                    .orElseThrow(() -> new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "候选数据不可用"));
+                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "候选数据不存在"));
+        } catch (ApiException e) {
+            throw e;
         } catch (IOException e) {
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "候选读取失败");
         }

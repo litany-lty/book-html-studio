@@ -191,6 +191,9 @@ def _eval_single(cases, normalize_fn=None):
 
         metrics["casesDetail"].append({
             "caseId": case.get("caseId"),
+            "book": case.get("book"),
+            "category": cat,
+            "riskTags": sorted(tags),
             "status": "READABLE_WITH_TRUTH",
             "truth": truth,
             "bText": run_b["text"],
@@ -215,6 +218,9 @@ def _eval_single(cases, normalize_fn=None):
 
         metrics["casesDetail"].append({
             "caseId": case.get("caseId"),
+            "book": case.get("book"),
+            "category": case.get("category"),
+            "riskTags": sorted(set(case.get("riskTags", []))),
             "status": "UNREADABLE",
             "truth": None,
             "bText": run_b["text"],
@@ -291,14 +297,33 @@ def _eval_single(cases, normalize_fn=None):
     for book in sorted({c.get("book", "?") for c in cases}):
         sub = [c for c in cases if c.get("book") == book]
         sub_readable = [c for c in readable if c.get("book") == book]
+        # JR-09-T06：分书可复算（n/readableN 外加条件准确率与全量错误，不只计数）
+        sub_detail = [d for d in metrics["casesDetail"]
+                      if d.get("book") == book and d.get("status") == "READABLE_WITH_TRUTH"]
+        sub_correct = sum(1 for d in sub_detail
+                          if not d["cFailed"] and d["cText"] is not None and d["cText"] == d["truth"])
+        sub_entity = sum(1 for d in sub_detail if not d["cFailed"] and d["cText"] is not None)
+        sub_wrong = sum(1 for d in sub_detail
+                        if not d["cFailed"] and d["cText"] is not None and d["cText"] != d["truth"])
         metrics["byBook"][book] = {
             "n": len(sub),
             "readableN": len(sub_readable),
+            "conditionalAccuracy": (sub_correct / sub_entity) if sub_entity > 0 else None,
+            "readableWrong": sub_wrong,
         }
 
     for cat in sorted({c.get("category", "未分类") for c in cases}):
         sub = [c for c in cases if c.get("category", "未分类") == cat]
-        metrics["byCategory"][cat] = {"n": len(sub)}
+        sub_detail = [d for d in metrics["casesDetail"] if d.get("category") == cat]
+        metrics["byCategory"][cat] = {"n": len(sub),
+                                      "detailN": len(sub_detail)}
+    # JR-09-T06：按多标签风险聚合（单 category 不够；riskTags 可多标签）
+    byRisk = {}
+    for c in cases:
+        for tag in set(c.get("riskTags", [])):
+            byRisk.setdefault(tag, {"n": 0})
+            byRisk[tag]["n"] += 1
+    metrics["byRiskTags"] = byRisk
 
     return metrics
 

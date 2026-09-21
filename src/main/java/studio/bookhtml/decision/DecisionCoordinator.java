@@ -250,7 +250,24 @@ public class DecisionCoordinator {
 
     private boolean isReusable(DecisionStore.DecisionJob job, Page current) {
         if (job == null) return false;
-        if ("QUEUED".equals(job.state()) || "RUNNING".equals(job.state())) return true;
+        // JR-01：QUEUED/RUNNING 复用必须核对持久化目标与当前目标一致，不只凭 admissionKey 恰好不同
+        if ("QUEUED".equals(job.state()) || "RUNNING".equals(job.state())) {
+            if (job.target() == null) return false;
+            try {
+                Block block = current.blocks().stream()
+                        .filter(b -> b != null && job.blockId().equals(b.id())).findFirst().orElse(null);
+                if (block == null) return false;
+                ContentIssue issue = block.issues().stream()
+                        .filter(i -> i != null && job.issueId().equals(i.id())).findFirst().orElse(null);
+                if (issue == null) return false;
+                String basis = IssueBasis.basisHash(block, issue);
+                DecisionTargetIdentity currentTarget =
+                        buildTargetIdentity(job.bookId(), current, block, issue, basis);
+                return job.target().mismatch(currentTarget) == null;
+            } catch (Exception e) {
+                return false;
+            }
+        }
         if (!"SUCCEEDED".equals(job.state())) return false;
         // 完成结果仅当仍适用于当前版本才复用
         try {
@@ -269,6 +286,7 @@ public class DecisionCoordinator {
 
     private boolean snapshotApplies(DecisionModels.DecisionSnapshot snapshot, Page page) {
         DecisionModels.IssueRef ref = snapshot.issueRef();
+        // JR-01：全量目标比对（revision/block/issue/basis + pdf/原文/区间/映射），不只比 basis
         if (BookStore.revisionOrZero(page) != ref.pageRevision()) return false;
         Block block = page.blocks().stream().filter(b -> b != null && ref.blockId().equals(b.id()))
                 .findFirst().orElse(null);
@@ -277,10 +295,29 @@ public class DecisionCoordinator {
                 .filter(i -> i != null && ref.issueId().equals(i.id())).findFirst().orElse(null);
         if (issue == null) return false;
         try {
-            return IssueBasis.basisHash(block, issue).equals(ref.issueBasisHash());
+            if (!IssueBasis.basisHash(block, issue).equals(ref.issueBasisHash())) return false;
         } catch (IllegalArgumentException e) {
             return false;
         }
+        try {
+            String pdfHash = pdfIdentity.sha256(store.pdf(ref.bookId()));
+            if (!ref.pdfSha256().equals(pdfHash)) return false;
+        } catch (Exception e) {
+            return false;
+        }
+        String original = block.original();
+        if (!DecisionHash.sha256Hex(original).equals(ref.originalTextHash())) return false;
+        if (issue.start() != ref.startUtf16() || issue.end() != ref.endUtf16()) return false;
+        String span;
+        try {
+            span = original.substring(issue.start(), issue.end());
+        } catch (Exception e) {
+            return false;
+        }
+        String spanHash = DecisionHash.sha256Hex(
+                block.id() + "\u0000" + issue.start() + "\u0000" + issue.end() + "\u0000" + span);
+        if (!spanHash.equals(ref.sourceSpanHash())) return false;
+        return IssueBasis.MAPPING_VERSION.equals(ref.mappingVersion());
     }
 
     DecisionTargetIdentity buildTargetIdentity(String bookId, Page page, Block block, ContentIssue issue, String basis) {
@@ -354,8 +391,25 @@ public class DecisionCoordinator {
             if (control != null) control.cancelled.set(true);
             DecisionStore.DecisionJob cancelled = withState(job, "CANCEL_REQUESTED", "CANCELLING",
                     job.reasonCodes(), job.decisionId(), job.verdict());
-            saveJobQuietly(bookId, cancelled);
+            // JR-06-T03/T06：取消经 CAS 落盘，失败抛错不静默
+            casSaveJobOutsideLock(bookId, cancelled, expectedStateVersion);
             return cancelled;
+        }
+    }
+
+    private void casSaveJobOutsideLock(String bookId, DecisionStore.DecisionJob next, int expectedVersion) {
+        // 调用方已持 bookLock，直接校验版本后落盘，避免二次加锁死锁
+        DecisionStore.DecisionJob current = queryJob(bookId, next.jobId());
+        if (current == null)
+            throw new ApiException(HttpStatus.NOT_FOUND, "决策作业不存在");
+        if (current.stateVersion() != expectedVersion)
+            throw new ApiException(HttpStatus.CONFLICT, "作业状态已变化，请刷新后重试");
+        if (isTerminal(current.state()))
+            throw new ApiException(HttpStatus.CONFLICT, "作业已终结");
+        try {
+            decisions.saveJob(bookId, next);
+        } catch (IOException e) {
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "决策作业保存失败");
         }
     }
 
@@ -394,7 +448,10 @@ public class DecisionCoordinator {
 
     /** 当前建议：最新仍适用的完成作业；过期只在 history 中说明原因。 */
     public Map<String, Object> currentDecisionView(String bookId, int sourcePage, String issueId) {
-        for (DecisionStore.DecisionJob job : listIssueJobs(bookId, sourcePage, issueId)) {
+        // JR-01-T02：先解析唯一 block（重复 issueId 直接 409），再按 block 过滤，不取第一条
+        Page page = readPageOr404(bookId, sourcePage);
+        String blockId = findBlockId(page, issueId);
+        for (DecisionStore.DecisionJob job : listIssueJobs(bookId, sourcePage, blockId, issueId)) {
             if (!"SUCCEEDED".equals(job.state()) || job.decisionId() == null) continue;
             if (!"CURRENT".equals(applicability(bookId, job))) continue;
             return decisionSummary(bookId, job);
@@ -405,8 +462,10 @@ public class DecisionCoordinator {
     /** 历史建议（最新 10 条）与各自适用性/过期原因。 */
     public List<Map<String, Object>> decisionHistory(String bookId, int sourcePage, String issueId,
                                                      int limit) {
+        Page page = readPageOr404(bookId, sourcePage);
+        String blockId = findBlockId(page, issueId);
         List<Map<String, Object>> history = new ArrayList<>();
-        for (DecisionStore.DecisionJob job : listIssueJobs(bookId, sourcePage, issueId)) {
+        for (DecisionStore.DecisionJob job : listIssueJobs(bookId, sourcePage, blockId, issueId)) {
             if (job.decisionId() == null) continue;
             if (history.size() >= Math.max(1, limit)) break;
             Map<String, Object> summary = decisionSummary(bookId, job);
@@ -444,6 +503,11 @@ public class DecisionCoordinator {
     }
 
     private List<DecisionStore.DecisionJob> listIssueJobs(String bookId, int sourcePage, String issueId) {
+        return listIssueJobs(bookId, sourcePage, null, issueId);
+    }
+
+    private List<DecisionStore.DecisionJob> listIssueJobs(String bookId, int sourcePage,
+                                                          String blockId, String issueId) {
         List<DecisionStore.DecisionJob> jobs;
         try {
             jobs = decisions.listJobs(bookId);
@@ -452,7 +516,8 @@ public class DecisionCoordinator {
         }
         List<DecisionStore.DecisionJob> filtered = new ArrayList<>();
         for (DecisionStore.DecisionJob job : jobs)
-            if (issueId.equals(job.issueId()) && (sourcePage <= 0 || job.sourcePageNumber() == sourcePage))
+            if (issueId.equals(job.issueId()) && (sourcePage <= 0 || job.sourcePageNumber() == sourcePage)
+                    && (blockId == null || blockId.equals(job.blockId())))
                 filtered.add(job);
         filtered.sort((a, b) -> b.createdAt().compareTo(a.createdAt()));
         return filtered;
@@ -538,7 +603,10 @@ public class DecisionCoordinator {
                 persistTerminal(bookId, withState(job, "FAILED", "DONE", List.of("QUEUE_TIMEOUT"), null, null));
                 return;
             }
-            if (Instant.now().isAfter(job.deadlineAt())) {
+            // JR-06-T04：总期限自入队起计；进程内剩余用单调时钟推导，避免墙钟跳变重置
+            long wallRemaining = Duration.between(Instant.now(), job.deadlineAt()).toNanos();
+            control.wallRemainingAtRunStartNanos = wallRemaining;
+            if (wallRemaining <= 0) {
                 persistTerminal(bookId, withState(job, "FAILED", "DONE", List.of("JOB_TIMEOUT"), null, null));
                 return;
             }
@@ -627,7 +695,8 @@ public class DecisionCoordinator {
             }
             DecisionModels.CandidateSet set;
             try {
-                set = resolution.buildSet(ref, frozenOriginal, target, collected.raws());
+                set = resolution.buildSet(ref, frozenOriginal, target, collected.raws(),
+                        collected.reasons(), config.getMaxCandidatesPerIssue());
                 set = mergeLegacy(set, collected.legacy());
             } catch (IllegalArgumentException e) {
                 // 无可用实质候选 → HUMAN_REQUIRED，不是网络失败
@@ -688,9 +757,9 @@ public class DecisionCoordinator {
                 return;
             }
 
-            // 统一外发门控：检查模式、数据授权、供应商与期限
+            // 统一外发门控：检查模式、数据授权、供应商与期限（剩余用单调时钟）
             String provider = "MOCK".equalsIgnoreCase(config.getProvider()) ? "MOCK" : "TYPESAFE";
-            long remainingNanos = Duration.between(Instant.now(), running.deadlineAt()).toNanos();
+            long remainingNanos = remainingNanos(control);
             if (remainingNanos <= 0) {
                 persistTerminal(bookId, withState(running, "FAILED", "DONE", List.of("JOB_TIMEOUT"), null, null));
                 return;
@@ -738,7 +807,7 @@ public class DecisionCoordinator {
                 budget.markSendIntent(bookId, physicalId);
                 sent = true;
                 Map<String, Object> state = new LinkedHashMap<>(built.state());
-                long jevRemainingNanos = Duration.between(Instant.now(), running.deadlineAt()).toNanos();
+                long jevRemainingNanos = remainingNanos(control);
                 if (jevRemainingNanos <= 0) {
                     persistTerminal(bookId, withState(running, "FAILED", "DONE", List.of("JOB_TIMEOUT"), null, null));
                     return;
@@ -921,6 +990,13 @@ public class DecisionCoordinator {
         return CanonicalJson.write(scores);
     }
 
+    private long remainingNanos(JobControl control) {
+        // JR-06-T04：进程内剩余 = 入队总期限剩余（墙钟一次采样） - 单调已耗；不逐段重置
+        long elapsed = System.nanoTime() - control.runStartNano;
+        long remaining = control.wallRemainingAtRunStartNanos - elapsed;
+        return remaining;
+    }
+
     private String requestHash(DecisionModels.DecisionSnapshot snapshot,
                                DecisionStateBuilder.BuiltState built) {
         List<String> aliases = new ArrayList<>(built.aliasToCandidateId().keySet());
@@ -969,7 +1045,47 @@ public class DecisionCoordinator {
             if (current != null && isTerminal(current.state())) {
                 return; // JR-06-T03: 终态不倒退、不被覆盖
             }
-            saveJobQuietly(bookId, job);
+            // JR-06-T03：取消与 worker 竞态时 worker 负责收尾 CANCEL_REQUESTED→CANCELLED；
+            // 版本已推进时按当前版本+1 重建终态，不丢弃取消、不倒退
+            if (current != null && current.stateVersion() != job.stateVersion() - 1) {
+                if ("CANCELLED".equals(job.state())
+                        && "CANCEL_REQUESTED".equals(current.state())) {
+                    DecisionStore.DecisionJob fixed = withState(current, "CANCELLED", "DONE",
+                            job.reasonCodes(), job.decisionId(), job.verdict());
+                    try {
+                        decisions.saveJob(bookId, fixed);
+                    } catch (IOException e) {
+                        throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "决策作业保存失败");
+                    }
+                    return;
+                }
+                // worker 旧版本终态写与取消/新状态冲突时保留新状态，不覆盖
+                return;
+            }
+            try {
+                decisions.saveJob(bookId, job);
+            } catch (IOException e) {
+                // JR-06-T06：终态落盘失败必须显式失败，不吞异常制造成功假象
+                throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "决策作业保存失败");
+            }
+        }
+    }
+
+    /** JR-06-T03：CAS 更新；期望版本不符抛 409，不覆盖新状态。 */
+    void casSaveJob(String bookId, DecisionStore.DecisionJob next, int expectedVersion) {
+        synchronized (bookLock(bookId)) {
+            DecisionStore.DecisionJob current = queryJob(bookId, next.jobId());
+            if (current == null)
+                throw new ApiException(HttpStatus.NOT_FOUND, "决策作业不存在");
+            if (current.stateVersion() != expectedVersion)
+                throw new ApiException(HttpStatus.CONFLICT, "作业状态已变化，请刷新后重试");
+            if (isTerminal(current.state()))
+                throw new ApiException(HttpStatus.CONFLICT, "作业已终结");
+            try {
+                decisions.saveJob(bookId, next);
+            } catch (IOException e) {
+                throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "决策作业保存失败");
+            }
         }
     }
 
@@ -1018,6 +1134,8 @@ public class DecisionCoordinator {
 
     private static final class JobControl {
         final AtomicBoolean cancelled = new AtomicBoolean();
+        final long runStartNano = System.nanoTime();
+        volatile long wallRemainingAtRunStartNanos = Long.MAX_VALUE;
     }
 
     /** 测试用：同步执行单作业，不经过队列线程。 */

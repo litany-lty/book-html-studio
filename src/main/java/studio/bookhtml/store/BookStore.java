@@ -14,7 +14,9 @@ import studio.bookhtml.domain.Job;
 import studio.bookhtml.domain.Page;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.*;
+import java.security.MessageDigest;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
@@ -219,6 +221,26 @@ public class BookStore {
         }
     }
     public static int revisionOrZero(Page page) { return page == null || page.revision() == null ? 0 : page.revision(); }
+
+    /** JR-01：锁内 PDF 内容身份（SHA-256，与 PdfIdentity 一致；size/mtime 不用作身份）。 */
+    static String sha256Hex(Path file) throws IOException {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            try (InputStream in = Files.newInputStream(file)) {
+                byte[] buffer = new byte[65536];
+                int read;
+                while ((read = in.read(buffer)) != -1) digest.update(buffer, 0, read);
+            }
+            byte[] hash = digest.digest();
+            StringBuilder out = new StringBuilder(hash.length * 2);
+            for (byte b : hash) out.append(String.format("%02x", b));
+            return out.toString();
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("PDF 身份计算失败", e);
+        }
+    }
     public static Page withRevision(Page page, int revision) {
         if (page == null) return null;
         return new Page(page.pageNumber(), page.width(), page.height(), page.status(), page.provider(),
@@ -339,6 +361,21 @@ public class BookStore {
             int currentRev = revisionOrZero(current);
             if (currentRev != expectedRevision)
                 throw new PageConflictException(currentRev, "页面已被更新，请刷新后重试");
+            // JR-01：锁内二次核对来源 PDF 身份，关闭“检查后更换 PDF”的 TOCTOU 窗口
+            if (spec.basisPdfSha256() != null && !spec.basisPdfSha256().isBlank()) {
+                try {
+                    Path pdfPath = bookDir(id).resolve("source.pdf");
+                    if (java.nio.file.Files.exists(pdfPath)) {
+                        String currentPdf = sha256Hex(pdfPath);
+                        if (!spec.basisPdfSha256().equals(currentPdf))
+                            throw new PageConflictException(currentRev, "来源 PDF 内容已变化，旧建议不可接受");
+                    }
+                } catch (PageConflictException e) {
+                    throw e;
+                } catch (Exception e) {
+                    throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "来源 PDF 读取失败");
+                }
+            }
             String basis;
             try {
                 basis = IssueBasis.basisHash(block, issue);

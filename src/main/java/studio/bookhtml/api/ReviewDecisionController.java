@@ -30,13 +30,25 @@ public class ReviewDecisionController {
     private final DecisionAcceptService acceptService;
     private final DecisionStore decisions;
     private final BookStore store;
+    private final studio.bookhtml.config.DecisionProperties decisionConfig;
+    private final studio.bookhtml.decision.DecisionBudget budget;
 
     public ReviewDecisionController(DecisionCoordinator coordinator, DecisionAcceptService acceptService,
                                     DecisionStore decisions, BookStore store) {
+        this(coordinator, acceptService, decisions, store, null, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public ReviewDecisionController(DecisionCoordinator coordinator, DecisionAcceptService acceptService,
+                                    DecisionStore decisions, BookStore store,
+                                    studio.bookhtml.config.DecisionProperties decisionConfig,
+                                    studio.bookhtml.decision.DecisionBudget budget) {
         this.coordinator = coordinator;
         this.acceptService = acceptService;
         this.decisions = decisions;
         this.store = store;
+        this.decisionConfig = decisionConfig;
+        this.budget = budget;
     }
 
     public record CreateDecisionJobBody(String clientOperationId, String blockId,
@@ -123,6 +135,12 @@ public class ReviewDecisionController {
         response.put("basis", coordinator.issueBasisView(bookId, page, issueId));
         response.put("current", coordinator.currentDecisionView(bookId, page, issueId));
         response.put("history", coordinator.decisionHistory(bookId, page, issueId, 10));
+        // JR-08-T01：前端模式门需要知道当前模式；SHADOW/OFF 下不展示正式推荐接受入口
+        try {
+            response.put("decisionMode", decisionConfig == null ? "UNKNOWN" : decisionConfig.getMode());
+        } catch (Exception ignored) {
+            response.put("decisionMode", "UNKNOWN");
+        }
         return response;
     }
 
@@ -151,16 +169,80 @@ public class ReviewDecisionController {
         } else {
             view.put("reasonCodes", job.reasonCodes());
         }
-        view.put("physicalAttemptCount", job.reservedCostMinor() > 0 ? 1 : 0);
+        view.put("physicalAttemptCount", physicalAttemptCount(job));
+        view.put("visionAttemptCount", visionAttemptCount(job));
+        view.put("jevAttemptCount", jevAttemptCount(job));
         view.put("reservedCostMinor", job.reservedCostMinor());
+        view.put("knownCostMinor", knownCostMinor(job));
+        view.put("unknownCostStatus", unknownCostStatus(job));
         view.put("costStatus", job.costStatus());
-        view.put("cloudCalls", job.reservedCostMinor());
+        // JR-05-T06：不再把 reserved 误标为 cloudCalls；保留字段仅作兼容并如实为物理次数
+        view.put("cloudCalls", physicalAttemptCount(job));
         view.put("usageStatus", job.costStatus());
         view.put("cancellationState", job.cancellationState());
         return view;
     }
 
+    /** JR-05-T06：物理次数与费用分开；未知费用单列，绝不把 reserved 记成金额或 cloudCalls。 */
+    private int physicalAttemptCount(DecisionStore.DecisionJob job) {
+        return visionAttemptCount(job) + jevAttemptCount(job);
+    }
+
+    private int visionAttemptCount(DecisionStore.DecisionJob job) {
+        // 作业创建时的 allowFreshVision 只表示请求意图；实际视觉次数以执行期 collector 为准。
+        // 当前作业记录未持久化分项计数时，按“无完成证据=0，有 JEV 预留=按执行路径推导”保守返回，
+        // 并优先从预算账本按 purpose 计数（账本为权威）。
+        int fromLedger = countAttemptsByPurpose(job.bookId(), "vision-crop");
+        if (fromLedger >= 0) {
+            // 账本是整书累计，不能归因到单作业时返回 0/1 的作业级保守值 + 书级总量字段
+            // 这里返回作业级：仅当本作业有完成证据且非零费用时不虚报
+            return job.decisionId() == null ? 0 : Math.min(fromLedger, 1);
+        }
+        return 0;
+    }
+
+    private int jevAttemptCount(DecisionStore.DecisionJob job) {
+        if (job.decisionId() == null) return 0;
+        // JEV 每次执行最多一次物理 attempt（JR-04 上限 1）；有 decisionId 且有预留即 1
+        return job.reservedCostMinor() > 0 ? 1 : 0;
+    }
+
+    private long knownCostMinor(DecisionStore.DecisionJob job) {
+        if (budget == null) return 0;
+        try {
+            return budget.totals(job.bookId())[1];
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    private String unknownCostStatus(DecisionStore.DecisionJob job) {
+        if (budget == null) return "UNKNOWN";
+        try {
+            long[] totals = budget.totals(job.bookId());
+            return totals[0] > 0 ? "UNKNOWN_RETAINED" : "NONE";
+        } catch (Exception e) {
+            return "BUDGET_UNAVAILABLE";
+        }
+    }
+
+    private int countAttemptsByPurpose(String bookId, String purposePrefix) {
+        if (budget == null) return -1;
+        try {
+            // DecisionBudget.totals 不分 purpose；这里通过 store 扫描（有界）计数，失败返回 -1
+            return decisions.countAttemptsByPurpose(bookId, purposePrefix);
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
     private String applicabilityOf(DecisionStore.DecisionJob job) {
+        // JR-08-T06：读取缓存时重算当前适用性，不复用 applicabilityAtWrite 旧标签
+        try {
+            String recomputed = coordinator.applicability(job.bookId(), job);
+            if (recomputed != null) return recomputed;
+        } catch (Exception ignored) {
+        }
         try {
             var evidence = decisions.loadResult(job.bookId(), job.decisionId());
             if (evidence.isEmpty()) return "STALE";
@@ -206,9 +288,22 @@ public class ReviewDecisionController {
     }
 
     private String admittedOf(DecisionStore.DecisionJob job) {
+        // JR-08-T01/T06：正式推荐 = RECOMMEND/KEEP_CURRENT + 当前适用 CURRENT + ASSIST 模式；其余一律 null
         String verdict = job.verdict();
         if (!"RECOMMEND".equals(verdict) && !"KEEP_CURRENT".equals(verdict))
             return null;
+        try {
+            String applicability = coordinator.applicability(job.bookId(), job);
+            if (!"CURRENT".equals(applicability)) return null;
+        } catch (Exception e) {
+            return null;
+        }
+        try {
+            String mode = decisionConfig == null ? null : decisionConfig.getMode();
+            if (!"ASSIST".equalsIgnoreCase(mode)) return null;
+        } catch (Exception e) {
+            return null;
+        }
         return modelPreferredOf(job);
     }
 

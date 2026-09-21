@@ -536,4 +536,34 @@ class CoordinatorTest {
         assertEquals(HttpStatus.CONFLICT, dupEx.status());
         assertTrue(dupEx.getMessage().contains("重复问题ID"));
     }
+
+    @Test void jr06T03_cancelAndWorkerRaceTerminalNeverRegresses() throws Exception {
+        // JR-06-T03：取消与 worker 同时写状态终态不倒退、版本单调
+        Fixture f = fixture(true);
+        Page page = f.store.readPage(BOOK, 3);
+        Block block = page.blocks().get(0);
+        ContentIssue issue = block.issues().get(0);
+        DecisionCoordinator.CreateResult created = f.coordinator.createOrReuse(BOOK, 3, "i-b1",
+                new DecisionCoordinator.CreateBody("op-cas", "b1",
+                        BookStore.revisionOrZero(page), IssueBasis.basisHash(block, issue), false));
+        DecisionStore.DecisionJob queued = created.job();
+        // 旧版本 CAS 更新必须 409
+        DecisionStore.DecisionJob staleNext = new DecisionStore.DecisionJob(queued.jobId(),
+                "RUNNING", queued.stateVersion() + 1, "LOCATING", queued.admissionKey(), null,
+                queued.bookId(), queued.sourcePageNumber(), queued.blockId(), queued.issueId(),
+                null, null, null, queued.clientOperationId(), null, List.of(), 0, "UNKNOWN", "NONE",
+                queued.createdAt(), java.time.Instant.now(), queued.deadlineAt(),
+                queued.allowFreshVision(), queued.target());
+        // 先合法取消推进版本，再用旧版本 CAS 必须冲突
+        DecisionStore.DecisionJob cancelling =
+                f.coordinator.cancel(BOOK, queued.jobId(), queued.stateVersion());
+        assertEquals("CANCEL_REQUESTED", cancelling.state());
+        ApiException conflict = assertThrows(ApiException.class,
+                () -> f.coordinator.casSaveJob(BOOK, staleNext, queued.stateVersion()));
+        assertEquals(HttpStatus.CONFLICT, conflict.status());
+        // 终态不倒退：persistTerminal 旧版本写不覆盖 CANCEL_REQUESTED
+        f.coordinator.runInline(BOOK, queued.jobId());
+        DecisionStore.DecisionJob terminal = f.coordinator.queryJob(BOOK, queued.jobId());
+        assertTrue(List.of("CANCELLED", "CANCEL_REQUESTED", "FAILED").contains(terminal.state()));
+    }
 }
