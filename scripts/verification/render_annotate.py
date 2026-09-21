@@ -19,16 +19,27 @@ PDFDIR_DEFAULT = "/Users/litany/Downloads/pdf"
 
 
 def load_font(size):
+    # 同一 ttc 多 face 缺字情况不同：用探针串选非白像素最多的
+    probe = "陰陽變攝松揭院限郵0123456789，。"
+    best, best_score = None, -1
     for path, index in [
         ("/System/Library/Fonts/Supplemental/Songti.ttc", 0),
         ("/System/Library/Fonts/Supplemental/Songti.ttc", 1),
+        ("/System/Library/Fonts/Supplemental/Songti.ttc", 2),
+        ("/System/Library/Fonts/Supplemental/Songti.ttc", 3),
         ("/System/Library/Fonts/PingFang.ttc", 0),
     ]:
         try:
-            return ImageFont.truetype(path, size, index=index)
+            font = ImageFont.truetype(path, size, index=index)
+            img = Image.new("RGB", (400, 40), "white")
+            ImageDraw.Draw(img).text((5, 5), probe, fill="black", font=font)
+            px = img.load()
+            score = sum(1 for x in range(400) for y in range(40) if px[x, y] != (255, 255, 255))
+            if score > best_score:
+                best, best_score = font, score
         except Exception:
             continue
-    return ImageFont.load_default()
+    return best if best is not None else ImageFont.load_default()
 
 
 def main():
@@ -62,9 +73,9 @@ def main():
                     if block and block.get("id"):
                         blocks[(book_id, page, block["id"])] = block
 
-    font = load_font(30)
-    small = load_font(22)
-    CELL_W, CROP_H, TEXT_H = 640, 200, 150
+    font = load_font(38)
+    small = load_font(28)
+    CELL_W, CROP_H, TEXT_H = 640, 200, 210
     per_page = args.cols * args.rows
     order = []
     for page_index in range((len(cases) + per_page - 1) // per_page):
