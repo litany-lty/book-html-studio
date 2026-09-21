@@ -7,7 +7,7 @@ import tempfile
 import sys
 import time
 
-sys.path.insert(0, "/tmp/a1-evidence")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 from cdpdrive import Driver
 
 FILE = os.environ.get('A1_FILE', "file:///tmp/a1b-evidence/offline2/index.html")
