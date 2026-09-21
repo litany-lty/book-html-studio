@@ -10,65 +10,33 @@ import studio.bookhtml.domain.Job;
 import studio.bookhtml.domain.Page;
 
 import java.io.IOException;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
-import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.*;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
 @Repository
 public class BookStore {
-    private static final Map<String, Object> DIR_LOCKS = new ConcurrentHashMap<>();
     private final Path booksRoot;
     private final ObjectMapper json;
     private final Object dirLock;
-    /** 进程级数据目录写锁，保持打开直到进程退出；同进程复用时为 null。 */
-    @SuppressWarnings("unused")
-    private final FileChannel dirLockChannel;
+    private final DataDirectoryLease lease;
 
     public BookStore(AppProperties properties, ObjectMapper json) throws IOException {
-        this.booksRoot = properties.dataDir().toAbsolutePath().normalize().resolve("books");
+        Path dataDir = properties.dataDir().toAbsolutePath().normalize();
+        // A1-05：先取得单写者租约（失败即拒绝启动），再建目录结构
+        this.lease = DataDirectoryLease.acquire(dataDir);
+        this.dirLock = lease.monitor();
+        this.booksRoot = lease.realPath().resolve("books");
         this.json = json;
         Files.createDirectories(booksRoot);
-        this.dirLock = DIR_LOCKS.computeIfAbsent(booksRoot.toString(), key -> new Object());
-        synchronized (dirLock) {
-            this.dirLockChannel = acquireProcessLock(properties.dataDir().toAbsolutePath().normalize());
-        }
     }
 
-    /**
-     * R03：单写实例——同一数据目录同时只能被一个进程写入。
-     * 第二个进程（即使端口不同）构造 BookStore 即失败；同进程内多实例共享目录锁。
-     */
-    private static FileChannel acquireProcessLock(Path dataDir) throws IOException {
-        Path lockFile = dataDir.resolve(".write.lock");
-        Files.createDirectories(dataDir);
-        FileChannel channel = FileChannel.open(lockFile, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-        try {
-            FileLock lock = channel.tryLock();
-            if (lock == null) {
-                closeQuietly(channel);
-                throw new ApiException(HttpStatus.CONFLICT, "数据目录正被另一进程使用，已拒绝共享写入");
-            }
-            return channel;
-        } catch (OverlappingFileLockException e) {
-            closeQuietly(channel);
-            return null;
-        } catch (ApiException e) {
-            throw e;
-        } catch (IOException e) {
-            closeQuietly(channel);
-            throw new ApiException(HttpStatus.CONFLICT, "数据目录正被另一进程使用，已拒绝共享写入");
-        }
-    }
-
-    private static void closeQuietly(FileChannel channel) {
-        if (channel != null) try { channel.close(); } catch (IOException ignored) { }
+    /** 释放数据目录租约（Spring 销毁时调用；测试可显式调用验证释放语义）。 */
+    @jakarta.annotation.PreDestroy
+    public void close() {
+        lease.close();
     }
 
     public Path createBookDirectory(String id) throws IOException {

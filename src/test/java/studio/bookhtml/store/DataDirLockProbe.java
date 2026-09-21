@@ -17,8 +17,19 @@ public final class DataDirLockProbe {
             Path data = Path.of(args[0]);
             AppProperties config = new AppProperties(data, 300, 5000, 2400, "tesseract", "", "qwen3.5-ocr",
                     "https://dashscope.aliyuncs.com/api/v1", 5, "", "MiniMax-M3", "https://api.minimax.cn/v1", 5, false);
-            new BookStore(config, new ObjectMapper().findAndRegisterModules());
+            BookStore store = new BookStore(config, new ObjectMapper().findAndRegisterModules());
+            if (args.length > 1 && "hold".equals(args[1])) {
+                System.out.println("HOLDING");
+                // 一直持有租约直到 stdin 关闭或进程被杀
+                try {
+                    while (System.in.read() != -1) { /* 等待 */ }
+                } catch (Exception ignored) {
+                }
+                store.close();
+                System.exit(0);
+            }
             System.out.println("LOCKED");
+            store.close();
             System.exit(0);
         } catch (Exception e) {
             System.out.println("REFUSED " + String.valueOf(e.getMessage()).replaceAll("\\s+", " "));
