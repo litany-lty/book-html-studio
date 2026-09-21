@@ -23,10 +23,27 @@ import sys
 HARD_CATEGORIES = {"数字", "否定", "人名", "术语", "版次页码"}
 
 
-def evaluate(dataset):
+def evaluate(dataset, normalize=False):
+    conv = None
+    if normalize:
+        try:
+            from opencc import OpenCC
+            conv = OpenCC("s2t")
+        except Exception:
+            conv = None
+    norm = (lambda s: conv.convert(s or "") if conv else (s or ""))
+
     cases = dataset.get("cases", [])
     metrics = {"n": len(cases), "byBook": {}, "keyErrors": []}
-    graded = [c for c in cases if not c.get("unreadable") and c.get("truth") is not None]
+    graded = []
+    for c in cases:
+        if c.get("unreadable") or c.get("truth") is None:
+            continue
+        c = dict(c)
+        c["truth"] = norm(c.get("truth"))
+        c["candidates"] = [dict(k, text=norm(k.get("text"))) for k in c.get("candidates", [])]
+        c["current"] = norm(c.get("current"))
+        graded.append(c)
     metrics["readableN"] = len(graded)
 
     def candidate_text(case, pick):
@@ -131,12 +148,14 @@ def main():
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--out", default=None)
     parser.add_argument("--selftest", action="store_true")
+    parser.add_argument("--normalize", action="store_true",
+                        help="17.4 繁简投影固定规则：比较前一律转繁（opencc s2t）")
     args = parser.parse_args()
     if args.selftest:
         selftest()
         return 0
     dataset = json.load(open(args.dataset))
-    metrics = evaluate(dataset)
+    metrics = evaluate(dataset, normalize=args.normalize)
     os.makedirs(args.out, exist_ok=True)
     json.dump(metrics, open(os.path.join(args.out, "metrics.json"), "w"),
               ensure_ascii=False, indent=2)
