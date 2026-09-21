@@ -26,6 +26,9 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
       - name: Check scripts
         shell: bash
         run: |
@@ -36,6 +39,7 @@ jobs:
       - name: Python verification tests
         shell: bash
         run: |
+          python3 -m pip install --disable-pip-version-check OpenCC==1.4.2
           python3 -m py_compile scripts/verification/*.py
           python3 scripts/verification/shadow_eval.py --selftest
           python3 scripts/verification/test_shadow_eval.py

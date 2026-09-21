@@ -98,3 +98,18 @@ mvn package
 ```
 
 协议测试、缓存回放与功能测试不能替代真实云端样本验收，也不能证明整书逐字准确。涉及私有 PDF、模型响应和本机运行记录的验证材料不会提交到源码仓库。
+
+### JR-14 原图盲标
+
+`scripts/verification/render_blind_pilot.py` 可从本地试点 JSON、书目映射、OCR 定位记录与原 PDF 生成离线标注页（需要本机 `PyMuPDF`、`Pillow`）。例如：
+
+```bash
+python3 scripts/verification/render_blind_pilot.py \
+  --pilot /tmp/jr14-pilot/pilot.json \
+  --bookmap /tmp/eval-bookmap.json \
+  --runs /tmp/eval-runs \
+  --pdfdir /path/to/private-pdfs \
+  --out /tmp/jr14-pilot/blind-board
+```
+
+示例中的 `/tmp` 路径与 PDF 目录均需替换为自己的本地试点材料。打开输出目录的 `index.html`，对照原 PDF 的整页和局部图填写原字、不可辨认或无法唯一判定；页面不展示候选或 JEV 结论。蓝框仅定位到 OCR 内容块，不是精确字框；遮蔽上下文只用于寻找位置，不能代替原图判断。标注在浏览器本地暂存，需点击“下载标注 JSON”保存；尚未完成的标注不会被当成准确率证据。生成的 PDF 裁图、私密正文和人工标签均保留在本机，不提交仓库。
