@@ -98,6 +98,32 @@ public final class DecisionModels {
             evidenceRefs = List.copyOf(evidenceRefs);
             bbox = bbox == null ? null : bbox.clone();
         }
+
+        /** 语义稳定投影：排除 runId/模型回执/时间等易变字段，语义去重与缓存键用它。 */
+        public Map<String, Object> stableMap() {
+            Map<String, Object> map = new java.util.LinkedHashMap<>();
+            map.put("candidateId", candidateId);
+            map.put("originalScriptText", originalScriptText);
+            map.put("originalUnknownReason", originalUnknownReason);
+            map.put("simplifiedDisplayText", simplifiedDisplayText);
+            map.put("converterVersion", converterVersion);
+            map.put("sourceKind", sourceKind);
+            map.put("producer", producer);
+            map.put("acquisitionGroup", acquisitionGroup);
+            map.put("upstreamEvidenceIds", new ArrayList<>(upstreamEvidenceIds));
+            map.put("pdfSha256", pdfSha256);
+            map.put("sourcePageNumber", sourcePageNumber);
+            map.put("sourceSpanHash", sourceSpanHash);
+            map.put("cropHash", cropHash);
+            map.put("locatorMode", locatorMode);
+            map.put("bbox", bbox == null ? null : bbox.clone());
+            map.put("transformVersion", transformVersion);
+            map.put("alignmentStatus", alignmentStatus);
+            map.put("evidenceRefs", new ArrayList<>(evidenceRefs));
+            map.put("rawConfidence", rawConfidence);
+            map.put("normalizerVersion", normalizerVersion);
+            return map;
+        }
     }
 
     /** J01/6.3：候选集合，最多六个实质候选；原始候选保留，去重只合并展示不丢来源。 */
@@ -123,9 +149,11 @@ public final class DecisionModels {
         public static String computeHash(IssueRef issueRef, List<Candidate> candidates,
                                          String candidateConfigVersion, int rawCount,
                                          boolean truncated, List<String> evidenceGaps) {
+            List<Map<String, Object>> stable = new ArrayList<>();
+            for (Candidate candidate : candidates) stable.add(candidate.stableMap());
             return DecisionHash.of(Map.of(
                     "issueRef", issueRef,
-                    "candidates", new ArrayList<>(candidates),
+                    "candidates", stable,
                     "candidateConfigVersion", candidateConfigVersion,
                     "rawCount", rawCount,
                     "truncated", truncated,
@@ -173,7 +201,8 @@ public final class DecisionModels {
             Verdict verdict, Applicability applicabilityAtWrite,
             List<String> reasonCodes, List<String> evidenceRefs,
             Map<String, Long> usageReported, Long estimatedCostMinor, long reservedCostMinor,
-            CostStatus costStatus, Instant createdAt, Instant sentAt, Instant completedAt,
+            CostStatus costStatus, String scoresJson,
+            Instant createdAt, Instant sentAt, Instant completedAt,
             Instant deadlineAt) {
         public DecisionEvidence {
             requireText("schemaVersion", schemaVersion);
