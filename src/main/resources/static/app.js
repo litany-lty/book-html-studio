@@ -625,16 +625,24 @@ async function refreshBookData() {
   await goToPage(state.currentPage, { force: true });
 }
 
+let lastDrawerOpener = null;
 function openDrawer(type) {
+  const opener = document.activeElement;
+  if (opener && (opener.id === 'toc-toggle' || opener.id === 'review-toggle')) lastDrawerOpener = opener;
   const panel = type === 'toc' ? $('#toc-panel') : $('#review-panel');
   const other = type === 'toc' ? $('#review-panel') : $('#toc-panel');
   other.classList.remove('open'); panel.classList.add('open'); $('#drawer-scrim').hidden = false;
   $('#toc-toggle').setAttribute('aria-expanded', String(type === 'toc')); $('#review-toggle').setAttribute('aria-expanded', String(type === 'review'));
 }
 
-function closeDrawers() {
+function closeDrawers(restoreFocus = false) {
   $('#toc-panel').classList.remove('open'); $('#review-panel').classList.remove('open'); $('#drawer-scrim').hidden = true;
   $('#toc-toggle').setAttribute('aria-expanded', 'false'); $('#review-toggle').setAttribute('aria-expanded', 'false');
+  // A1-06：显式关闭抽屉时焦点回到触发按钮；程序化关闭（翻页/切书）不抢焦点
+  if (restoreFocus && lastDrawerOpener && document.contains(lastDrawerOpener)) {
+    try { lastDrawerOpener.focus({ preventScroll: true }); } catch (_) { /* 忽略 */ }
+  }
+  lastDrawerOpener = null;
 }
 
 function startDrawing(type) {
@@ -829,9 +837,9 @@ $('#export-button').addEventListener('click', () => {
   window.location.assign(api.exportUrl(state.book.id));
 });
 
-$('#toc-toggle').addEventListener('click', () => openDrawer('toc')); $('#review-toggle').addEventListener('click', () => openDrawer('review')); $('#close-review').addEventListener('click', closeDrawers); $('#drawer-scrim').addEventListener('click', closeDrawers);
+$('#toc-toggle').addEventListener('click', () => openDrawer('toc')); $('#review-toggle').addEventListener('click', () => openDrawer('review')); $('#close-review').addEventListener('click', () => closeDrawers(true)); $('#drawer-scrim').addEventListener('click', () => closeDrawers(true));
 $('#reader').addEventListener('scroll', () => { window.clearTimeout(scrollTimer); scrollTimer = window.setTimeout(saveReadingPosition, 180); });
 window.addEventListener('beforeunload', event => { if (state.dirty) { event.preventDefault(); event.returnValue = ''; } });
-window.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawers(); if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && state.page) { event.preventDefault(); $('#save-page').click(); } });
+window.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawers(true); if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && state.page) { event.preventDefault(); $('#save-page').click(); } });
 
 init();
