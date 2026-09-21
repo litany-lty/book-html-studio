@@ -65,6 +65,35 @@
     MAPPING_UNKNOWN: '旧记录页号无法映射到源页，暂不应用',
     INVALID_RECORD: '记录格式非法，已隔离保留',
   };
+  // J10：只读建议摘要 sidecar。候选不是用户修订；不同 PDF/基线隔离，过期只读不套用。
+  function decisionSummaries() {
+    const all = globalThis.BOOK_DECISIONS;
+    return all && typeof all === 'object' ? all : {};
+  }
+  function sourcePageOf(page) {
+    return (page && (page.sourcePageNumber || page.pageNumber)) || 0;
+  }
+  function currentSummary(sourcePage, block, issue) {
+    if (!block || !issue || issue.resolved) return null;
+    const entry = decisionSummaries()[`${sourcePage}:${block.id}:${issue.id}`];
+    if (!entry || typeof entry !== 'object') return null;
+    if (entry.sourcePage !== sourcePage || entry.blockId !== block.id || entry.issueId !== issue.id) return null;
+    if (entry.start !== issue.start || entry.end !== issue.end) return null;
+    const quote = (block.original || '').slice(issue.start, issue.end);
+    if (!quote || quote !== entry.originalQuote) return null;
+    if (!entry.originalText) return null;
+    return entry;
+  }
+  function assistedOn() {
+    try { return localStorage.getItem('book-html:assisted') === '1'; } catch (_) { return false; }
+  }
+  function setAssistedOn(value) {
+    try { localStorage.setItem('book-html:assisted', value ? '1' : '0'); } catch (_) { /* 仅本次有效 */ }
+  }
+  function summaryDisplay(entry, script) {
+    if (!entry) return '';
+    return script === 'original' ? (entry.originalText || '') : (entry.displayText || entry.originalText || '');
+  }
   globalThis.BookIssueReview = {
     create({ book, pages, pageMap, getPage, getScript, render }) {
       const bookUid = `${baseBookId(book)}|${(book && book.sourcePdfSha256) || 'nosha'}`;
@@ -258,6 +287,13 @@
             if (issue.resolved !== entry.resolved || issue.replacement !== entry.replacement) {
               issue.resolved = entry.resolved; issue.replacement = entry.replacement; applied = true;
             }
+            // J10：确认来源随修订同次应用；无 resolution 键的旧记录不触碰，避免误改既有对象
+            if (entry && typeof entry === 'object' && 'resolution' in entry) {
+              const want = entry.resolution ?? null;
+              if (JSON.stringify(issue.resolution ?? null) !== JSON.stringify(want)) {
+                issue.resolution = want; applied = true;
+              }
+            }
           }
           if (applied) counts.applied++;
         }
@@ -310,6 +346,7 @@
           issues: (block.issues || []).map(issue => ({
             id: issue.id, resolved: Boolean(issue.resolved), replacement: issue.replacement || '',
             issueBasis: captureBasis(block, issue),
+            resolution: issue.resolution ?? null,
           })),
         };
         records[recordKey(sourcePage, block.id)]._pending = [];
@@ -465,6 +502,13 @@
             if (issue.resolved !== rec.resolved || issue.replacement !== rec.replacement) {
               issue.resolved = rec.resolved; issue.replacement = rec.replacement; applied = true;
             }
+            // J10：确认来源随修订同次应用；无 resolution 键的旧记录不触碰
+            if (rec && typeof rec === 'object' && 'resolution' in rec) {
+              const want = rec.resolution ?? null;
+              if (JSON.stringify(issue.resolution ?? null) !== JSON.stringify(want)) {
+                issue.resolution = want; applied = true;
+              }
+            }
           }
           if (applied) counts.applied++;
         }
@@ -485,6 +529,7 @@
           original: block.original, simplified: block.simplified,
           issueBasis: captureBasis(block, issue),
           resolved: Boolean(issue.resolved), replacement: issue.replacement || '',
+          resolution: issue.resolution ?? null,
         };
         try {
           const loaded = await opened.backend.loadPage(sourcePage);
@@ -550,6 +595,15 @@
       const trigger = button('本页待处理', () => open());
       trigger.classList.add('issue-page-button');
       document.querySelector('.page-meta')?.append(trigger);
+      // J10/T60：辅助推荐显式开关（默认关闭保真阅读）；只影响展示，不改修订
+      const assistLabel = document.createElement('label');
+      assistLabel.className = 'issue-assist-toggle';
+      const assistBox = document.createElement('input');
+      assistBox.type = 'checkbox'; assistBox.checked = assistedOn();
+      assistBox.setAttribute('aria-label', '显示辅助推荐（未确认）');
+      assistBox.addEventListener('change', () => { setAssistedOn(assistBox.checked); render(); });
+      assistLabel.append(assistBox, document.createTextNode('显示辅助推荐（未确认）'));
+      document.querySelector('.page-meta')?.append(assistLabel);
       const dialog = el('dialog', 'issue-dialog');
       dialog.setAttribute('aria-label', '当前页问题处理');
       document.body.append(dialog);
@@ -640,7 +694,19 @@
           readingLayout.appendText(container, text.slice(cursor, start), block);
           const sourceText = text.slice(start, end);
           if (issue.resolved) readingLayout.appendText(container, readingLayout.displayIssueText(issue, sourceText, script), block);
-          else readingLayout.appendIssueText(container, {
+          else if (assistedOn()) {
+            // J10/T60：辅助推荐显式开启时显示当前有效的首选候选并标记；默认仍保真阅读
+            const summary = currentSummary(sourcePageOf(page), block, issue);
+            if (summary) readingLayout.appendAssistedIssueText(container, {
+              page, block, issue, sourceText, script, pageImageSrc: page.image,
+              recommendation: summaryDisplay(summary, script), onEdit: () => open(block.id, issue.id)
+            });
+            else readingLayout.appendConfirmedIssueText(container, {
+              page, block, issue, sourceText, script, pageImageSrc: page.image,
+              onEdit: () => open(block.id, issue.id)
+            });
+          }
+          else readingLayout.appendConfirmedIssueText(container, {
             page, block, issue, sourceText, script, pageImageSrc: page.image,
             onEdit: () => open(block.id, issue.id)
           });
@@ -746,15 +812,40 @@
         source.append(el('h4', '', '原始 OCR 片段'), el('p', 'issue-raw', (block.original || '').slice(issue.start, issue.end)),
           el('p', 'issue-reason', issue.reason || '模型标记需复核，原始识别记录保留。'));
         if (issue.inferredText) source.append(el('h4', '', '推测候选（不代表确认）'), el('p', 'issue-inference', issue.inferredText));
+        // J10：只读建议摘要（有界脱敏）；候选不是用户修订，不自动填入输入框
+        const summary = currentSummary(sourcePageOf(getPage()), block, issue);
+        if (summary) {
+          const kindLabel = { NATIVE_TEXT: '原生文字', PRIMARY_OCR: '主识别', CROP_OCR: '局部复识别', VISION_TRANSCRIPTION: '视觉转录', SEMANTIC_INFERENCE: '语义推测', LEGACY_INFERENCE: '旧推测', HUMAN_INPUT: '人工输入' }[summary.sourceKind] || summary.sourceKind;
+          source.append(el('h4', '', '辅助推荐（未确认，需对照原图）'),
+            el('p', 'issue-assist', `${summaryDisplay(summary, getScript() === 'original' ? 'original' : 'simplified')}（${kindLabel} · ${summary.verdict || '未知结论'}）`));
+        }
         result.append(el('h3', '', '编辑结果'), el('p', '', label(issue)));
         const input = el('textarea', 'issue-edit'); input.rows = 8;
         input.setAttribute('aria-label', '修订文字'); input.maxLength = 1000;
         input.value = issue.resolved ? issue.replacement || '' : issue.inferredText || (block.original || '').slice(issue.start, issue.end);
         input.addEventListener('input', () => { dirty = true; }); result.append(input);
         const actions = el('div', 'issue-actions');
-        function accept(value) {
+        // J10：对照原图确认。仅当输入与当前有效摘要候选逐字一致且已勾选已对照，
+        // 才记录 JEV_ASSISTED 确认来源；否则为普通人工修订（resolution 清空，不冒充）。
+        const attestLabel = el('label', 'issue-attest');
+        const attestBox = document.createElement('input');
+        attestBox.type = 'checkbox';
+        attestLabel.append(attestBox, document.createTextNode('我已对照原图'));
+        function accept(value, opts = {}) {
           // A1-03：先改内存对象用于即时显示，以事务提交成功为准；失败保留输入并提示
           issue.replacement = value; issue.resolved = true; dirty = false;
+          const attested = opts.summary && opts.attested && value === opts.summary.originalText;
+          if (attested) {
+            issue.resolution = {
+              origin: 'JEV_ASSISTED', decisionId: opts.summary.decisionId,
+              candidateId: opts.summary.candidateId, candidateSetHash: opts.summary.candidateSetHash,
+              basisPdfSha256: null, basisPageRevision: null, basisIssueHash: null,
+              originalReplacement: value, simplifiedReplacement: null, converterVersion: null,
+              userAttestedSourceCheck: true, confirmedAt: new Date().toISOString(), appliedRevision: null,
+            };
+          } else {
+            issue.resolution = null;
+          }
           commitIssue(block, issue).then(result => {
             if (result.status === 'SAVED') {
               render(); refresh();
@@ -776,11 +867,12 @@
             }
           });
         }
-        actions.append(button('保存并标记解决', () => accept(input.value)));
+        actions.append(attestLabel);
+        actions.append(button('保存并标记解决', () => accept(input.value, { summary, attested: attestBox.checked })));
         if (issue.inferredText) actions.append(button('采用推测并确认', () => accept(issue.inferredText)));
         actions.append(button('恢复未解决', () => {
           if (!mayLeave()) return;
-          issue.resolved = false; dirty = false;
+          issue.resolved = false; issue.resolution = null; dirty = false;
           commitIssue(block, issue).then(result => {
             render(); refresh();
             draw(result.status === 'SAVED' ? '已恢复问题标记。'

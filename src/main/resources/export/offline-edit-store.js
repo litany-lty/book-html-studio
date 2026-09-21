@@ -10,6 +10,12 @@
     return `${bookUid}\u0000${sourcePage}\u0000${blockId}\u0000${issueId}`;
   }
 
+  // J10：确认来源元数据透传。只接受普通对象，其他一律记 null，不伪造确认事实。
+  function sanitizeResolution(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    return { ...value };
+  }
+
   function openDatabase() {
     return new Promise((resolve, reject) => {
       let request;
@@ -126,6 +132,7 @@
               original: entry.original, simplified: entry.simplified,
               issueBasis: entry.issueBasis,
               resolved: entry.resolved, replacement: entry.replacement,
+              resolution: sanitizeResolution(entry.resolution),
               updatedAt: Date.now(),
             };
             const put = store.put(next);
@@ -194,6 +201,7 @@
                 sourcePage: item.sourcePage, blockId: item.blockId, issueId: item.issueId,
                 original: item.original, simplified: item.simplified, issueBasis: item.issueBasis,
                 resolved: item.resolved, replacement: item.replacement,
+                resolution: sanitizeResolution(item.resolution),
               },
               current.current ? current.current.editRevision : 0);
             results.push({ key: item.key, ...outcome });

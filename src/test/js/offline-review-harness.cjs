@@ -38,12 +38,16 @@ function makeEnv({ quotaFail = false } = {}) {
     window: { addEventListener() {}, confirm: () => true },
     document: {
       createElement: stubElement,
+      createTextNode: text => ({ nodeType: 3, textContent: String(text ?? '') }),
       querySelector: () => null,
       querySelectorAll: () => [],
       body: stubElement('body'),
     },
     BookReadingLayout: {
       appendText() {}, appendIssueText() {},
+      // J10：保真/辅助渲染入口与线上 frozen 导出一致
+      appendConfirmedIssueText() {}, appendAssistedIssueText() {},
+      resolveReadingText: (issue, sourceText) => ({ text: String(sourceText ?? ''), provenance: 'SOURCE', unresolved: true }),
       displayIssueText: (issue, text) => text,
     },
   };

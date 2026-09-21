@@ -176,7 +176,11 @@ class ExportServiceTest {
         assertTrue(app.contains("issueReview.appendText(label,b,textFor(b))"));
         String issueReview = text(entries, "assets/issue-review.js");
         assertFalse(issueReview.contains("（模糊缺损内容推测）"));
-        assertTrue(issueReview.contains("readingLayout.appendIssueText"));
+        // J10/T60：离线默认保真阅读，未确认推测不进入正文；辅助推荐显式开启才显示并标记
+        assertTrue(issueReview.contains("readingLayout.appendConfirmedIssueText"));
+        assertTrue(issueReview.contains("readingLayout.appendAssistedIssueText"));
+        assertTrue(issueReview.contains("globalThis.BOOK_DECISIONS"));
+        assertTrue(entries.containsKey("assets/decisions.js"));
         assertTrue(app.contains("BookReadingLayout.canJoin"));
         assertTrue(app.contains("payload.outline"));
         assertTrue(app.contains("__BOOK_PAGES__"));

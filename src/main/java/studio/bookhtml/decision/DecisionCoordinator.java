@@ -381,6 +381,8 @@ public class DecisionCoordinator {
                     decisions.loadResult(bookId, job.decisionId());
             if (evidence.isPresent()) {
                 summary.put("candidateSetHash", evidence.get().candidateSetHash());
+                summary.put("templateVersion", evidence.get().questionTemplateVersion());
+                summary.put("policyVersion", evidence.get().policyVersion());
                 Optional<DecisionModels.CandidateSet> set =
                         decisions.loadCandidateSet(bookId, evidence.get().candidateSetHash());
                 if (set.isPresent()) {
@@ -814,7 +816,7 @@ public class DecisionCoordinator {
     }
 
     /** 测试用：同步执行单作业，不经过队列线程。 */
-    void runInline(String bookId, String jobId) {
+    public void runInline(String bookId, String jobId) {
         run(bookId, jobId);
     }
 }

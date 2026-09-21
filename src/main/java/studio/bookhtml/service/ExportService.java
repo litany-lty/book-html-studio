@@ -6,6 +6,7 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
 import studio.bookhtml.domain.Block;
 import studio.bookhtml.domain.Book;
+import studio.bookhtml.domain.ContentIssue;
 import studio.bookhtml.domain.Page;
 import studio.bookhtml.store.BookStore;
 
@@ -38,19 +39,99 @@ public class ExportService {
     private final PdfService pdf;
     private final ObjectMapper json;
     private final IssueImageService issueImages;
+    private final studio.bookhtml.decision.DecisionCoordinator decisionCoordinator;
 
     public ExportService(BookService books, BookStore store, PdfService pdf, ObjectMapper json) {
-        this(books, store, pdf, json, null);
+        this(books, store, pdf, json, null, null);
     }
 
     @Autowired
     public ExportService(BookService books, BookStore store, PdfService pdf, ObjectMapper json,
                          IssueImageService issueImages) {
+        this(books, store, pdf, json, issueImages, null);
+    }
+
+    public ExportService(BookService books, BookStore store, PdfService pdf, ObjectMapper json,
+                         IssueImageService issueImages,
+                         studio.bookhtml.decision.DecisionCoordinator decisionCoordinator) {
         this.books = books;
         this.store = store;
         this.pdf = pdf;
         this.json = json;
         this.issueImages = issueImages;
+        this.decisionCoordinator = decisionCoordinator;
+    }
+
+    /**
+     * J10：有界脱敏的推荐摘要。只含展示必需字段（候选、来源类别、推荐状态、基线引用、
+     * 规则/模型版本摘要）；密钥、原始 HTTP 头、供应商调试数据、完整远端请求 body、
+     * 无关整书上下文一律不导出。仅收录导出时刻仍适用的建议。
+     */
+    String decisionsScript(String bookId, List<Integer> selected,
+                           Map<Integer, Integer> exportedNumbers) {
+        Map<String, Object> summaries = new java.util.LinkedHashMap<>();
+        if (decisionCoordinator != null) for (int sourcePage : selected) {
+            Integer exportPage = exportedNumbers == null ? sourcePage
+                    : exportedNumbers.getOrDefault(sourcePage, sourcePage);
+            Page page;
+            try {
+                page = store.readPage(bookId, sourcePage);
+            } catch (Exception e) {
+                continue;
+            }
+            if (page.blocks() == null) continue;
+            for (Block block : page.blocks()) {
+                if (block == null || block.original() == null || block.issues() == null) continue;
+                for (ContentIssue issue : block.issues()) {
+                    if (issue == null || issue.resolved()) continue;
+                    Map<String, Object> current;
+                    try {
+                        current = decisionCoordinator.currentDecisionView(bookId, sourcePage,
+                                issue.id());
+                    } catch (Exception e) {
+                        continue;
+                    }
+                    if (current == null || current.get("recommendedCandidateId") == null) continue;
+                    @SuppressWarnings("unchecked")
+                    List<Map<String, Object>> candidates =
+                            (List<Map<String, Object>>) current.get("candidates");
+                    if (candidates == null) continue;
+                    Map<String, Object> recommended = null;
+                    for (Map<String, Object> candidate : candidates)
+                        if (current.get("recommendedCandidateId").equals(candidate.get("candidateId")))
+                            recommended = candidate;
+                    if (recommended == null) continue;
+                    String quote = null;
+                    if (issue.start() >= 0 && issue.end() <= block.original().length()
+                            && issue.end() > issue.start())
+                        quote = block.original().substring(issue.start(), issue.end());
+                    if (quote == null) continue;
+                    Map<String, Object> entry = new java.util.LinkedHashMap<>();
+                    entry.put("sourcePage", sourcePage);
+                    entry.put("blockId", block.id());
+                    entry.put("issueId", issue.id());
+                    entry.put("start", issue.start());
+                    entry.put("end", issue.end());
+                    entry.put("originalQuote", quote);
+                    entry.put("candidateId", recommended.get("candidateId"));
+                    entry.put("displayText", recommended.get("displayText"));
+                    entry.put("originalText", recommended.get("originalText"));
+                    entry.put("sourceKind", recommended.get("sourceKind"));
+                    entry.put("verdict", current.get("verdict"));
+                    entry.put("reasonCodes", current.get("reasonCodes"));
+                    entry.put("candidateSetHash", current.get("candidateSetHash"));
+                    entry.put("decisionId", current.get("decisionId"));
+                    entry.put("templateVersion", current.get("templateVersion"));
+                    entry.put("policyVersion", current.get("policyVersion"));
+                    summaries.put(exportPage + ":" + block.id() + ":" + issue.id(), entry);
+                }
+            }
+        }
+        try {
+            return "globalThis.BOOK_DECISIONS=" + json.writeValueAsString(summaries) + ";";
+        } catch (Exception e) {
+            return "globalThis.BOOK_DECISIONS={};";
+        }
     }
 
     /**
@@ -220,6 +301,8 @@ public class ExportService {
         payload.put("pageCount", selected.size());
         payload.put("pages", List.of());
         writeBookJs(zip, payload);
+        // J10：只读建议摘要 sidecar（有界脱敏）；缺失时为空映射，离线照常工作
+        put(zip, "assets/decisions.js", decisionsScript(bookId, selected, exportedNumbers));
     }
 
     private static String sha256Hex(Path file) {
@@ -569,7 +652,7 @@ public class ExportService {
                 <article id="paper" class="paper" data-paper tabindex="-1"></article>
                 <nav class="pagination" aria-label="翻页"><button class="button" data-prev type="button">上一页</button><div class="page-progress"><input data-progress type="range" min="1" step="1" value="1" aria-label="阅读进度"><output data-progress-label></output></div><form data-jump-form><label for="page-jump">第</label><input id="page-jump" data-jump type="number" min="1"><span data-total></span></form><button class="button" data-next type="button">下一页</button></nav>
               </main>
-              <script src="assets/book.js"></script><script src="assets/reading-layout.js"></script><script src="assets/offline-edit-store.js"></script><script src="assets/issue-review.js"></script><script src="assets/reader-navigation.js"></script><script src="assets/app.js"></script>
+              <script src="assets/book.js"></script><script src="assets/decisions.js"></script><script src="assets/reading-layout.js"></script><script src="assets/offline-edit-store.js"></script><script src="assets/issue-review.js"></script><script src="assets/reader-navigation.js"></script><script src="assets/app.js"></script>
             </body>
             </html>
             """.formatted(escape(book.title()), escape(book.title()));
