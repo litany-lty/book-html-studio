@@ -33,7 +33,7 @@ def wait_for(d, sess, expr, timeout=20):
 
 
 def main():
-    d = Driver(9341, profile="/tmp/a1-cdp-profile")
+    d = Driver(9341, profile=os.environ.get("A1_PROFILE", tempfile.mkdtemp(prefix="a1-prof-")))
     d.connect()
     # console + network 采集
     t0 = d.new_tab(FILE)

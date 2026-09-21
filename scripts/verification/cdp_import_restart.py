@@ -3,6 +3,7 @@ import os
 """A1-P05 导入 + A1-P07 重启持久（file:// + 真实 IndexedDB）。"""
 import json
 import shutil
+import tempfile
 import sys
 import time
 
@@ -33,8 +34,7 @@ def wait_for(d, s, expr, timeout=25):
 
 
 def main():
-    shutil.rmtree("/tmp/a1-imp-profile2", ignore_errors=True)
-    d = Driver(9344, profile="/tmp/a1-imp-profile2")
+    d = Driver(9344, profile=os.environ.get("A1_PROFILE", tempfile.mkdtemp(prefix="a1-prof-")))
     d.connect()
     t = d.new_tab(FILE)
     s = d.attach(t)
@@ -69,7 +69,7 @@ def main():
     # ---- P07：杀掉整个浏览器进程，同 profile 重开 ----
     d.close()
     time.sleep(1)
-    d2 = Driver(9345, profile="/tmp/a1-imp-profile2")
+    d2 = Driver(9345, profile=os.environ.get("A1_PROFILE", tempfile.mkdtemp(prefix="a1-prof-")))
     d2.connect()
     t2 = d2.new_tab(FILE)
     s2 = d2.attach(t2)
