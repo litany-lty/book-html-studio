@@ -3,6 +3,7 @@ import os
 """A1-03 离线事务 E2E（file:// + 真实 IndexedDB + 双 tab）：P01/P02/P08/备份导出。"""
 import json
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
