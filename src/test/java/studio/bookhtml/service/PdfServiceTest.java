@@ -31,6 +31,40 @@ class PdfServiceTest {
 
     @Test void swapsDimensionsForQuarterTurn(){PDPage page=new PDPage(new PDRectangle(600,800));page.setRotation(90);PdfService.Dimensions d=PdfService.effectiveDimensions(page);assertEquals(800,d.width());assertEquals(600,d.height());}
 
+    private Path protectedPdf(String name, String userPassword) throws Exception {
+        Path pdf = temp.resolve(name);
+        try (PDDocument document = new PDDocument()) {
+            document.addPage(new PDPage(new PDRectangle(600, 800)));
+            org.apache.pdfbox.pdmodel.encryption.AccessPermission permissions =
+                    new org.apache.pdfbox.pdmodel.encryption.AccessPermission();
+            document.protect(new org.apache.pdfbox.pdmodel.encryption.StandardProtectionPolicy(
+                    "owner", userPassword, permissions));
+            document.save(pdf.toFile());
+        }
+        return pdf;
+    }
+
+    @Test void emptyPasswordPdfIsReadableNotRejected() throws Exception {
+        // 误判回归：空口令加密字典自动解开，不报“暂不支持加密”
+        Path pdf = protectedPdf("empty-pw.pdf", "");
+        PdfService service = new PdfService(1600, codec -> true);
+        assertEquals(1, service.inspect(pdf).pages());
+        java.awt.image.BufferedImage rendered = service.renderForOcr(pdf, 1);
+        try {
+            assertTrue(rendered.getWidth() > 0 && rendered.getHeight() > 0);
+        } finally {
+            rendered.flush();
+        }
+    }
+
+    @Test void realPasswordPdfStillRefused() throws Exception {
+        Path pdf = protectedPdf("real-pw.pdf", "secret");
+        PdfService service = new PdfService(1600, codec -> true);
+        studio.bookhtml.api.ApiException refused = assertThrows(
+                studio.bookhtml.api.ApiException.class, () -> service.inspect(pdf));
+        assertTrue(refused.getMessage().contains("暂不支持加密"));
+    }
+
     @Test void rendersAnActualJpeg2000Image() throws Exception {
         assertTrue(PdfService.decoderAvailable(PdfService.Codec.JPX));
         Path pdf = jpeg2000Pdf("jpx.pdf");

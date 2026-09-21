@@ -17,7 +17,7 @@ public class NativeTextExtractor {
     public NativeTextExtractor(TraditionalConverter converter) { this.converter = converter; }
 
     public Optional<List<Block>> extract(Path pdf, int pageNumber, String requestedLayout) throws IOException {
-        try (PDDocument document = Loader.loadPDF(pdf.toFile())) {
+        try (PDDocument document = PdfService.loadPdf(pdf)) {
             Collector c = new Collector(); c.setStartPage(pageNumber); c.setEndPage(pageNumber); c.getText(document);
             if (!trustworthy(c.glyphs)) return Optional.empty();
             String layout = chooseLayout(c.glyphs, requestedLayout);

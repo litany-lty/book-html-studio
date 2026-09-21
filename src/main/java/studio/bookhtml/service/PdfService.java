@@ -54,15 +54,32 @@ public class PdfService {
     }
 
     public PdfInfo inspect(Path pdf) throws IOException {
-        try (PDDocument document = Loader.loadPDF(pdf.toFile())) {
-            if (document.isEncrypted()) throw new ApiException(HttpStatus.BAD_REQUEST, "暂不支持加密 PDF");
+        try (PDDocument document = loadPdf(pdf)) {
             return new PdfInfo(document.getNumberOfPages());
         } catch (org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException e) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "暂不支持加密 PDF");
         }
     }
+
+    /**
+     * 误判修复：空口令加密字典（如老 Adobe 文件）自动以空口令解开；
+     * 只有真密码文件才抛 InvalidPasswordException（调用方按“暂不支持加密”处理）。
+     * 能成功加载即视为可读，不再以 isEncrypted() 误拒已解密文档。
+     */
+    static PDDocument loadPdf(Path pdf) throws IOException {
+        try {
+            return Loader.loadPDF(pdf.toFile());
+        } catch (org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException first) {
+            try {
+                return Loader.loadPDF(pdf.toFile(), "");
+            } catch (org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException e) {
+                first.addSuppressed(e);
+                throw first;
+            }
+        }
+    }
     public Dimensions dimensions(Path pdf, int pageNumber) throws IOException {
-        try (PDDocument document = Loader.loadPDF(pdf.toFile())) {
+        try (PDDocument document = loadPdf(pdf)) {
             validatePage(document, pageNumber); PDPage page = document.getPage(pageNumber - 1);
             Dimensions dimensions = effectiveDimensions(page);
             validateDimensions(dimensions, pageNumber);
@@ -70,7 +87,7 @@ public class PdfService {
         }
     }
     public List<Dimensions> allDimensions(Path pdf) throws IOException {
-        try (PDDocument document = Loader.loadPDF(pdf.toFile())) {
+        try (PDDocument document = loadPdf(pdf)) {
             List<Dimensions> result = new ArrayList<>(document.getNumberOfPages());
             int pageNumber = 0;
             for (PDPage page : document.getPages()) {
@@ -101,7 +118,7 @@ public class PdfService {
         // 阶段2：共享预算租约覆盖解码至图片/编码副本不再使用；所有异常/finally 路径归还配额。
         // 注意：此处不 catch OutOfMemoryError——监测只用于提前调度，不能作为 OOM 恢复机制。
         try (RenderBudget.Lease ignored = acquire(pixels * 4)) {
-            try (PDDocument document = Loader.loadPDF(pdf.toFile())) {
+            try (PDDocument document = loadPdf(pdf)) {
                 validatePage(document, pageNumber); PDPage page = document.getPage(pageNumber - 1);
                 BufferedImage source = renderPage(document, pageNumber, dpi);
                 double scale = Math.min(1d, Math.min(width / (double)source.getWidth(), Math.sqrt(MAX_RENDER_PIXELS / (double)((long)source.getWidth()*source.getHeight()))));
@@ -139,7 +156,7 @@ public class PdfService {
             }
         }
         try (RenderBudget.Lease ignored = acquire(pixels * 4)) {
-            try(PDDocument document=Loader.loadPDF(pdf.toFile())){validatePage(document,pageNumber);PDPage page=document.getPage(pageNumber-1);BufferedImage source=renderPage(document,pageNumber,dpi);double scale=Math.min(1d,Math.sqrt(MAX_OCR_PIXELS/(double)((long)source.getWidth()*source.getHeight())));if(scale>=.999)return source;int w=Math.max(1,(int)Math.floor(source.getWidth()*scale)),h=Math.max(1,(int)Math.floor(source.getHeight()*scale));BufferedImage result=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB);Graphics2D g=result.createGraphics();try{g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,RenderingHints.VALUE_INTERPOLATION_BICUBIC);g.drawImage(source,0,0,w,h,null);}finally{g.dispose();source.flush();}return result;}
+            try(PDDocument document=loadPdf(pdf)){validatePage(document,pageNumber);PDPage page=document.getPage(pageNumber-1);BufferedImage source=renderPage(document,pageNumber,dpi);double scale=Math.min(1d,Math.sqrt(MAX_OCR_PIXELS/(double)((long)source.getWidth()*source.getHeight())));if(scale>=.999)return source;int w=Math.max(1,(int)Math.floor(source.getWidth()*scale)),h=Math.max(1,(int)Math.floor(source.getHeight()*scale));BufferedImage result=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB);Graphics2D g=result.createGraphics();try{g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,RenderingHints.VALUE_INTERPOLATION_BICUBIC);g.drawImage(source,0,0,w,h,null);}finally{g.dispose();source.flush();}return result;}
         } catch (CancelledException e) {
             throw new IOException("页面渲染已取消", e);
         } catch (ApiException e) {
