@@ -193,7 +193,8 @@ public final class DecisionModels {
     /** J01/6.5：不可变判断结果。原始 evidence 不因新策略修改而覆写。 */
     public record DecisionEvidence(
             String schemaVersion, String decisionId, String logicalRequestId, String physicalAttemptId,
-            String snapshotHash, String candidateSetHash, String questionTemplateVersion,
+            String snapshotHash, String candidateSetHash, String requestHash,
+            String questionTemplateVersion,
             String provider, String endpointIdentity, String requestedModel, String reportedModel,
             String providerContractVersion, String responseHash, String providerRequestId,
             ExecutionStatus executionStatus, NormalizedChoice choice, NormalizedNoul evidenceGap,
@@ -211,6 +212,7 @@ public final class DecisionModels {
             requireText("physicalAttemptId", physicalAttemptId);
             requireText("snapshotHash", snapshotHash);
             requireText("candidateSetHash", candidateSetHash);
+            requireText("requestHash", requestHash);
             requireText("questionTemplateVersion", questionTemplateVersion);
             requireText("provider", provider);
             requireText("endpointIdentity", endpointIdentity);

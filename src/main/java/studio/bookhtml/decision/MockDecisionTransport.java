@@ -15,11 +15,28 @@ import studio.bookhtml.service.BoundedHttp;
  */
 public class MockDecisionTransport implements DecisionTransport {
     private final ObjectMapper json = new ObjectMapper();
+    /** 测试钩子：发送计数；人工延迟（分片检查取消）。生产不用。 */
+    public final java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+    public volatile long delayMs = 0;
 
     @Override
     public BoundedHttp.Response send(HttpRequest request, long deadlineNanos, int maxBytes,
-                                     BooleanSupplier cancelled) {
-        if (cancelled.getAsBoolean()) throw new RuntimeException("mock cancelled");
+                                     BooleanSupplier cancelled) throws java.io.IOException {
+        if (cancelled.getAsBoolean())
+            throw new BoundedHttp.BoundedHttpException(BoundedHttp.Kind.CANCELLED, "mock cancelled");
+        calls.incrementAndGet();
+        long waited = 0;
+        while (waited < delayMs) {
+            if (cancelled.getAsBoolean())
+                throw new BoundedHttp.BoundedHttpException(BoundedHttp.Kind.CANCELLED, "mock cancelled");
+            try {
+                Thread.sleep(Math.min(20, delayMs - waited));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new BoundedHttp.BoundedHttpException(BoundedHttp.Kind.CANCELLED, "mock cancelled");
+            }
+            waited += 20;
+        }
         try {
             // 同步 BodyPublisher（ofByteArray/ofString）在 subscribe 返回前完成投递；满足本客户端构造的请求。
             java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();

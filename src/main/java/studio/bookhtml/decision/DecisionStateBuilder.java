@@ -1,18 +1,19 @@
 package studio.bookhtml.decision;
 
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
+import java.util.ArrayList;import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.time.Instant;
+import org.springframework.stereotype.Service;
 
 /**
  * J05：state 构建与版本化问题模板。强制保留目标原文、候选全集、来源等级、重要限制、
  * 影响语义的前后句、否定/数值条件与冲突证据；序列化前后都检查长度，不截断关键内容；
  * 候选顺序与 alias 映射纳入 hash；模板变更升级版本。
  */
+@Service
 public class DecisionStateBuilder {
     public static final String TEMPLATE_VERSION = "question-template-v1";
     public static final String CHOICE_ID = "best";
@@ -183,5 +184,21 @@ public class DecisionStateBuilder {
                 built.state(), TEMPLATE_VERSION);
         return new DecisionModels.DecisionSnapshot(hash, ref, candidateSetHash, built.state(),
                 built.keptRanges(), built.droppedRanges(), TEMPLATE_VERSION, Instant.now());
+    }
+
+    /**
+     * 别名反查：别名按候选顺序确定派生（C0..Cn），读时同样推导，不持久化映射；
+     * 哨兵别名返回 null。
+     */
+    public static String candidateIdForAlias(DecisionModels.CandidateSet set, String alias) {
+        if (set == null || alias == null || alias.length() < 2 || alias.charAt(0) != 'C') return null;
+        int index;
+        try {
+            index = Integer.parseInt(alias.substring(1));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        if (index < 0 || index >= set.candidates().size()) return null;
+        return set.candidates().get(index).candidateId();
     }
 }

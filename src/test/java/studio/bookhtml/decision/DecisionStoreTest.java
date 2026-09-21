@@ -83,7 +83,7 @@ class DecisionStoreTest {
         Instant now = Instant.now();
         DecisionStore.DecisionJob job = new DecisionStore.DecisionJob("job-1", "QUEUED", 1, "LOCATING",
                 "admission-1", null, id, 1, "b1", "i1", null, null, null, "op-1", null, List.of(),
-                0, "UNKNOWN", "NONE", now, now, now.plusSeconds(180));
+                0, "UNKNOWN", "NONE", now, now, now.plusSeconds(180), false);
         decisions.saveJob(id, job);
         assertEquals("job-1", decisions.findByAdmission(id, "admission-1").jobId());
         assertNull(decisions.findByAdmission(id, "other-key"));

@@ -84,6 +84,15 @@ public class JevDecisionClient {
                                long deadlineNanos, int maxRequestBytes, int maxResponseBytes,
                                BooleanSupplier cancelled) throws JevCallException {
         if (endpoint == null || endpoint.isBlank()) throw new JevCallException(Kind.PROTOCOL, "endpoint 为空");
+        URI uri;
+        try {
+            uri = URI.create(endpoint);
+        } catch (IllegalArgumentException e) {
+            throw new JevCallException(Kind.PROTOCOL, "endpoint 非法", e);
+        }
+        // 固定官方 HTTPS 端点；测试 loopback 仅限测试 profile 的 http 本地地址
+        if (!"https".equalsIgnoreCase(uri.getScheme()) && !"http".equalsIgnoreCase(uri.getScheme()))
+            throw new JevCallException(Kind.PROTOCOL, "endpoint 非法");
         if (apiKey == null || apiKey.isBlank()) throw new JevCallException(Kind.UNAUTHORIZED, "缺失 API key");
         if (model == null || model.isBlank()) throw new JevCallException(Kind.PROTOCOL, "模型为空");
         if (questions == null || questions.isEmpty()) throw new JevCallException(Kind.PROTOCOL, "问题为空");
@@ -107,7 +116,7 @@ public class JevDecisionClient {
         }
         if (body.length > maxRequestBytes)
             throw new JevCallException(Kind.TOO_LARGE, "请求超过最大字节限制");
-        HttpRequest request = HttpRequest.newBuilder(URI.create(endpoint))
+        HttpRequest request = HttpRequest.newBuilder(uri)
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body))

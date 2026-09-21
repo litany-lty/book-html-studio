@@ -4,14 +4,12 @@ import java.io.IOException;
 import java.net.http.HttpRequest;
 import java.time.Duration;
 import java.util.function.BooleanSupplier;
-import org.springframework.stereotype.Service;
 import studio.bookhtml.service.BoundedHttp;
 
 /**
  * F04/J04：共享有界传输的决策侧适配。单例复用，不为每次请求新建 client；
  * 不隐式重试、不跨渠道 fallback、不修 JSON。
  */
-@Service
 public class SharedTransport implements DecisionTransport, AutoCloseable {
     private final BoundedHttp http;
 

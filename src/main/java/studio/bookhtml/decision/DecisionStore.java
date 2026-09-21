@@ -162,9 +162,25 @@ public class DecisionStore {
                 BudgetState.class);
     }
 
-    /** 原子查找/登记准入键：调用方在付费生成候选前合并重复请求。 */
+    /** 原子查找/登记准入键：调用方在付费生成候选前合并重复请求；返回最新的一条。 */
     public DecisionJob findByAdmission(String bookId, String admissionKey) throws IOException {
         Path dir = decisionsDir(bookId).resolve("jobs");
+        if (!Files.exists(dir)) return null;
+        List<DecisionJob> matches = new ArrayList<>();
+        try (DirectoryStream<Path> entries = Files.newDirectoryStream(dir, "*.json")) {
+            for (Path file : entries) {
+                Optional<DecisionJob> job = readIsolated(file, DecisionJob.class);
+                if (job.isPresent() && admissionKey.equals(job.get().admissionKey())) matches.add(job.get());
+            }
+        }
+        matches.sort(Comparator.comparing(DecisionJob::createdAt).reversed());
+        return matches.isEmpty() ? null : matches.get(0);
+    }
+
+    /** 按请求内容 hash 查找已有完成证据（零费用复用），只读小文件目录。 */
+    public DecisionModels.DecisionEvidence findEvidenceByRequestHash(String bookId, String requestHash)
+            throws IOException {
+        Path dir = decisionsDir(bookId).resolve("results");
         if (!Files.exists(dir)) return null;
         List<Path> files = new ArrayList<>();
         try (DirectoryStream<Path> entries = Files.newDirectoryStream(dir, "*.json")) {
@@ -172,8 +188,11 @@ public class DecisionStore {
         }
         files.sort(Comparator.comparing(p -> p.getFileName().toString()));
         for (Path file : files) {
-            Optional<DecisionJob> job = readIsolated(file, DecisionJob.class);
-            if (job.isPresent() && admissionKey.equals(job.get().admissionKey())) return job.get();
+            Optional<DecisionModels.DecisionEvidence> evidence = readIsolated(file,
+                    DecisionModels.DecisionEvidence.class);
+            if (evidence.isPresent() && requestHash.equals(evidence.get().requestHash())
+                    && evidence.get().executionStatus() == DecisionModels.ExecutionStatus.SUCCEEDED)
+                return evidence.get();
         }
         return null;
     }
@@ -186,7 +205,7 @@ public class DecisionStore {
             String snapshotHash, String candidateSetHash, String decisionId,
             String clientOperationId, String verdict, List<String> reasonCodes,
             long reservedCostMinor, String costStatus, String cancellationState,
-            Instant createdAt, Instant updatedAt, Instant deadlineAt) {
+            Instant createdAt, Instant updatedAt, Instant deadlineAt, boolean allowFreshVision) {
         public DecisionJob {
             if (jobId == null || jobId.isBlank()) throw new IllegalArgumentException("jobId 为空");
             if (state == null || state.isBlank()) throw new IllegalArgumentException("state 为空");
@@ -195,5 +214,18 @@ public class DecisionStore {
             if (createdAt == null || updatedAt == null || deadlineAt == null)
                 throw new IllegalArgumentException("时间为空");
         }
+    }
+
+    /** 列出本书全部决策作业（重启恢复与审计用；状态查询走单文件，不用它）。 */
+    public List<DecisionJob> listJobs(String bookId) throws IOException {
+        Path dir = decisionsDir(bookId).resolve("jobs");
+        List<DecisionJob> jobs = new ArrayList<>();
+        if (!Files.exists(dir)) return jobs;
+        try (DirectoryStream<Path> entries = Files.newDirectoryStream(dir, "*.json")) {
+            for (Path file : entries)
+                readIsolated(file, DecisionJob.class).ifPresent(jobs::add);
+        }
+        jobs.sort(Comparator.comparing(DecisionJob::createdAt));
+        return jobs;
     }
 }
