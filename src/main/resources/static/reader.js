@@ -95,8 +95,9 @@ export function statusMessage(page) {
   if (page.status !== 'READY') return '本页尚未识别，原稿保留，可随时对照。';
   // U1：空白/纯图页使用轻量空态，不误报为识别失败，不诱导付费重试。
   if (!page.blocks?.length) return '本页为空白页或仅含插图，原稿保留，可切换原稿查看。';
-  const actionableWarnings = (page.warnings || []).filter(warning => !/尚未人工校对|自动结果仍需核对原图|自动原图复核候选/u.test(warning));
   // U1：默认阅读不拼出长技术条；多条提示只给一句话，详情进入校对/诊断。
+  // 处理追溯（通道/版式/PDF 指纹）是技术信息，只进诊断详情，不占阅读首屏。
+  const actionableWarnings = (page.warnings || []).filter(warning => !/尚未人工校对|自动结果仍需核对原图|自动原图复核候选|处理追溯/u.test(warning));
   if (actionableWarnings.length > 3) return '有多条版面提示，可在校对详情查看。';
   if (actionableWarnings.length) return `版面提示：${actionableWarnings.join('；')}`;
   return '';
@@ -131,7 +132,8 @@ export function qualityOf(page) {
 
 // U1：诊断详情保留完整技术信息（块数、参考置信度、provider、提示数），按需查看。
 export function qualityDiagnostics(page) {
-  return qualityOf(page).detail || '';
+  const trace = (page?.warnings || []).filter(warning => /处理追溯/u.test(warning)).join('；');
+  return [qualityOf(page).detail || '', trace].filter(Boolean).join(' · ');
 }
 
 function renderFacsimile(container, ctx) {

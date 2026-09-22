@@ -1750,8 +1750,18 @@ $('#paper').addEventListener('copy', event => {
   event.clipboardData.setData('text/plain',
     `${selection.toString()}\n［注：含未确认的辅助推荐，以原文与已确认文字为准］`);
 });
-$('#font-size').addEventListener('input', event => { state.fontSize = Number(event.target.value); $('#font-output').value = state.fontSize; renderCurrent(false); saveReadingPosition(); });
-$('#line-height').addEventListener('input', event => { state.lineHeight = Number(event.target.value); $('#line-output').value = state.lineHeight; renderCurrent(false); saveReadingPosition(); });
+// 字号/行距：拖动只改 CSS 变量即时反馈（不整页重渲），松手才统一重排与保存。
+function applyReadingMetrics() {
+  const flow = document.querySelector('#paper .reading-flow');
+  if (flow) {
+    flow.style.setProperty('--reading-size', `${state.fontSize}px`);
+    flow.style.setProperty('--reading-leading', String(state.lineHeight));
+  }
+}
+$('#font-size').addEventListener('input', event => { state.fontSize = Number(event.target.value); $('#font-output').value = state.fontSize; applyReadingMetrics(); });
+$('#font-size').addEventListener('change', () => { renderCurrent(false); saveReadingPosition(); });
+$('#line-height').addEventListener('input', event => { state.lineHeight = Number(event.target.value); $('#line-output').value = state.lineHeight; applyReadingMetrics(); });
+$('#line-height').addEventListener('change', () => { renderCurrent(false); saveReadingPosition(); });
 $('#prev-page').addEventListener('click', () => goToPage(state.currentPage - 1)); $('#next-page').addEventListener('click', () => goToPage(state.currentPage + 1));
 $('#jump-form').addEventListener('submit', event => { event.preventDefault(); commitPageInput(); }); $('#page-jump').addEventListener('change', commitPageInput);
 $('#reading-progress-range').addEventListener('input', event => renderReadingProgress(Number(event.target.value)));
@@ -1961,6 +1971,30 @@ $('#toc-toggle').addEventListener('click', () => openDrawer('toc')); $('#review-
 const readingOptions = $('#reading-options');
 globalThis.BookReaderFonts?.init?.('#reader-font', { noteElement: '#reader-font-note' });
 $('#reading-options-controls').append($('.reader-settings'));
+// 主题（宣纸/月白/夜阑）与书稿纸色（宣纸/米黄/豆沙绿）：本地记忆，即时生效。
+const THEME_KEY = 'book-html:theme:v1';
+const PAPER_TINT_KEY = 'book-html:paper-tint:v1';
+const themeSelect = $('#ui-theme');
+const tintSelect = $('#paper-tint');
+function applyTheme(theme, persist = true) {
+  const value = ['paper', 'clear', 'night'].includes(theme) ? theme : 'paper';
+  if (value === 'paper') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = value;
+  if (themeSelect) themeSelect.value = value;
+  if (persist) { try { localStorage.setItem(THEME_KEY, value); } catch (_) {} }
+}
+function applyPaperTint(tint, persist = true) {
+  const value = ['plain', 'cream', 'bean'].includes(tint) ? tint : 'plain';
+  if (value === 'plain') delete document.documentElement.dataset.paperTint;
+  else document.documentElement.dataset.paperTint = value;
+  if (tintSelect) tintSelect.value = value;
+  if (persist) { try { localStorage.setItem(PAPER_TINT_KEY, value); } catch (_) {} }
+}
+let storedTheme = 'paper'; let storedTint = 'plain';
+try { storedTheme = localStorage.getItem(THEME_KEY) || 'paper'; storedTint = localStorage.getItem(PAPER_TINT_KEY) || 'plain'; } catch (_) {}
+applyTheme(storedTheme, false); applyPaperTint(storedTint, false);
+themeSelect?.addEventListener('change', event => applyTheme(event.target.value));
+tintSelect?.addEventListener('change', event => applyPaperTint(event.target.value));
 $('#reading-options-open').addEventListener('click', () => readingOptions.showModal());
 $('#reading-options-close').addEventListener('click', () => readingOptions.close());
 readingOptions.addEventListener('close', () => $('#reading-options-open').focus({ preventScroll: true }));

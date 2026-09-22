@@ -143,6 +143,8 @@ export function renderIssueWorkbench(container, blocks, options) {
   const selectedIndex = Math.max(0, refs.findIndex(ref => ref.issue.id === options.selectedIssueId));
   const current = refs[selectedIndex];
   const unresolved = refs.filter(ref => !ref.synthetic && !ref.issue.resolved).length;
+  // 无未解决疑点时回到中性卡（0 不制造假警报）。
+  container.classList.toggle('is-clear', unresolved === 0);
 
   const header = document.createElement('header');
   const heading = document.createElement('div');

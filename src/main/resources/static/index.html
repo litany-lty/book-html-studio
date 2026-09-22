@@ -3,11 +3,24 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
   <title>纸页工坊</title>
   <link rel="icon" href="data:,">
+  <script>
+    // 主题/纸色先行应用，避免刷新闪白（纸页工坊 · 设计令牌「宣纸墨青」）
+    (function () {
+      try {
+        var theme = localStorage.getItem('book-html:theme:v1');
+        if (theme === 'clear' || theme === 'night') document.documentElement.dataset.theme = theme;
+        var tint = localStorage.getItem('book-html:paper-tint:v1');
+        if (tint === 'cream' || tint === 'bean') document.documentElement.dataset.paperTint = tint;
+      } catch (_) {}
+    })();
+  </script>
   <link rel="stylesheet" href="/styles.css">
-  <link rel="stylesheet" href="/fonts/reader-fonts.css">
+  <!-- 字体 CSS 非阻塞加载：首屏用系统字体，内置子集就绪后无感替换（约 330KB，不挡渲染） -->
+  <link rel="preload" href="/fonts/reader-fonts.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+  <noscript><link rel="stylesheet" href="/fonts/reader-fonts.css"></noscript>
 </head>
 <body data-reader-mode="reading">
   <a class="skip-link" href="#reader">跳到正文</a>
@@ -77,6 +90,8 @@
           <div class="view-switch" role="group" aria-label="显示方式"><button class="segmented" data-view="original" type="button">原稿</button><button class="segmented" data-view="facsimile" type="button">原版排布</button><button class="segmented active" data-view="reading" type="button">阅读</button></div>
           <div class="reader-primary-actions"><button id="reader-reload-page" class="button quiet reader-reload-btn" type="button" title="重新识别并排版当前页（二次处理）" hidden>重新处理本页</button><button id="reading-window-open" class="button quiet reading-window-open task-entry-quiet" type="button" aria-haspopup="dialog" aria-controls="reading-window-dialog" aria-pressed="false">任务</button><button id="proof-toggle" class="button quiet" type="button" aria-pressed="false" aria-controls="review-panel">校对</button><button id="reading-options-open" class="button quiet reading-options-open" type="button" aria-haspopup="dialog" aria-controls="reading-options">阅读设置</button></div>
           <div class="reader-settings">
+            <label>主题 <select id="ui-theme" aria-label="界面主题"><option value="paper">宣纸</option><option value="clear">月白</option><option value="night">夜阑</option></select></label>
+            <label>纸色 <select id="paper-tint" aria-label="书稿纸色"><option value="plain">宣纸</option><option value="cream">米黄</option><option value="bean">豆沙绿</option></select></label>
             <button id="focus-toggle" class="button quiet" type="button" aria-pressed="false">专注阅读</button>
             <button id="evidence-toggle" class="button quiet" type="button" aria-pressed="false">阅读依据：已确认</button>
             <button id="script-toggle" class="button quiet" type="button">显示：简体</button>
