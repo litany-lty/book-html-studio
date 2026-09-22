@@ -2,7 +2,7 @@ name: Reader audit verification
 
 on:
   push:
-    branches: [audit/reader-stream-context-security-20260922]
+    branches: [audit/reader-stream-verified-7aae566-20260922]
 
 permissions:
   contents: read
@@ -22,6 +22,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Apply integrity-checked source changes
+        id: apply
         shell: bash
         run: |
           mkdir -p test-results/audit
@@ -30,6 +31,8 @@ jobs:
           xz -dc /tmp/reader.patch.xz > /tmp/reader.patch
           git apply --check /tmp/reader.patch
           git apply /tmp/reader.patch
+          git apply --check .audit/followup.patch
+          git apply .audit/followup.patch
           git diff --check
           git rev-parse HEAD > test-results/audit/base-sha.txt
       - uses: actions/setup-java@v6
@@ -68,6 +71,7 @@ jobs:
       - name: Java regression tests
         run: mvn --batch-mode verify
       - name: Synthetic reader browser regression
+        if: ${{ !cancelled() && steps.apply.outcome == 'success' }}
         run: |
           python3 -m pip install --disable-pip-version-check playwright==1.51.1
           if ! command -v chromium && ! command -v google-chrome; then python3 -m playwright install --with-deps chromium; fi
@@ -75,7 +79,7 @@ jobs:
       - name: Publish verified source only on audit branch
         if: success()
         env:
-          AUDIT_BRANCH: audit/reader-stream-context-security-20260922
+          AUDIT_BRANCH: audit/reader-stream-verified-7aae566-20260922
         shell: bash
         run: |
           test "$GITHUB_REF" = "refs/heads/$AUDIT_BRANCH"
