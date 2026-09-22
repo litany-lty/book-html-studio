@@ -536,7 +536,12 @@ public class JobService {
                             List<String> mergedWarnings=new ArrayList<>(publishedPage.warnings()==null?List.of():publishedPage.warnings());
                             mergedWarnings.addAll(enriched.warnings());
                             Page enrichedPage=mergeUnresolvedIssues(publishedPage,new Page(publishedPage.pageNumber(),publishedPage.width(),publishedPage.height(),"READY",enriched.actualProvider(),enriched.blocks(),List.copyOf(mergedWarnings),false,null,publishedPage.sourceRecords()));
-                            if(isSignificantRegression(publishedPage,enrichedPage)||isEmptyResult(enrichedPage)){
+                            // U4：增强门比较正文块（增强不改写来源，不能比 sourceRecords）。
+                            int beforeChars=textChars(publishedPage.blocks());
+                            int afterChars=textChars(enrichedPage.blocks());
+                            boolean enhancementRegression=beforeChars>0&&afterChars<beforeChars*0.6;
+                            boolean enhancementEmpty=afterChars==0&&beforeChars>0;
+                            if(enhancementRegression||enhancementEmpty){
                                 try{store.writeCandidate(running.bookId,enrichedPage);}catch(IOException ignored){}
                                 if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"PARTIAL","ENHANCEMENT_SKIPPED_BASELINE_KEPT",false);
                             } else {
@@ -637,6 +642,8 @@ public class JobService {
     private static boolean overlaps(ContentIssue a,ContentIssue b){return a.start()<b.end()&&b.start()<a.end();}
     private static int length(String value){return value==null?0:value.length();}
     static int sourceChars(Page page){if(page==null)return 0;List<Block>records=page.sourceRecords()!=null&&!page.sourceRecords().isEmpty()?page.sourceRecords():page.blocks();if(records==null)return 0;return records.stream().map(Block::original).filter(Objects::nonNull).mapToInt(s->(int)s.codePoints().filter(cp->!Character.isWhitespace(cp)).count()).sum();}
+    /** U4：增强门比较正文块文本量（增强不改写来源记录）。 */
+    static int textChars(List<Block> blocks){if(blocks==null)return 0;return blocks.stream().map(Block::original).filter(Objects::nonNull).mapToInt(s->(int)s.codePoints().filter(cp->!Character.isWhitespace(cp)).count()).sum();}
     private static int blockChars(Page page){if(page==null||page.blocks()==null)return 0;return page.blocks().stream().map(Block::original).filter(Objects::nonNull).mapToInt(s->(int)s.codePoints().filter(cp->!Character.isWhitespace(cp)).count()).sum();}
     private static final class Running{final String bookId,fingerprint;final SettingsService.Lease lease;volatile boolean cancelled;boolean started;Thread thread;Future<?> future;Running(String bookId,String fingerprint,SettingsService.Lease lease){this.bookId=bookId;this.fingerprint=fingerprint;this.lease=lease;}}
 }
