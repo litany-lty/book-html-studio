@@ -9,6 +9,7 @@ import studio.bookhtml.domain.Page;
 import studio.bookhtml.store.BookStore;
 
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.function.BooleanSupplier;
@@ -20,6 +21,17 @@ public class PageProcessor {
     @Autowired public PageProcessor(BookStore store,PdfService pdf,NativeTextExtractor nativeText,TesseractService tesseract,CloudOcrPipeline qwenOcr,PaddleOcrPipeline paddle,MiniMaxVisionClient miniMax,QwenLayoutClient qwenLayout,QwenTocRecoveryService tocRecovery,SparsePageGuard sparsePageGuard,VerticalLayoutNormalizer verticalNormalizer,AssistedReviewService review,TraditionalConverter converter){this.store=store;this.pdf=pdf;this.nativeText=nativeText;this.tesseract=tesseract;this.qwenOcr=qwenOcr;this.paddle=paddle;this.miniMax=miniMax;this.qwenLayout=qwenLayout;this.tocRecovery=tocRecovery;this.sparsePageGuard=sparsePageGuard;this.verticalNormalizer=verticalNormalizer;this.review=review;this.converter=converter;}
     PageProcessor(BookStore store,PdfService pdf,NativeTextExtractor nativeText,TesseractService tesseract,CloudOcrPipeline qwenOcr,PaddleOcrPipeline paddle,MiniMaxVisionClient miniMax,QwenLayoutClient qwenLayout,QwenTocRecoveryService tocRecovery,VerticalLayoutNormalizer verticalNormalizer,AssistedReviewService review,TraditionalConverter converter){this(store,pdf,nativeText,tesseract,qwenOcr,paddle,miniMax,qwenLayout,tocRecovery,new SparsePageGuard(),verticalNormalizer,review,converter);}
     @Autowired public void setSettings(SettingsService settings){this.settings=settings;}
+    private studio.bookhtml.config.QwenAssistProperties assistConfig;
+    private QwenRequestGate gate;
+    private QwenTaskPlanner planner;
+    private QwenTextReviewClient reviewClient;
+    private QwenAssistCoordinator coordinator;
+    /** U5：分组增强装配（缺省关闭，旧整页路径为可控回滚）。 */
+    @Autowired(required=false) public void setAssistConfig(studio.bookhtml.config.QwenAssistProperties assistConfig){this.assistConfig=assistConfig;}
+    @Autowired(required=false) public void setRequestGate(QwenRequestGate gate){this.gate=gate;}
+    @Autowired(required=false) public void setTaskPlanner(QwenTaskPlanner planner){this.planner=planner;}
+    @Autowired(required=false) public void setTextReviewClient(QwenTextReviewClient reviewClient){this.reviewClient=reviewClient;}
+    @Autowired(required=false) public void setAssistCoordinator(QwenAssistCoordinator coordinator){this.coordinator=coordinator;}
     /**
      * U4：可读基线。与完整 process() 同一管线、关闭可选增强：提取/OCR → 原始证据校验 →
      * 发布安全可读版。Qwen 未完成不阻止读取。
@@ -169,6 +181,104 @@ public class PageProcessor {
         try{long size=java.nio.file.Files.size(pdfPath);long mtime=java.nio.file.Files.getLastModifiedTime(pdfPath).toMillis();return "处理追溯：页"+pageNumber+" 通道"+provider+" 版式"+layout+" PDF指纹"+Long.toHexString(size*31+mtime);}
         catch(Exception ignored){return "处理追溯：页"+pageNumber+" 通道"+provider+" 版式"+layout;}
     }
+    private record ChunkedOut(List<Block> blocks, String provider, List<String> warnings) {}
+
+    /**
+     * U5：分组增强尝试。条件：开关开启 + 协调器装配 + 结构服务可用 + 存在可核对文本组。
+     * 任一条件不满足或执行失败返回 null，调用方走旧整页路径（可控回滚）。
+     * 取消直接抛出（不回退，避免重复计费）。
+     */
+    private ChunkedOut tryChunkedAssist(String bookId, int pageNumber, List<Block> blocks,
+                                        BufferedImage image, String layout, String baseProvider,
+                                        BooleanSupplier cancelled) throws Exception {
+        if (assistConfig == null || !assistConfig.isChunkedAssist()) return null;
+        if (coordinator == null || planner == null || reviewClient == null) return null;
+        if (!qwenLayout.configured()) return null;
+        if (cancelled.getAsBoolean()) throw new CancelledException();
+        QwenTaskPlanner.PlannedReview plan = planner.planReview(blocks,
+                QwenTextReviewClient.PROMPT_VERSION, BookPresentationService.POLICY_VERSION);
+        if (plan.chunks().isEmpty()) return null;
+        Map<String, String> parentTexts = new HashMap<>();
+        for (Block block : blocks) {
+            if (block != null && block.id() != null && block.original() != null) {
+                parentTexts.putIfAbsent(block.id(), block.original());
+            }
+        }
+        Map<String, byte[]> regionImages = new HashMap<>();
+        for (QwenTaskPlanner.ChunkTask chunk : plan.chunks()) {
+            byte[] crop = cropChunkRegion(image, blocks, chunk);
+            if (crop == null) return null;
+            regionImages.put(chunk.chunkId(), crop);
+        }
+        byte[] overview;
+        try {
+            overview = qwenOcr.encodeWithin(image).bytes();
+        } catch (Exception e) {
+            return null;
+        }
+        regionImages.put("__overview__", overview);
+        QwenAssistCoordinator.CoordinateResult result = coordinator.coordinate(bookId, pageNumber,
+                blocks, parentTexts, plan, regionImages, null, layout, true, cancelled);
+        List<String> warnings = new ArrayList<>(result.warnings());
+        if (result.failedChunks() > 0) {
+            warnings.add(result.failedChunks() + " 组核对失败，已保留原文");
+        }
+        return new ChunkedOut(result.blocks(), baseProvider + result.actualProvider(), warnings);
+    }
+
+    /**
+     * U5：组区域裁图。 owned 块 bbox 取全页归一化坐标并集（fullX = x0 + u*w 恒等，
+     * 无局部坐标改写）；过小区域扩展到可辨尺寸；失败返回 null 走回滚。
+     */
+    private static byte[] cropChunkRegion(BufferedImage image, List<Block> blocks,
+                                          QwenTaskPlanner.ChunkTask chunk) {
+        try {
+            double x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+            boolean found = false;
+            java.util.Set<String> ownedIds = new java.util.HashSet<>();
+            for (QwenTaskPlanner.OwnedRange owned : chunk.ownedRanges()) {
+                ownedIds.add(owned.sourceId());
+            }
+            for (Block block : blocks) {
+                if (block == null || !ownedIds.contains(block.id())) continue;
+                double[] bbox = block.bbox();
+                if (bbox == null || bbox.length < 4) continue;
+                x0 = Math.min(x0, bbox[0]);
+                y0 = Math.min(y0, bbox[1]);
+                x1 = Math.max(x1, bbox[0] + bbox[2]);
+                y1 = Math.max(y1, bbox[1] + bbox[3]);
+                found = true;
+            }
+            if (!found) return null;
+            int width = image.getWidth(), height = image.getHeight();
+            // 过小区域扩展到页面 8%，保证可辨字（不为满足大小无限压缩原图）。
+            double minSpan = 0.08;
+            if (x1 - x0 < minSpan) {
+                double center = (x0 + x1) / 2;
+                x0 = Math.max(0, center - minSpan / 2);
+                x1 = Math.min(1, center + minSpan / 2);
+            }
+            if (y1 - y0 < minSpan) {
+                double center = (y0 + y1) / 2;
+                y0 = Math.max(0, center - minSpan / 2);
+                y1 = Math.min(1, center + minSpan / 2);
+            }
+            int px = Math.max(0, (int) (x0 * width));
+            int py = Math.max(0, (int) (y0 * height));
+            int pw = Math.min(width - px, (int) Math.ceil((x1 - x0) * width));
+            int ph = Math.min(height - py, (int) Math.ceil((y1 - y0) * height));
+            if (pw < 8 || ph < 8) return null;
+            BufferedImage crop = image.getSubimage(px, py, pw, ph);
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            if (!javax.imageio.ImageIO.write(crop, "png", output)) return null;
+            byte[] bytes = output.toByteArray();
+            if (bytes.length == 0 || bytes.length > 10 * 1024 * 1024) return null;
+            return bytes;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private AssistResult assistWithQwen(Path pdfPath,int pageNumber,List<Block>source,String layout,BooleanSupplier cancelled)throws Exception{if(!qwenLayout.configured())return new AssistResult(source,false,"Qwen3.8-Max 结构辅助未配置，本页仅保留原生文字层");BufferedImage image=pdf.renderForOcr(pdfPath,pageNumber);try{return new AssistResult(qwenLayout.assist(qwenOcr.encodeWithin(image).bytes(),source,layout,cancelled),true,null);}catch(CancelledException e){throw e;}catch(Exception e){String detail=JobService.safeDetail(e);return new AssistResult(source,false,"Qwen3.8-Max 结构辅助失败，本页已保留原生文字层"+(detail==null?"":"："+detail));}finally{image.flush();}}
     /**
      * U4：可选增强阶段。只产生候选/派生结构，从不直接保存整页；调用方（JobService）
@@ -194,9 +304,13 @@ public class PageProcessor {
         BufferedImage image=pdf.renderForOcr(store.pdf(bookId),pageNumber);
         try{
             if(baseNative&&wantPaddle){
+                ChunkedOut chunked=tryChunkedAssist(bookId,pageNumber,blocks,image,layout,actualProvider,cancelled);
+                if(chunked!=null){blocks=chunked.blocks();actualProvider=chunked.provider();warnings.addAll(chunked.warnings());}
+                else{
                 AssistResult result=assistWithQwen(store.pdf(bookId),pageNumber,blocks,layout,cancelled);
                 blocks=guardedAssist(blocks,result.blocks(),warnings,"Qwen3.8-Max 结构辅助来源校验失败，已保留原生文字层",QualityGate.GateOp.REORDER_OR_RECLASSIFY);
                 if(result.assisted())actualProvider="native+qwen-assist";else warnings.add(result.warning());
+                }
             }else if(baseNative&&wantQwen){
                 if(miniMax.configured()){
                     try{List<Block> assisted=miniMax.assist(qwenOcr.encodeWithin(image).bytes(),blocks,layout,cancelled);blocks=simplify(guardedAssist(blocks,assisted,warnings,"MiniMax 结构辅助来源校验失败，已保留原生文字层结果",QualityGate.GateOp.REORDER_OR_RECLASSIFY));actualProvider="native+minimax";}
@@ -209,8 +323,10 @@ public class PageProcessor {
                 if(recovery.warning()!=null)warnings.add(recovery.warning());
                 if(recovery.recovered()){blocks=guardedAssist(sourceRecords,recovery.blocks(),warnings,"目录恢复来源校验失败，已保留"+ocrLabel+"原始结果",QualityGate.GateOp.NEW_VISUAL_TRANSCRIPTION);actualProvider=actualProvider+"+qwen-toc-recovery";}
                 else if(recovery.attempted())blocks=guardedAssist(sourceRecords,recovery.blocks(),warnings,"目录恢复来源校验失败，已保留"+ocrLabel+"原始结果",QualityGate.GateOp.NEW_VISUAL_TRANSCRIPTION);
+                else{ChunkedOut chunked=tryChunkedAssist(bookId,pageNumber,blocks,image,layout,actualProvider,cancelled);
+                if(chunked!=null){blocks=chunked.blocks();actualProvider=chunked.provider();warnings.addAll(chunked.warnings());}
                 else if(shouldRunLayoutAssist(recovery)&&qwenLayout.configured()){try{List<Block> assisted=qwenLayout.assist(qwenOcr.encodeWithin(image).bytes(),blocks,layout,cancelled);blocks=guardedAssist(sourceRecords,assisted,warnings,"Qwen3.8-Max 结构辅助来源校验失败，已保留"+ocrLabel+"原始结果",QualityGate.GateOp.REORDER_OR_RECLASSIFY);actualProvider=actualProvider+"+qwen-assist";}catch(CancelledException e){throw e;}catch(Exception e){String detail=JobService.safeDetail(e);warnings.add("Qwen3.8-Max 结构辅助失败，本页已保留"+ocrLabel+"原始结果"+(detail==null?"":"："+detail));blocks=new ArrayList<>(sourceRecords);}}
-                else warnings.add("Qwen3.8-Max 结构辅助未配置，本页仅保留"+ocrLabel+"结果");
+                else warnings.add("Qwen3.8-Max 结构辅助未配置，本页仅保留"+ocrLabel+"结果");}
             }else if("qwen".equals(actualProvider)||(!baseNative&&wantQwen)){
                 if(miniMax.configured()){
                     try{byte[]png=qwenOcr.encodeWithin(image).bytes();List<Block> assisted=miniMax.assist(png,blocks,layout,cancelled);blocks=guardedAssist(sourceRecords,assisted,warnings,"MiniMax 结构辅助来源校验失败，已保留 Qwen OCR 原始结果",QualityGate.GateOp.MERGE_TEXT_STRUCTURE);if("vertical".equals(layout))blocks=verticalNormalizer.normalize(blocks,sourceRecords);actualProvider="qwen+minimax";List<Block> reviewed=review.review(image,blocks,cancelled);blocks=guardedAssist(blocks,reviewed,warnings,"局部复核来源校验失败，已保留辅助前结果",QualityGate.GateOp.REORDER_OR_RECLASSIFY);if(blocks.stream().anyMatch(b->b.source()!=null&&b.source().contains("qwen-review")))actualProvider="qwen+minimax+qwen-review";}
