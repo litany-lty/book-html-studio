@@ -22,6 +22,13 @@ RULES = {
 }
 ASSIGNMENT = re.compile(r'''(?i)(?:api[_-]?key|secret[_-]?key|access[_-]?token|password)\s*["']?\s*[:=]\s*["']([A-Za-z0-9_+./=-]{20,})["']''')
 PLACEHOLDER = re.compile(r"(?i)^(?:example|dummy|test|fake|placeholder)(?:[-_:]|$)")
+# Reviewed non-secret fixtures from the independent scanner tests and their Git history.
+# Exact values only: never exempt a whole test path, a prefix such as 'your-', or a
+# provider/private-key rule. These literals are intentionally not credentials.
+REVIEWED_SENTINELS = frozenset({
+    "your-placeholder-value-not-a-real-secret",
+    "your-api-key-replace-with-secret",
+})
 MAX_TEXT_BYTES = 4 * 1024 * 1024
 
 
@@ -45,7 +52,7 @@ def findings(data: bytes, path: str, object_id: str = "") -> list[dict]:
         value = match.group(1)
         frequencies = collections.Counter(value)
         entropy = -sum((n / len(value)) * math.log2(n / len(value)) for n in frequencies.values())
-        if PLACEHOLDER.match(value) or re.fullmatch(r"[A-Z_]+", value) or entropy < 3.5:
+        if value in REVIEWED_SENTINELS or PLACEHOLDER.match(value) or re.fullmatch(r"[A-Z_]+", value) or entropy < 3.5:
             continue
         result.append({"path": path, "line": text.count("\n", 0, match.start()) + 1,
                        "rule": "high-entropy-credential", "object": object_id})
