@@ -11,3 +11,13 @@
 *.iml
 __pycache__/
 *.pyc
+
+# Private runtime configuration at any depth; keep non-secret examples.
+**/.env
+**/.env.*
+!**/.env.example
+**/.settings/
+**/.secrets/
+
+# Generated verification evidence is uploaded by CI, never source-controlled.
+/test-results/
