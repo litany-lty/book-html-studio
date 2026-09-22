@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, jev-m1]
+    branches: [main, jev-m1, 'audit/**']
   pull_request:
 
 permissions:
@@ -11,8 +11,12 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Record tested SHA
         run: |
           echo "testedCommit=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
@@ -38,6 +42,14 @@ jobs:
           done
           node scripts/verification/probe_display.js
           node scripts/verification/probe_job_scope.js
+      - name: Reader streaming and credential guards
+        shell: bash
+        run: |
+          mkdir -p test-results/security
+          node --test scripts/verification/reader_stream_audit.test.mjs
+          python3 scripts/verification/secret_scan.py --self-test
+          python3 scripts/verification/scan_secrets.py --report test-results/security/tracked-files.json
+          python3 scripts/verification/secret_scan.py --history | tee test-results/security/reachable-history.txt
       - name: Python verification tests
         shell: bash
         run: |
@@ -60,6 +72,7 @@ jobs:
             target/surefire-reports/
             test-results/
           if-no-files-found: warn
+          retention-days: 7
       - name: Untested items (explicit NOT_RUN/BLOCKED, not simulated)
         if: always()
         run: |

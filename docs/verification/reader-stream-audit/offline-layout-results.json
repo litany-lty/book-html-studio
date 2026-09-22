@@ -1,0 +1,25 @@
+{
+  "scope": "offline DOM/CSS only; application-HTTP E2E BLOCKED by browser policy",
+  "checks": [
+    {
+      "width": 1440,
+      "adjacent": true,
+      "sameRow": true,
+      "right": true,
+      "noOverflow": true,
+      "visible": true,
+      "save": [518.03125, 206.015625, 50.015625, 16.796875],
+      "progress": [578.4375, 205.015625, 87.359375, 19.96875]
+    },
+    {
+      "width": 390,
+      "adjacent": true,
+      "sameRow": true,
+      "right": true,
+      "noOverflow": true,
+      "visible": true,
+      "save": [9, 312, 50.015625, 16.796875],
+      "progress": [69.40625, 311, 81.109375, 19.96875]
+    }
+  ]
+}
