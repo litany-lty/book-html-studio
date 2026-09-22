@@ -18,6 +18,32 @@ jobs:
           echo "testedCommit=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "checkoutSHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           git status --porcelain
+      - name: Record review source manifest
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib, subprocess, zipfile
+          root = pathlib.Path.cwd()
+          out = root / 'test-results'
+          out.mkdir(exist_ok=True)
+          sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+          text_extensions = {'.java', '.js', '.mjs', '.py', '.sh', '.properties', '.xml', '.json', '.html', '.css', '.md', '.yml', '.yaml', '.txt'}
+          entries = []
+          with zipfile.ZipFile(out / 'review-source.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
+              for name in sorted(filter(None, paths)):
+                  path = root / name
+                  if path.is_symlink() or not path.is_file():
+                      entries.append({'path': name, 'review': 'NOT_READ', 'snapshot': 'EXCLUDED_NON_REGULAR'})
+                      continue
+                  data = path.read_bytes()
+                  include = path.suffix in text_extensions and not path.name.startswith('.env')
+                  entries.append({'path': name, 'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data), 'review': 'NOT_READ', 'snapshot': 'INCLUDED' if include else 'EXCLUDED_BINARY_OR_PRIVATE_CONFIG'})
+                  if include:
+                      archive.writestr(name, data)
+              archive.writestr('REVIEW-SNAPSHOT-SHA.txt', sha + '\n')
+          (out / 'source-manifest.json').write_text(json.dumps({'schemaVersion': 1, 'testedCommit': sha, 'note': 'Inventory only; NOT_READ does not claim an audit or a passing secret scan.', 'files': entries}, ensure_ascii=False, indent=2) + '\n')
+          PY
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -59,6 +85,7 @@ jobs:
           path: |
             target/surefire-reports/
             test-results/
+          retention-days: 7
           if-no-files-found: warn
       - name: Untested items (explicit NOT_RUN/BLOCKED, not simulated)
         if: always()
