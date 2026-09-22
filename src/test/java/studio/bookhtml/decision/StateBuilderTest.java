@@ -46,7 +46,7 @@ class StateBuilderTest {
         assertFalse(choice.contains(DecisionStateBuilder.GAP_ID));
         assertFalse(gap.contains(DecisionStateBuilder.CHOICE_ID));
         assertFalse(gap.contains("best"));
-        assertEquals("question-template-v2", DecisionStateBuilder.TEMPLATE_VERSION);
+        assertEquals("question-template-v3-book-context", DecisionStateBuilder.TEMPLATE_VERSION);
     }
 
     @Test void overBudgetDropsOptionalFirstThenRefuses() throws Exception {

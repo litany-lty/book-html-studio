@@ -152,15 +152,15 @@ function render(settings) {
   setSelectValue(field('jevModel'), settings.jev?.model, 'jev-1.13.0');
   field('jevBudgetUnits').value = settings.jev?.budgetUnits || '';
   field('jevAllowCloudData').checked = Boolean(settings.jev?.allowCloudData);
-  field('paddleAccessToken').value = settings.ocr?.paddleAiStudio?.accessToken || '';
+  field('paddleAccessToken').value = ''; // Only a newly typed replacement may enter this field.
   if (settings.ocr?.paddleAiStudio?.accessTokenSet) field('paddleAccessToken').placeholder = '•••••••• （服务端已保存凭据）';
-  field('ppocrApiKey').value = settings.ocr?.ppocr?.apiKey || '';
+  field('ppocrApiKey').value = ''; // Only a newly typed replacement may enter this field.
   if (settings.ocr?.ppocr?.apiKeySet) field('ppocrApiKey').placeholder = '•••••••• （服务端已保存凭据）';
-  field('ppocrSecretKey').value = settings.ocr?.ppocr?.secretKey || '';
+  field('ppocrSecretKey').value = ''; // Only a newly typed replacement may enter this field.
   if (settings.ocr?.ppocr?.secretKeySet) field('ppocrSecretKey').placeholder = '•••••••• （服务端已保存凭据）';
-  field('qwenApiKey').value = settings.qwen?.apiKey || '';
+  field('qwenApiKey').value = ''; // Only a newly typed replacement may enter this field.
   if (settings.qwen?.apiKeySet) field('qwenApiKey').placeholder = '•••••••• （服务端已保存凭据）';
-  field('jevApiKey').value = settings.jev?.apiKey || '';
+  field('jevApiKey').value = ''; // Only a newly typed replacement may enter this field.
   if (settings.jev?.apiKeySet) field('jevApiKey').placeholder = '•••••••• （服务端已保存凭据）';
   document.querySelectorAll('.password-toggle-btn').forEach(btn => {
     const input = field(btn.dataset.target);

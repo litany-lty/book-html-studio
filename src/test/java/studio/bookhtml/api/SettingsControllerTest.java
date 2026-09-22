@@ -32,8 +32,8 @@ class SettingsControllerTest {
         MockHttpServletRequest get = request("GET");
         Map<String, Object> initial = controller.get(get).getBody();
         String token = (String) initial.get("csrfToken");
-        assertTrue(json.writeValueAsString(initial).contains("env-studio-secret"));
-        assertEquals("env-studio-secret", ((Map<?, ?>)((Map<?, ?>) initial.get("ocr")).get("paddleAiStudio")).get("accessToken"));
+        assertFalse(json.writeValueAsString(initial).contains("env-studio-secret"));
+        assertEquals("", ((Map<?, ?>)((Map<?, ?>) initial.get("ocr")).get("paddleAiStudio")).get("accessToken"));
         assertTrue(json.writeValueAsString(initial).contains("accessTokenSet"));
         assertEquals("no-store", controller.get(get).getHeaders().getCacheControl());
 
@@ -59,6 +59,25 @@ class SettingsControllerTest {
         assertEquals(1, restarted.state().revision());
         restarted.update(json.readTree("{\"revision\":1,\"ocr\":{\"paddleAiStudio\":{\"clearAccessToken\":true}}}"));
         assertEquals("", service().state().paddleAccessToken());
+    }
+
+    @Test
+    void allCredentialViewsAndUpdateResponsesAreWriteOnly() throws Exception {
+        SettingsService settings = service();
+        var response = settings.update(json.readTree("""
+                {"revision":0,"ocr":{"ppocr":{"apiKey":"test-private-pp-api","secretKey":"test-private-pp-secret"}},
+                 "qwen":{"apiKey":"test-private-qwen"},"jev":{"apiKey":"test-private-jev"}}
+                """));
+        for (String secret : java.util.List.of("env-studio-secret", "test-private-pp-api",
+                "test-private-pp-secret", "test-private-qwen", "test-private-jev")) {
+            assertFalse(json.writeValueAsString(response).contains(secret));
+            assertFalse(json.writeValueAsString(settings.view()).contains(secret));
+            assertFalse(settings.state().toString().contains(secret));
+        }
+        assertTrue(((Map<?, ?>)response.get("qwen")).get("apiKeySet").equals(true));
+        assertEquals("test-private-qwen", settings.state().qwenApiKey(), "Internal outbound still uses the configured key");
+        settings.update(json.readTree("{\"revision\":1,\"qwen\":{\"apiKey\":\"\"}}"));
+        assertEquals("test-private-qwen", settings.state().qwenApiKey(), "Empty UI value does not erase the saved credential");
     }
 
     @Test

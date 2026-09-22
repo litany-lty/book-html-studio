@@ -185,7 +185,7 @@ public class PageProcessor {
 
     /**
      * U5：分组增强尝试。条件：开关开启 + 协调器装配 + 结构服务可用 + 存在可核对文本组。
-     * 任一条件不满足或执行失败返回 null，调用方走旧整页路径（可控回滚）。
+     * 调用前条件不满足返回 null，允许旧路径回滚；已调用后的失败只保留基线，不重复计费。
      * 取消直接抛出（不回退，避免重复计费）。
      */
     private ChunkedOut tryChunkedAssist(String bookId, int pageNumber, List<Block> blocks,
@@ -224,8 +224,8 @@ public class PageProcessor {
         } catch (CancelledException e) {
             throw e;
         } catch (Exception e) {
-            // 可控回滚：分组失败走旧整页路径，不抛错中断增强。
-            return null;
+            // A dispatched request may already be billed. Never retry through another paid path.
+            return new ChunkedOut(blocks, baseProvider, List.of("分组核对未完成，已保留原文；不会自动改用整页重复调用"));
         }
         List<String> warnings = new ArrayList<>(result.warnings());
         if (result.failedChunks() > 0) {

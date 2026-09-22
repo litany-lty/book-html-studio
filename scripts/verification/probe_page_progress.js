@@ -1,0 +1,35 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+(async () => {
+  const source = fs.readFileSync('src/main/resources/static/page-progress.js', 'utf8');
+  const { progressView, createPageProgress } = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+  const run = { bookId: 'b', pageNumber: 1, attemptId: 'a', snapshotVersion: 4, startedAt: '2026-01-01T00:00:00Z',
+    lifecycle: 'RUNNING', stage: 'REVIEW', canRead: true, units: { kind: 'REVIEW_CHUNK', total: 4, succeeded: 2 } };
+  assert.equal(progressView(run, 'READY').percent, 77);
+  assert.equal(progressView({...run, lastProgressAt: '1900-01-01'}, 'READY').percent, 77, 'elapsed time must not fabricate progress');
+  assert.equal(progressView({...run, lifecycle: 'FAILED', stage: 'PUBLISHING'}, 'READY').percent, 97);
+  assert.equal(progressView({...run, lifecycle: 'SUCCEEDED'}, 'READY').percent, 100);
+  assert.equal(progressView(null, 'PENDING').percent, 0);
+  assert.equal(progressView(null, 'READY').hidden, true);
+  assert.ok(progressView({...run, units: {kind: 'REVIEW_CHUNK', total: 1, succeeded: 99999}}, 'READY').percent < 100);
+  const node = {hidden: true, dataset: {}, textContent: ''};
+  const state = {book: {id: 'b'}, currentPage: 1, page: {status: 'READY'}};
+  const progress = createPageProgress({state, api: {}, element: () => node});
+  progress.accept(run);assert.match(node.textContent,/77%/);
+  progress.accept({...run,snapshotVersion: 3,stage: 'OCR'});assert.match(node.textContent,/77%/);
+  progress.accept({...run,bookId:'other',stage:'OCR'});assert.match(node.textContent,/77%/);
+  progress.accept({...run,attemptId:'next',startedAt:'2026-01-02',snapshotVersion:0,stage:'OCR',canRead:false});
+  assert.match(node.textContent,/10%/);
+  progress.accept({...run,snapshotVersion:100});assert.match(node.textContent,/10%/,'late prior attempt cannot replace the retry');
+  progress.reset();assert.equal(node.hidden,true);
+  progress.accept(run);
+  progress.accept({...run,attemptId:'fractional',startedAt:'2026-01-01T00:00:00.123Z',snapshotVersion:0,stage:'OCR',canRead:false});
+  assert.match(node.textContent,/10%/,'fractional ISO instant is newer than the same whole second');
+  progress.accept({...run,attemptId:'invalid',startedAt:'invalid',snapshotVersion:99});
+  assert.match(node.textContent,/10%/,'invalid attempt timestamp must not replace a known attempt');
+  progress.reset();
+  const html=fs.readFileSync('src/main/resources/static/index.html','utf8');
+  assert.match(html,/id="page-save-status"[^>]*><\/span><span id="page-processing-progress"/);
+  console.log('PAGE_PROGRESS_PASS: work units, terminal state, scope, stale attempts, DOM placement');
+})().catch(error=>{console.error(error);process.exitCode=1;});

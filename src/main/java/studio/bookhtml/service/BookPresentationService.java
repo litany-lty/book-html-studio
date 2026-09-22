@@ -13,6 +13,12 @@ import studio.bookhtml.store.BookStore;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.RejectedExecutionException;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -37,12 +43,38 @@ public class BookPresentationService {
     private final BookStore store;
     private PresentationOverrideService overrides;
     // U6：画像内存缓存；失效唯一来源是存储变更通知（保守：任何页/书变更即失效）。
-    private final Map<String, BookLayoutProfile> profileCache = new ConcurrentHashMap<>();
+    private record CachedProfile(long generation, BookLayoutProfile value) {}
+    private final Map<String, CachedProfile> profileCache = new ConcurrentHashMap<>();
+    private final AtomicLong profileGeneration = new AtomicLong();
+    private final Object[] profileLocks = new Object[32];
     private final AtomicLong cacheHits = new AtomicLong();
+    // Cold/invalidated profiles must eventually recover without blocking first paint.
+    // One worker, a bounded queue and per-book cooldown coalesce rapid OCR commits.
+    private final ThreadPoolExecutor profileWorker = new ThreadPoolExecutor(1, 1, 30,
+            TimeUnit.SECONDS, new ArrayBlockingQueue<>(16), task -> {
+                Thread thread = new Thread(task, "book-profile-refresh");
+                thread.setDaemon(true); return thread;
+            }, new ThreadPoolExecutor.AbortPolicy());
+    private final Set<String> refreshingProfiles = ConcurrentHashMap.newKeySet();
+    private final Map<String, Long> refreshAfter = new LinkedHashMap<>();
+    private volatile boolean asynchronousProfiles;
+
+    @PostConstruct public void enableAsynchronousProfiles() {
+        profileWorker.allowCoreThreadTimeOut(true);
+        asynchronousProfiles = true;
+    }
+
+    @PreDestroy public void closeProfiles() {
+        asynchronousProfiles = false;
+        profileWorker.shutdownNow();
+        refreshingProfiles.clear();
+        synchronized (refreshAfter) { refreshAfter.clear(); }
+    }
 
     public BookPresentationService(BookStore store) {
         this.store = store;
-        store.addChangeListener(profileCache::remove);
+        for (int i = 0; i < profileLocks.length; i++) profileLocks[i] = new Object();
+        store.addChangeListener(id -> { profileGeneration.incrementAndGet(); profileCache.remove(id); });
     }
 
     @Autowired(required = false)
@@ -124,11 +156,52 @@ public class BookPresentationService {
     // ---------- 画像构建 ----------
 
     public BookLayoutProfile buildProfile(String bookId) {
+        synchronized (profileLocks[Math.floorMod(bookId.hashCode(), profileLocks.length)]) {
+            return rebuildProfile(bookId);
+        }
+    }
+
+    /** No full-book I/O on first paint or frequent progress polling. */
+    public BookLayoutProfile readingProfile(String bookId) {
+        CachedProfile cached = profileCache.get(bookId);
+        if (cached != null && cached.generation() == profileGeneration.get()) return cached.value();
+        refreshInBackground(bookId);
+        return BookLayoutProfile.empty(bookId, POLICY_VERSION);
+    }
+
+    private void refreshInBackground(String bookId) {
+        if (!asynchronousProfiles || refreshingProfiles.contains(bookId)) return;
+        long now = System.nanoTime();
+        synchronized (refreshAfter) {
+            if (now - refreshAfter.getOrDefault(bookId, now) < 0) return;
+            if (!refreshingProfiles.add(bookId)) return;
+            if (refreshAfter.size() >= 64) refreshAfter.remove(refreshAfter.keySet().iterator().next());
+            refreshAfter.put(bookId, now + TimeUnit.SECONDS.toNanos(5));
+        }
+        try {
+            profileWorker.execute(() -> {
+                try { buildProfile(bookId); }
+                catch (RuntimeException ignored) {
+                    // Deleted books or changing source: retain conservative presentation.
+                    // A later read retries after cooldown; never retry a paid model call.
+                } finally { refreshingProfiles.remove(bookId); }
+            });
+        } catch (RejectedExecutionException rejected) { refreshingProfiles.remove(bookId); }
+    }
+
+    private void cacheProfile(String bookId, long generation, BookLayoutProfile profile) {
+        if (generation != profileGeneration.get()) return;
+        if (profileCache.size() >= 64) profileCache.clear();
+        profileCache.put(bookId, new CachedProfile(generation, profile));
+    }
+
+    private BookLayoutProfile rebuildProfile(String bookId) {
+        long generation = profileGeneration.get();
         // U6：无变更直接返回缓存（失效唯一来源是存储变更通知），避免每页请求全书扫描。
-        BookLayoutProfile cached = profileCache.get(bookId);
-        if (cached != null) {
+        CachedProfile cached = profileCache.get(bookId);
+        if (cached != null && cached.generation() == generation) {
             cacheHits.incrementAndGet();
-            return cached;
+            return cached.value();
         }
         Book book = store.readBook(bookId);
         List<Page> observed = new ArrayList<>();
@@ -181,7 +254,7 @@ public class BookPresentationService {
                 previous == null ? 1 : previous.profileRevision(),
                 POLICY_VERSION, observed.size(), clusters, java.time.Instant.now());
         if (previous != null && previous.clusterSignature().equals(candidate.clusterSignature())) {
-            profileCache.put(bookId, previous);
+            cacheProfile(bookId, generation, previous);
             return previous;
         }
         BookLayoutProfile published = new BookLayoutProfile(bookId,
@@ -192,7 +265,7 @@ public class BookPresentationService {
         } catch (Exception ignored) {
             // sidecar 写失败不阻塞原稿打开；调用方继续使用内存画像。
         }
-        profileCache.put(bookId, published);
+        cacheProfile(bookId, generation, published);
         return published;
     }
 

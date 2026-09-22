@@ -99,9 +99,10 @@ class ProcessingProgressTest {
                 .thenAnswer(inv -> baselineResult(inv.getArgument(1), "基线正文" + inv.getArgument(1)));
         when(processor.enrichBaseline(eq(book.id()), anyInt(), any(), anyString(), anyString(), any()))
                 .thenAnswer(inv -> {
-                    enrichEntered.countDown();
-                    assertTrue(enrichRelease.await(4, TimeUnit.SECONDS));
                     int n = inv.getArgument(1);
+                    // Neighbours may enter enrichment before page 1. Observe this page only.
+                    if (n == 1) enrichEntered.countDown();
+                    assertTrue(enrichRelease.await(4, TimeUnit.SECONDS));
                     return new PageProcessor.EnrichResult(List.of(text("e" + n, "增强正文" + n)),
                             "paddle-aistudio+qwen-assist", List.of());
                 });
@@ -121,6 +122,7 @@ class ProcessingProgressTest {
         assertTrue(snap.canRead());
         enrichRelease.countDown();
         await(() -> "增强正文1".equals(store.readPage(book.id(), 1).blocks().get(0).original()));
+        await(() -> "SUCCEEDED".equals(progress.latest(book.id(), 1).lifecycle()));
         ProcessingSnapshot done = progress.latest(book.id(), 1);
         assertEquals("ENHANCED", done.contentAvailability());
         assertEquals("SUCCEEDED", done.lifecycle());

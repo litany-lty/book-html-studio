@@ -58,6 +58,7 @@ export const api = {
   pages: id => request(`/books/${encodeURIComponent(id)}/pages`),
   outline: id => request(`/books/${encodeURIComponent(id)}/outline`),
   page: (id, n, signal) => request(`/books/${encodeURIComponent(id)}/pages/${n}`, signal ? { signal } : {}),
+  pageProgress: (id, n, signal) => request(`/books/${encodeURIComponent(id)}/pages/${n}/progress`, signal ? { signal } : {}),
   issueMetadata: (id, n, issueId, signal) => request(`/books/${encodeURIComponent(id)}/pages/${n}/issues/${encodeURIComponent(issueId)}`, signal ? { signal } : {}),
   pageImage: (id, n, width = 1800) => `${API_ROOT}/books/${encodeURIComponent(id)}/pages/${n}/image?width=${width}`,
   figureImage: (id, n, blockId) => `${API_ROOT}/books/${encodeURIComponent(id)}/pages/${n}/figures/${encodeURIComponent(blockId)}`,

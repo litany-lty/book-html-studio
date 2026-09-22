@@ -139,26 +139,19 @@ public class ReadingWindowService {
     }
 
     private void retryPage(Session session, int pageNumber, Instant now) {
-        // U2：安全重新处理。保持当前可读 Page 不变（不在此处写 PENDING），经统一准入
-        // 校验版本/人工保护/活动 attempt 后创建独立 attempt；后台候选经 CAS 通过才替换。
-        // 幂等键绑定本次会话序号：同序号重复提交走 update() 的同序号快照路径，不重复派发。
+        if (session.lastRetrySequence == session.sequence) return;
         Page page = store.readPage(session.bookId, pageNumber);
         if (page == null) return;
+        if (page.reviewed() || "manual".equals(page.provider()))
+            throw new ApiException(HttpStatus.CONFLICT, "本页含人工校对内容，请使用明确覆盖确认流程");
+        session.lastRetrySequence = session.sequence;
+        if (session.processingPages.contains(pageNumber)) return;
         String operationId = "window:" + session.sessionId + ":" + session.sequence + ":" + pageNumber;
-        PageReprocessRequest request = new PageReprocessRequest(
-                BookStore.revisionOrZero(page), operationId, false, session.provider, session.assist);
-        try {
-            jobs.requestReprocess(session.reservation, session.bookId, pageNumber, request,
-                    session.provider, session.layout, session.splitSpreads, session.assist);
-        } catch (ApiException conflict) {
-            // 已有活动 attempt 或人工保护：不清空、不重派发，仅把该页排到队首等待自然收尾。
-            session.message = conflict.getMessage();
-        }
+        session.retryRequests.put(pageNumber, new PageReprocessRequest(
+                BookStore.revisionOrZero(page), operationId, false, session.provider, session.assist));
         session.dispatched.remove(pageNumber);
         session.queued.remove(Integer.valueOf(pageNumber));
         session.queued.addFirst(pageNumber);
-        // U2：显式重试页进入重试集；tick 以 force=true 派发（绕过 PENDING 门），
-        // 仍受容量与本次授权约束，不清空当前可读内容。
         session.retryPages.add(pageNumber);
         session.notBefore = now;
         tick();
@@ -288,15 +281,18 @@ public class ReadingWindowService {
                 }
                 if (retryChannel == null) break;
                 try {
-                    jobs.submitReserved(s.reservation, s.bookId, new JobRequest(String.valueOf(retry),
-                            retryChannel, s.layout, s.splitSpreads, true, s.assist));
+                    jobs.requestReprocess(s.reservation, s.bookId, retry, s.retryRequests.get(retry),
+                            retryChannel, s.layout, s.splitSpreads, s.assist);
+                    s.retryRequests.remove(retry);
                     s.retryPages.remove(Integer.valueOf(retry));
                     s.dispatched.add(retry);
                     s.processingPages.add(retry);
                     s.processingChannels.put(retry, retryChannel);
                 } catch (ApiException busy) {
                     s.retryPages.remove(Integer.valueOf(retry));
-                    if (!s.queued.contains(retry)) s.queued.addLast(retry);
+                    s.retryRequests.remove(retry);
+                    s.queued.remove(Integer.valueOf(retry));
+                    s.message = busy.getMessage();
                 } catch (RuntimeException error) {
                     s.retryPages.remove(Integer.valueOf(retry));
                     s.dispatched.remove(retry);
@@ -344,11 +340,8 @@ public class ReadingWindowService {
             }
         }
 
-        // 2. If centerPage is still not ready (either running or waiting), do not start background prefetch
-        if (centerEligible || s.processingPages.contains(center)) {
-            if (!s.processingPages.isEmpty()) s.status = "PROCESSING";
-            return;
-        }
+        // Foreground dispatch is first, not a barrier: use idle slots for nearby pages
+        // while OCR/review of the center is still running. Already sent requests drain.
 
         // 3. Center page is ready: check if any subsequent (next 5) pages are still pending dispatch
         boolean hasSubsequentPending = false;
@@ -390,6 +383,10 @@ public class ReadingWindowService {
 
     private void fillAvailableSlots(Session s, List<String> channels, int center, boolean hasSubsequentPending) {
         while (!s.queued.isEmpty()) {
+            // Keep one foreground slot available when only prefetch jobs are running.
+            int backgroundLimit = Math.max(1, channels.size() * CHANNEL_CONCURRENCY - 1);
+            long background = s.processingPages.stream().filter(p -> p != center).count();
+            if (background >= backgroundLimit) break;
             int peek = s.queued.peekFirst();
             if (peek < center && hasSubsequentPending) {
                 break;
@@ -472,7 +469,7 @@ public class ReadingWindowService {
         List<ReadingWindowResponse.PageState> pages = new ArrayList<>();
         // U3：一次快照共用同一画像构建，避免每页重复扫描；画像更新影响前页时由
         // profileRevision 触发目录更新，旧单页逻辑不反灌（见 app.js）。
-        BookLayoutProfile profile = presentation == null ? null : presentation.buildProfile(s.bookId);
+        BookLayoutProfile profile = presentation == null ? null : presentation.readingProfile(s.bookId);
         for (int n = s.fromPage; n <= s.toPage; n++) {
             Page page = store.readPage(s.bookId, n);
             // U4：当前页处理快照来自真实阶段事件；无事件时为 null，前端不伪造进度。
@@ -510,6 +507,8 @@ public class ReadingWindowService {
         s.status = status;
         s.message = message;
         s.queued.clear();
+        s.retryPages.clear();
+        s.retryRequests.clear();
     }
 
     private void finish(Session s) {
@@ -579,6 +578,8 @@ public class ReadingWindowService {
         final Set<Integer> dispatched = new HashSet<>();
         // U2：用户显式重试页。绕过 PENDING 资格门（force=true），仍受容量/授权约束。
         final Set<Integer> retryPages = ConcurrentHashMap.newKeySet();
+        final Map<Integer, PageReprocessRequest> retryRequests = new HashMap<>();
+        long lastRetrySequence;
         final Set<Integer> processingPages = ConcurrentHashMap.newKeySet();
         final Map<Integer, String> processingChannels = new ConcurrentHashMap<>();
         long sequence;

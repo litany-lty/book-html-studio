@@ -160,7 +160,7 @@ class QwenTextReviewClientTest {
                 png(), null, true, budget, () -> false);
         assertEquals(1, result.findings().size());
         assertEquals(2, calls.get(), "429 重试受总预算约束");
-        assertEquals(before - 1, budget.remaining(), "重试不重复预留预算");
+        assertEquals(before - 2, budget.remaining(), "每次物理请求均消耗预算，包括 429 重试");
         assertEquals(0, gate.inFlight(), "槽位已释放");
     }
 
@@ -195,5 +195,24 @@ class QwenTextReviewClientTest {
                 client.reviewChunk(task, parents, png(), null, true, budget, () -> false);
         assertEquals(1, calls.get(), "缓存命中不调用");
         assertEquals(1, second.findings().size());
+    }
+    @Test void imageAndBookContextChangesInvalidateReviewCache() throws Exception {
+        String text="甲乙丙丁";var task=chunk("review-context","s1",text);
+        AtomicInteger calls=new AtomicInteger();
+        var gate=new QwenRequestGate(new QwenAssistProperties());
+        var client=client(request->{calls.incrementAndGet();return httpResponse(200,envelope("review-context","[]"));},gate);
+        BookContextService context=mock(BookContextService.class);
+        when(context.forPage("book",1)).thenReturn("chapter-A","chapter-A","chapter-B","chapter-B");
+        client.setBookContext(context);
+        try(var ignored=UsageContext.open("book",1,"TEST")) {
+            client.reviewChunk(task,Map.of("s1",text),png(),null,true,gate.newBudget(),()->false);
+            client.reviewChunk(task,Map.of("s1",text),png(),null,true,gate.newBudget(),()->false);
+            assertEquals(1,calls.get());
+            client.reviewChunk(task,Map.of("s1",text),png(),null,true,gate.newBudget(),()->false);
+            assertEquals(2,calls.get(),"new chapter material is a distinct inference input");
+            byte[] different=java.util.Arrays.copyOf(png(),png().length+1);
+            client.reviewChunk(task,Map.of("s1",text),different,null,true,gate.newBudget(),()->false);
+            assertEquals(3,calls.get(),"same OCR text with a different crop must not reuse a decision");
+        }
     }
 }

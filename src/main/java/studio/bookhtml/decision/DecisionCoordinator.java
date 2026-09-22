@@ -50,6 +50,11 @@ public class DecisionCoordinator {
     private final PdfIdentity pdfIdentity;
     private final CandidateResolutionService resolution;
     private final EvidenceCollector evidence;
+    private studio.bookhtml.service.BookContextService bookContext;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setBookContext(studio.bookhtml.service.BookContextService bookContext) {
+        this.bookContext = bookContext;
+    }
     private final DecisionStateBuilder stateBuilder;
     private final JevDecisionClient jev;
     private final DecisionProperties config;
@@ -757,7 +762,8 @@ public class DecisionCoordinator {
             }
 
             // 状态构建与快照先行持久化
-            List<String> neighbors = neighborTexts(page, block, 2);
+            List<String> neighbors = new ArrayList<>(neighborTexts(page, block, 2));
+            if (bookContext != null) neighbors.add(0, bookContext.forPage(bookId, page.pageNumber()));
             DecisionStateBuilder.BuiltState built;
             try {
                 built = stateBuilder.build(ref, frozenOriginal, set, neighbors, false,

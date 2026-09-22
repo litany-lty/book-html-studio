@@ -20,7 +20,11 @@ import java.util.concurrent.atomic.AtomicLong;
 @Component
 public class QwenRequestGate {
     private final QwenAssistProperties config;
-    private volatile Semaphore global;
+    private static final class Slots extends Semaphore {
+        Slots() { super(0, true); }
+        void shrink(int amount) { reducePermits(amount); }
+    }
+    private final Slots global = new Slots();
     private volatile int maxConcurrent;
     private volatile int maxBackground;
     private volatile int maxQueued;
@@ -35,12 +39,15 @@ public class QwenRequestGate {
         refresh();
     }
 
-    /** 配置变更通过版本化快照生效：重建信号量（在途 permit 保留在旧实例上自然收尾）。 */
+    /** Resize the same semaphore: in-flight requests retain their physical slots. */
     public synchronized void refresh() {
-        this.maxConcurrent = Math.max(1, config.getMaxConcurrentRequests());
-        this.maxBackground = Math.max(0, Math.min(config.getMaxBackgroundRequests(), maxConcurrent - 1));
-        this.maxQueued = Math.max(0, config.getMaxQueuedChunks());
-        this.global = new Semaphore(maxConcurrent, true);
+        int next = Math.max(1, Math.min(16, config.getMaxConcurrentRequests()));
+        int delta = next - maxConcurrent;
+        maxConcurrent = next;
+        maxBackground = Math.max(0, Math.min(config.getMaxBackgroundRequests(), next - 1));
+        maxQueued = Math.max(0, Math.min(1024, config.getMaxQueuedChunks()));
+        if (delta > 0) global.release(delta);
+        else if (delta < 0) global.shrink(-delta);
     }
 
     /** 每页面尝试的物理调用预算（结构 + 局部组 + 目录恢复 + 重试共享）。 */
@@ -65,12 +72,13 @@ public class QwenRequestGate {
             long millis = timeout == null ? 30_000 : Math.max(1, timeout.toMillis());
             taken = global.tryAcquire(millis, TimeUnit.MILLISECONDS);
             if (!taken) return null;
-            if (!foreground && inFlight.get() >= maxBackground) {
-                global.release();
-                taken = false;
-                return null;
+            int now;
+            synchronized (this) {
+                if (!foreground && inFlight.get() >= maxBackground) {
+                    global.release(); taken = false; return null;
+                }
+                now = inFlight.incrementAndGet();
             }
-            int now = inFlight.incrementAndGet();
             maxObservedInFlight.accumulateAndGet(now, Math::max);
             physicalCalls.incrementAndGet();
             return new Permit();
@@ -100,7 +108,7 @@ public class QwenRequestGate {
 
     /** 物理 permit：只在请求与响应流实际收尾后释放。 */
     public final class Permit implements AutoCloseable {
-        private boolean closed;
+        private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
         private final boolean noop;
 
         private Permit() {
@@ -113,8 +121,7 @@ public class QwenRequestGate {
 
         @Override
         public void close() {
-            if (closed || noop) return;
-            closed = true;
+            if (noop || !closed.compareAndSet(false, true)) return;
             inFlight.decrementAndGet();
             global.release();
         }
@@ -135,6 +142,7 @@ public class QwenRequestGate {
 
         /** 预留 n 次；不足返回 false（调用方明确部分增强，不偷偷追加）。 */
         public boolean reserve(int n) {
+            if (n < 0) throw new IllegalArgumentException("Negative reservation");
             while (true) {
                 int current = remaining.get();
                 if (current < n) return false;
@@ -143,6 +151,7 @@ public class QwenRequestGate {
         }
 
         public void release(int n) {
+            if (n < 0) throw new IllegalArgumentException("Negative release");
             remaining.addAndGet(n);
         }
 

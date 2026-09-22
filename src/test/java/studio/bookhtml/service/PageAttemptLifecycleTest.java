@@ -275,12 +275,12 @@ class PageAttemptLifecycleTest {
     @Test void safe1011_bothConfiguredStillPrimaryOnlyWithoutParallelAuthorization() throws Exception {
         setup(10);
         settings.update(json.readTree("{\"revision\":0,\"ocr\":{\"ppocr\":{\"apiKey\":\"pp-key\",\"secretKey\":\"pp-secret\"}}}"));
-        // 中心页已就绪，tick 走后台填充，一次占满主通道 3 个槽位。
+        // 中心页已就绪：后台最多占 2 槽，预留 1 槽供跳页；次通道仍未获授权。
         store.writePage(book.id(), new Page(1, 600, 800, "READY", "paddle-aistudio",
                 List.of(text("b1", "t")), List.of(), false, null,
                 List.of(text("b1", "t"))), false);
         List<String> providers = new CopyOnWriteArrayList<>();
-        CountDownLatch entered = new CountDownLatch(3);
+        CountDownLatch entered = new CountDownLatch(2);
         CountDownLatch release = new CountDownLatch(1);
         when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
@@ -293,11 +293,13 @@ class PageAttemptLifecycleTest {
         windows.update(book.id(), request(session, 1, 1));
         clock.advance(Duration.ofSeconds(1));
         windows.tick();
-        assertTrue(entered.await(3, TimeUnit.SECONDS));
-        assertTrue(providers.stream().allMatch("paddle-aistudio"::equals), "次通道请求数为 0");
-        release.countDown();
+        try {
+            assertTrue(entered.await(3, TimeUnit.SECONDS));
+            assertEquals(2, providers.size(), "后台不耗尽当前页保留槽");
+            assertTrue(providers.stream().allMatch("paddle-aistudio"::equals), "次通道请求数为 0");
+        } finally { release.countDown(); }
         // 等待后台写收尾再结束，避免临时目录清理时仍有打开句柄。
-        await(() -> "READY".equals(store.readPage(book.id(), 4).status()));
+        await(() -> "READY".equals(store.readPage(book.id(), 3).status()));
     }
 
     @Test void safe15_diskFailureNeverReportedAsSuccessAndKeepsOldContent() throws Exception {

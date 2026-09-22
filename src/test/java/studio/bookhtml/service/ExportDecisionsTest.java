@@ -152,7 +152,7 @@ class ExportDecisionsTest {
         config.setMonetaryBudgetMinor(100L);
         // JR-08-T03/T06：导出仅含正式推荐；测试用匹配档产生 RECOMMEND/KEEP_CURRENT
         config.setCalibrationStatus("VALIDATED");
-        config.setCalibrationProfile("cal-v1|model=mock-model|template=question-template-v2"
+        config.setCalibrationProfile("cal-v1|model=mock-model|template=question-template-v3-book-context"
                 + "|candidate=candidate-config-v4|policy=decision-policy-v1"
                 + "|threshold=pilot-default-v1|dataset=test|result=test-ok");
         MockDecisionTransport transport = new HighScoreTransport();
@@ -206,7 +206,7 @@ class ExportDecisionsTest {
         assertEquals("KEEP_CURRENT", entry.get("verdict"));
         assertNotNull(entry.get("candidateSetHash"));
         assertNotNull(entry.get("decisionId"));
-        assertEquals("question-template-v2", entry.get("templateVersion"));
+        assertEquals("question-template-v3-book-context", entry.get("templateVersion"));
         assertEquals("decision-policy-v1", entry.get("policyVersion"));
         String raw = new ObjectMapper().writeValueAsString(summaries);
         assertFalse(raw.contains("test-key"), "不得泄漏密钥");

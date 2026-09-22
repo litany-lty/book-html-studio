@@ -15,7 +15,7 @@ const deferred = () => {
   const source = fs.readFileSync('src/main/resources/static/reading-window.js', 'utf8');
   const { nearbyPages, createReadingWindow } = await import(`data:text/javascript,${encodeURIComponent(source)}`);
   assert.deepEqual(nearbyPages(1, 12), [2, 3, 4, 5, 6]);
-  assert.deepEqual(nearbyPages(7, 12), [6, 8, 5, 9, 4, 10, 3, 11, 2, 12]);
+  assert.deepEqual(nearbyPages(7, 12), [8, 6, 9, 5, 10, 4, 11, 3, 12, 2]);
   const posts = [], stops = [], pageCalls = [], ready = [], errors = [];
   const pendingPage = () => { const result = deferred(); pageCalls.push(result); return result.promise; };
   const state = { book: { id: 'book', totalPages: 80 }, currentPage: 30, pageCache: new Map() };
@@ -172,7 +172,7 @@ const deferred = () => {
   const renders = { book: 0, toc: 0 };
   const metadataContext = vm.createContext({ state: metadataState, Map, Number, JSON,
     renderBookMeta: () => { renders.book++; }, renderToc: () => { renders.toc++; } });
-  vm.runInContext(`const readingMetadataSignatures = new Map(); const readingMetadataVersions = new Map();
+  vm.runInContext(`const readingMetadataSignatures = new Map(); const readingMetadataVersions = new Map(); const readingMetadataProfiles = new Map();
     ${extract('olderRevision')} ${extract('sameOutline')} ${extract('mergeReadingMetadata')}`, metadataContext);
   const ready42 = { pageNumber: 42, status: 'READY', revision: 1,
     summary: { ...initial(42), status: 'READY', blockCount: 1, title: '章节' },

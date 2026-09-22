@@ -15,7 +15,7 @@ import org.springframework.stereotype.Service;
  */
 @Service
 public class DecisionStateBuilder {
-    public static final String TEMPLATE_VERSION = "question-template-v2";
+    public static final String TEMPLATE_VERSION = "question-template-v3-book-context";
     public static final String CHOICE_ID = "best";
     public static final String GAP_ID = "gap";
 
@@ -149,7 +149,7 @@ public class DecisionStateBuilder {
                                 + "has a textLayer: ORIGINAL_TRANSCRIPT is a source-script transcription; "
                                 + "LEGACY_DISPLAY_HYPOTHESIS is an old unverified display guess, never "
                                 + "treat it as image-confirmed. Do not assume "
-                                + "that fluent wording matches the source image. Do not invent visual facts. "
+                                + "that fluent wording matches the source image. Book/chapter context is an unverified semantic prior, not independent visual evidence. Do not invent visual facts. "
                                 + "If none is supported choose NONE_SUPPORTED; if a unique choice needs "
                                 + "additional source evidence choose NEED_MORE_EVIDENCE.",
                         criteria),

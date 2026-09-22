@@ -11,3 +11,21 @@
 *.iml
 __pycache__/
 *.pyc
+
+# Credentials and machine-local configuration; examples contain placeholders only.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+credentials*.json
+settings.json
+application-local.properties
+application-local.yml
+application-local.yaml
+
+/test-results/
+/audit-evidence/
