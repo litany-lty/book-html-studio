@@ -75,6 +75,7 @@ public class ApiController {
         try{return presentation.buildProfile(id).profileRevision();}catch(RuntimeException e){return 0;}
     }
     @GetMapping("/books/{id}/pages/{n}") public Map<String,Object> page(@PathVariable String id,@PathVariable int n){return pagePayload(id,books.page(id,n));}
+    @GetMapping("/books/{id}/reader/pages/{n}") public Map<String,Object> readerPage(@PathVariable String id,@PathVariable int n){return pagePayload(id,books.page(id,n),true);}
     @GetMapping(value="/books/{id}/pages/{n}/image",produces=MediaType.IMAGE_PNG_VALUE) public byte[] image(@PathVariable String id,@PathVariable int n,@RequestParam(defaultValue="1800")@Min(196) int width){return books.image(id,n,width);}
     @GetMapping(value="/books/{id}/pages/{n}/figures/{blockId}",produces=MediaType.IMAGE_PNG_VALUE) public byte[] figure(@PathVariable String id,@PathVariable int n,@PathVariable String blockId){return books.figure(id,n,blockId);}
     @GetMapping(value="/books/{id}/pages/{n}/issues/{issueId}/image",produces=MediaType.IMAGE_PNG_VALUE) public byte[] issueImage(@PathVariable String id,@PathVariable int n,@PathVariable String issueId,@RequestParam(defaultValue="false")boolean context){Page page=books.page(id,n);IssueImageService.Snippet snippet=issueImages.locateOne(id,page,issueId);if(snippet==null)throw new ApiException(HttpStatus.NOT_FOUND,"未找到该疑点原图");return context?snippet.contextPng():snippet.png();}
@@ -94,9 +95,10 @@ public class ApiController {
     }
     @GetMapping("/books/{id}/search") public List<Map<String,Object>> search(@PathVariable String id,@RequestParam String q){return books.search(id,q);}
     @GetMapping(value="/books/{id}/export",produces="application/zip") public void export(@PathVariable String id,@RequestParam(required=false)String pages,HttpServletResponse response)throws IOException{Book book=books.get(id);String ascii="book-"+book.id()+".zip";response.setHeader(HttpHeaders.CONTENT_DISPOSITION,"attachment; filename=\""+ascii+"\"; filename*=UTF-8''"+java.net.URLEncoder.encode(book.title()+".zip",StandardCharsets.UTF_8).replace("+","%20"));export.writeZip(id,response.getOutputStream(),pages);}
-    private Map<String,Object> pagePayload(String bookId,Page page){Page readingPage=ReadingStructureNormalizer.normalize(page);LinkedHashMap<String,Object>payload=json.convertValue(readingPage,new TypeReference<>(){});LinkedHashMap<String,Object>metadata=new LinkedHashMap<>();
+    private Map<String,Object> pagePayload(String bookId,Page page){return pagePayload(bookId,page,false);}
+    private Map<String,Object> pagePayload(String bookId,Page page,boolean firstPaint){Page readingPage=ReadingStructureNormalizer.normalize(page);LinkedHashMap<String,Object>payload=json.convertValue(readingPage,new TypeReference<>(){});LinkedHashMap<String,Object>metadata=new LinkedHashMap<>();
         // U3：规范 Page 字段 + 只读展示投影（阅读器消费展示决策，编辑器处理真实保存对象）。
-        if(presentation!=null){try{PagePresentation view=presentation.project(bookId,page);payload.put("presentation",json.convertValue(view,new TypeReference<LinkedHashMap<String,Object>>(){}));}catch(RuntimeException ignored){}}
+        if(presentation!=null){try{PagePresentation view=firstPaint?presentation.projectCached(bookId,page):presentation.project(bookId,page);payload.put("presentation",json.convertValue(view,new TypeReference<LinkedHashMap<String,Object>>(){}));}catch(RuntimeException ignored){}}
         // 阶段2：正文读取只返回轻量疑点索引与证据状态，不触发高清渲染；点击疑字后按需请求精确证据
         issueImages.summarize(page).forEach((issueId,snippet)->{String src="/api/books/"+UriUtils.encodePathSegment(bookId,StandardCharsets.UTF_8)+"/pages/"+page.pageNumber()+"/issues/"+UriUtils.encodePathSegment(issueId,StandardCharsets.UTF_8)+"/image";metadata.put(issueId,Map.of("mode",snippet.mode(),"glyphCount",snippet.glyphCount(),"bbox",snippet.bbox(),"boxes",snippet.boxes(),"src",src,"contextBbox",snippet.contextBbox(),"contextSrc",src+"?context=true","pending",true));});payload.put("issueImages",metadata);return payload;}
 }

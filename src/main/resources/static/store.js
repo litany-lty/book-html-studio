@@ -70,7 +70,8 @@ const key = (bookId, suffix) => `paper-studio:${bookId}:${suffix}`;
 
 export function loadPreferences(bookId) {
   try {
-    return JSON.parse(localStorage.getItem(key(bookId, 'reading')) || '{}');
+    const value = JSON.parse(localStorage.getItem(key(bookId, 'reading')) || '{}');
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   } catch (_) { return {}; }
 }
 
@@ -80,7 +81,8 @@ export function savePreferences(bookId, value) {
 }
 
 export function getBookmarks(bookId) {
-  try { return JSON.parse(localStorage.getItem(key(bookId, 'bookmarks')) || '[]'); }
+  try { const value = JSON.parse(localStorage.getItem(key(bookId, 'bookmarks')) || '[]');
+    return Array.isArray(value) ? value.filter(n => Number.isSafeInteger(n) && n > 0) : []; }
   catch (_) { return []; }
 }
 

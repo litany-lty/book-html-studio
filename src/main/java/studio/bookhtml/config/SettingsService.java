@@ -76,14 +76,14 @@ public class SettingsService {
         out.put("busy", busy());
         Map<String, Object> paddleMap = new LinkedHashMap<>();
         paddleMap.put("accessTokenSet", has(s.paddleAccessToken()));
-        paddleMap.put("accessToken", s.paddleAccessToken() == null ? "" : s.paddleAccessToken());
+
         paddleMap.put("configured", has(s.paddleAccessToken()));
         paddleMap.put("model", "PaddleOCR-VL-1.6");
         Map<String, Object> ppocrMap = new LinkedHashMap<>();
         ppocrMap.put("apiKeySet", has(s.ppocrApiKey()));
-        ppocrMap.put("apiKey", s.ppocrApiKey() == null ? "" : s.ppocrApiKey());
+
         ppocrMap.put("secretKeySet", has(s.ppocrSecretKey()));
-        ppocrMap.put("secretKey", s.ppocrSecretKey() == null ? "" : s.ppocrSecretKey());
+
         ppocrMap.put("configured", has(s.ppocrApiKey()) && has(s.ppocrSecretKey()));
         ppocrMap.put("model", "PP-OCRv6");
         out.put("ocr", Map.of("defaultProvider", s.defaultProvider(), "fallbackEnabled", s.fallbackEnabled(),
@@ -92,7 +92,7 @@ public class SettingsService {
         Map<String, Object> qwenMap = new LinkedHashMap<>();
         qwenMap.put("enabled", s.qwenEnabled());
         qwenMap.put("apiKeySet", has(s.qwenApiKey()));
-        qwenMap.put("apiKey", s.qwenApiKey() == null ? "" : s.qwenApiKey());
+
         qwenMap.put("region", s.qwenRegion());
         qwenMap.put("workspaceId", s.qwenWorkspaceId());
         qwenMap.put("model", s.qwenModel());
@@ -102,7 +102,7 @@ public class SettingsService {
         Map<String, Object> j = new LinkedHashMap<>();
         j.put("enabled", s.jevEnabled());
         j.put("apiKeySet", has(s.jevApiKey()));
-        j.put("apiKey", s.jevApiKey() == null ? "" : s.jevApiKey());
+
         j.put("model", s.jevModel());
         j.put("mode", jev.getMode());
         j.put("budgetUnits", s.budgetUnits() == null ? "" : s.budgetUnits().toString());

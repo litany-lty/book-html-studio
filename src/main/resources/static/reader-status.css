@@ -1,0 +1,10 @@
+/* The status stays adjacent to save state; no overlay, animation or reading-area progress bar. */
+.page-head > div:first-child { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; min-width: 0; }
+.page-processing-progress { display: inline-block; min-inline-size: 8.5em; padding: .15em .25em .3em; white-space: nowrap; font-size: .78rem; font-variant-numeric: tabular-nums; line-height: 1.4; color: var(--muted, #666); border-bottom: 2px solid currentColor; background: linear-gradient(to right, currentColor var(--page-progress, 0%), transparent 0) left bottom / 100% 1px no-repeat; }
+.page-processing-progress[hidden] { display: none !important; }
+.page-processing-progress[data-state="settled"] { border-bottom-style: dotted; }
+.page-status-pair { display: inline-flex; align-items: center; gap: .5rem; white-space: nowrap; }
+.page-save-status { flex-shrink: 0; }
+#reading-window-auto-start { accent-color: currentColor; }
+@media (max-width: 600px) { .page-head { align-items: flex-start; gap: .5rem; } .page-processing-progress { min-inline-size: 7.5em; } }
+@media (prefers-reduced-motion: reduce) { .page-head *, .reading-window-bar * { animation: none !important; transition: none !important; } }

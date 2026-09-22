@@ -128,10 +128,11 @@ class ReadingWindowServiceTest {
         release.countDown();
         await(() -> "READY".equals(store.readPage(book.id(), 8).status()));
         windows.tick();
-        assertEquals(List.of(8), calls); // completion did not dispatch the old queue
+        assertTrue(calls.stream().allMatch(n -> n == 8 || n == 9)); // only the already-dispatched neighbor may finish
         advanceAndTick(Duration.ofSeconds(1));
-        await(() -> calls.size() >= 2);
-        assertEquals(List.of(8, 17), calls.subList(0, 2));
+        await(() -> calls.contains(17));
+        assertEquals(1, calls.stream().filter(n -> n == 8).count());
+        assertFalse(calls.contains(10), "the old undispatched window must be dropped");
     }
 
     @Test void currentPageLoadsInParallelWithExistingInFlightPage() throws Exception {
@@ -166,7 +167,8 @@ class ReadingWindowServiceTest {
         ReadingWindowResponse parallel = windows.get(book.id(), session);
         assertEquals(4, parallel.processingPage());
         assertTrue(parallel.processingPages().containsAll(List.of(4, 1)));
-        assertEquals(List.of(4, 1), parallel.processingPages());
+        assertEquals(4, parallel.processingPages().get(0));
+        assertTrue(parallel.processingPages().size() <= 3);
 
         // 5. Release both to complete cleanly
         release1.countDown();
@@ -179,7 +181,7 @@ class ReadingWindowServiceTest {
 
     @Test void fullConcurrencyWaitsForNaturalFinishInsteadOfPreempting() throws Exception {
         setup(20);
-        // Page 1 is already ready, so tick dispatches background prefetch pages 2, 3, 4
+        // Background prefetch reserves the third slot for a later foreground page.
         store.writePage(book.id(), new Page(1, 600, 800, "READY", "paddle", List.of(), List.of(), false, null), false);
         CountDownLatch entered2 = new CountDownLatch(1), entered3 = new CountDownLatch(1), entered4 = new CountDownLatch(1);
         CountDownLatch releaseAll = new CountDownLatch(1);
@@ -200,12 +202,15 @@ class ReadingWindowServiceTest {
         advanceAndTick(Duration.ofSeconds(1));
         assertTrue(entered2.await(2, TimeUnit.SECONDS));
         assertTrue(entered3.await(2, TimeUnit.SECONDS));
+        assertEquals(1, entered4.getCount(), "background work must leave a foreground slot");
+        windows.update(book.id(), request(session, 2, 4));
+        advanceAndTick(Duration.ofSeconds(1));
         assertTrue(entered4.await(2, TimeUnit.SECONDS));
 
         // 3 background pages are now running (2, 3, 4). Concurrency is full (3/3).
         // User navigates to Page 10. U2: no preemptive kill of in-flight cloud requests;
         // page 10 waits queued-first while 2/3/4 finish naturally.
-        windows.update(book.id(), request(session, 2, 10));
+        windows.update(book.id(), request(session, 3, 10));
         advanceAndTick(Duration.ofSeconds(1));
 
         assertFalse(entered10.await(300, TimeUnit.MILLISECONDS), "center must wait, not preempt in-flight requests");
@@ -353,7 +358,7 @@ class ReadingWindowServiceTest {
         // Page 8 is already ready, so background prefetch will trigger for window around 8 (5..13)
         store.writePage(book.id(), new Page(8, 600, 800, "READY", "paddle", List.of(), List.of(), false, null), false);
 
-        CountDownLatch entered3 = new CountDownLatch(3);
+        CountDownLatch entered3 = new CountDownLatch(2);
         CountDownLatch releaseAll = new CountDownLatch(1);
         Map<Integer, String> invokedChannels = new ConcurrentHashMap<>();
 
@@ -371,18 +376,18 @@ class ReadingWindowServiceTest {
         windows.update(book.id(), request(session, 1, 8));
         advanceAndTick(Duration.ofSeconds(1));
 
-        assertTrue(entered3.await(2, TimeUnit.SECONDS), "3 concurrent tasks must be started on the primary channel");
+        assertTrue(entered3.await(2, TimeUnit.SECONDS), "two speculative tasks leave one foreground slot");
         ReadingWindowResponse res = windows.get(book.id(), session);
-        assertEquals(3, res.processingPages().size());
+        assertEquals(2, res.processingPages().size());
 
         long paddleCount = invokedChannels.values().stream().filter("paddle-aistudio"::equals).count();
         long ppocrCount = invokedChannels.values().stream().filter("ppocr"::equals).count();
-        assertEquals(3, paddleCount, "primary channel carries the session load");
+        assertEquals(2, paddleCount, "primary channel carries the session load");
         assertEquals(0, ppocrCount, "secondary channel must see 0 requests without explicit parallel authorization");
 
         releaseAll.countDown();
         await(() -> "READY".equals(store.readPage(book.id(), 9).status()));
-        await(() -> "READY".equals(store.readPage(book.id(), 7).status()));
+        await(() -> "READY".equals(store.readPage(book.id(), 10).status()));
     }
 
     @Test void fullSecondaryCapacityStillWaitsInsteadOfPreempting() throws Exception {
@@ -390,7 +395,7 @@ class ReadingWindowServiceTest {
         settings.update(json.readTree("{\"revision\":0,\"ocr\":{\"ppocr\":{\"apiKey\":\"pp-key\",\"secretKey\":\"pp-secret\"}}}"));
         store.writePage(book.id(), new Page(8, 600, 800, "READY", "paddle", List.of(), List.of(), false, null), false);
 
-        // U2 default is primary-only: 3 slots. Fill them with blocking background pages.
+        // U2 is primary-only. Two prefetches plus a foreground navigation fill all three slots.
         CountDownLatch entered3 = new CountDownLatch(3);
         CountDownLatch entered18 = new CountDownLatch(1);
         CountDownLatch releaseAll = new CountDownLatch(1);
@@ -410,11 +415,14 @@ class ReadingWindowServiceTest {
         UUID session = UUID.randomUUID();
         windows.update(book.id(), request(session, 1, 8));
         advanceAndTick(Duration.ofSeconds(1));
+        await(() -> entered3.getCount() == 1);
+        windows.update(book.id(), request(session, 2, 12));
+        advanceAndTick(Duration.ofSeconds(1));
         assertTrue(entered3.await(2, TimeUnit.SECONDS));
 
         // 3 pages are running. Now navigate to page 18: it must wait queued-first,
         // in-flight pages are never killed to free a slot.
-        windows.update(book.id(), request(session, 2, 18));
+        windows.update(book.id(), request(session, 3, 18));
         advanceAndTick(Duration.ofSeconds(1));
 
         assertFalse(entered18.await(300, TimeUnit.MILLISECONDS));
@@ -432,7 +440,7 @@ class ReadingWindowServiceTest {
         settings.update(json.readTree("{\"revision\":0,\"ocr\":{\"paddleAiStudio\":{\"clearAccessToken\":true},\"ppocr\":{\"apiKey\":\"pp-key\",\"secretKey\":\"pp-secret\"}}}"));
         store.writePage(book.id(), new Page(8, 600, 800, "READY", "ppocr", List.of(), List.of(), false, null), false);
 
-        CountDownLatch entered3 = new CountDownLatch(3);
+        CountDownLatch entered3 = new CountDownLatch(2);
         CountDownLatch releaseAll = new CountDownLatch(1);
         Map<Integer, String> invokedChannels = new ConcurrentHashMap<>();
 
@@ -453,7 +461,7 @@ class ReadingWindowServiceTest {
 
         assertTrue(entered3.await(2, TimeUnit.SECONDS));
         ReadingWindowResponse res = windows.get(book.id(), session);
-        assertEquals(3, res.processingPages().size());
+        assertEquals(2, res.processingPages().size());
         assertTrue(invokedChannels.values().stream().allMatch("ppocr"::equals));
 
         releaseAll.countDown();

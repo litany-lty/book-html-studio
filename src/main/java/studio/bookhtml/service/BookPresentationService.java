@@ -13,6 +13,7 @@ import studio.bookhtml.store.BookStore;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -38,11 +39,23 @@ public class BookPresentationService {
     private PresentationOverrideService overrides;
     // U6：画像内存缓存；失效唯一来源是存储变更通知（保守：任何页/书变更即失效）。
     private final Map<String, BookLayoutProfile> profileCache = new ConcurrentHashMap<>();
+    private final Object cacheLock = new Object();
+    private final AtomicLong changeGeneration = new AtomicLong();
+    private final Set<String> warming = ConcurrentHashMap.newKeySet();
+    private final Object[] buildLocks = new Object[32];
+    private final Map<String, Long> lastWarm = new LinkedHashMap<>();
+    private final ExecutorService warmExecutor = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(8), runnable -> {
+                Thread thread = new Thread(runnable, "reader-layout-profile"); thread.setDaemon(true); return thread;
+            }, new ThreadPoolExecutor.AbortPolicy());
     private final AtomicLong cacheHits = new AtomicLong();
 
     public BookPresentationService(BookStore store) {
         this.store = store;
-        store.addChangeListener(profileCache::remove);
+        Arrays.setAll(buildLocks, ignored -> new Object());
+        store.addChangeListener(id -> {
+            synchronized (cacheLock) { changeGeneration.incrementAndGet(); profileCache.remove(id); }
+        });
     }
 
     @Autowired(required = false)
@@ -124,6 +137,13 @@ public class BookPresentationService {
     // ---------- 画像构建 ----------
 
     public BookLayoutProfile buildProfile(String bookId) {
+        synchronized (buildLocks[Math.floorMod(bookId.hashCode(), buildLocks.length)]) {
+            return buildProfileOnce(bookId);
+        }
+    }
+
+    private BookLayoutProfile buildProfileOnce(String bookId) {
+        final long generation = changeGeneration.get();
         // U6：无变更直接返回缓存（失效唯一来源是存储变更通知），避免每页请求全书扫描。
         BookLayoutProfile cached = profileCache.get(bookId);
         if (cached != null) {
@@ -181,7 +201,7 @@ public class BookPresentationService {
                 previous == null ? 1 : previous.profileRevision(),
                 POLICY_VERSION, observed.size(), clusters, java.time.Instant.now());
         if (previous != null && previous.clusterSignature().equals(candidate.clusterSignature())) {
-            profileCache.put(bookId, previous);
+            cacheIfUnchanged(bookId, previous, generation);
             return previous;
         }
         BookLayoutProfile published = new BookLayoutProfile(bookId,
@@ -192,9 +212,39 @@ public class BookPresentationService {
         } catch (Exception ignored) {
             // sidecar 写失败不阻塞原稿打开；调用方继续使用内存画像。
         }
-        profileCache.put(bookId, published);
+        cacheIfUnchanged(bookId, published, generation);
         return published;
     }
+
+    private void cacheIfUnchanged(String id, BookLayoutProfile profile, long generation) {
+        synchronized (cacheLock) {
+            if (generation != changeGeneration.get()) return;
+            if (profileCache.size() >= 128) profileCache.remove(profileCache.keySet().iterator().next());
+            profileCache.put(id, profile);
+        }
+    }
+
+    /** A polling/reader request never waits for a whole-book scan. Warm work is coalesced and bounded. */
+    public BookLayoutProfile profileForReader(String bookId) {
+        BookLayoutProfile cached = profileCache.get(bookId);
+        if (cached != null) return cached;
+        synchronized (lastWarm) {
+            long now = System.nanoTime();
+            Long last = lastWarm.get(bookId);
+            if ((last == null || now - last >= TimeUnit.SECONDS.toNanos(2)) && warming.add(bookId)) {
+                if (lastWarm.size() >= 128) lastWarm.remove(lastWarm.keySet().iterator().next());
+                lastWarm.put(bookId, now);
+                try { warmExecutor.execute(() -> {
+                    try { buildProfile(bookId); } catch (RuntimeException ignored) { /* Source remains readable. */ }
+                    finally { warming.remove(bookId); }
+                }); } catch (RejectedExecutionException full) { warming.remove(bookId); }
+            }
+        }
+        return new BookLayoutProfile(bookId, 0, POLICY_VERSION, 0, List.of(), java.time.Instant.EPOCH);
+    }
+
+    @jakarta.annotation.PreDestroy
+    public void close() { warmExecutor.shutdownNow(); }
 
     /** U6：测试可见的缓存命中计数。 */
     long cacheHits() {
@@ -216,6 +266,14 @@ public class BookPresentationService {
     }
 
     // ---------- 投影 ----------
+
+    /** First-paint path: never scans all pages or guesses a full-book profile. */
+    public PagePresentation projectCached(String bookId, Page page) {
+        BookLayoutProfile profile = profileCache.get(bookId);
+        if (profile == null) profile = new BookLayoutProfile(bookId, 0, POLICY_VERSION, 0,
+                List.of(), java.time.Instant.EPOCH);
+        return project(bookId, page, profile);
+    }
 
     public PagePresentation project(String bookId, Page page) {
         return project(bookId, page, buildProfile(bookId));

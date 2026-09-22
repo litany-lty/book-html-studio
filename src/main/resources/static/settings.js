@@ -152,16 +152,16 @@ function render(settings) {
   setSelectValue(field('jevModel'), settings.jev?.model, 'jev-1.13.0');
   field('jevBudgetUnits').value = settings.jev?.budgetUnits || '';
   field('jevAllowCloudData').checked = Boolean(settings.jev?.allowCloudData);
-  field('paddleAccessToken').value = settings.ocr?.paddleAiStudio?.accessToken || '';
-  if (settings.ocr?.paddleAiStudio?.accessTokenSet) field('paddleAccessToken').placeholder = '•••••••• （服务端已保存凭据）';
-  field('ppocrApiKey').value = settings.ocr?.ppocr?.apiKey || '';
-  if (settings.ocr?.ppocr?.apiKeySet) field('ppocrApiKey').placeholder = '•••••••• （服务端已保存凭据）';
-  field('ppocrSecretKey').value = settings.ocr?.ppocr?.secretKey || '';
-  if (settings.ocr?.ppocr?.secretKeySet) field('ppocrSecretKey').placeholder = '•••••••• （服务端已保存凭据）';
-  field('qwenApiKey').value = settings.qwen?.apiKey || '';
-  if (settings.qwen?.apiKeySet) field('qwenApiKey').placeholder = '•••••••• （服务端已保存凭据）';
-  field('jevApiKey').value = settings.jev?.apiKey || '';
-  if (settings.jev?.apiKeySet) field('jevApiKey').placeholder = '•••••••• （服务端已保存凭据）';
+  field('paddleAccessToken').value = '';
+  if (settings.ocr?.paddleAiStudio?.accessTokenSet) field('paddleAccessToken').placeholder = '已配置；留空保留，输入新值替换';
+  field('ppocrApiKey').value = '';
+  if (settings.ocr?.ppocr?.apiKeySet) field('ppocrApiKey').placeholder = '已配置；留空保留，输入新值替换';
+  field('ppocrSecretKey').value = '';
+  if (settings.ocr?.ppocr?.secretKeySet) field('ppocrSecretKey').placeholder = '已配置；留空保留，输入新值替换';
+  field('qwenApiKey').value = '';
+  if (settings.qwen?.apiKeySet) field('qwenApiKey').placeholder = '已配置；留空保留，输入新值替换';
+  field('jevApiKey').value = '';
+  if (settings.jev?.apiKeySet) field('jevApiKey').placeholder = '已配置；留空保留，输入新值替换';
   document.querySelectorAll('.password-toggle-btn').forEach(btn => {
     const input = field(btn.dataset.target);
     if (input) input.type = 'password';

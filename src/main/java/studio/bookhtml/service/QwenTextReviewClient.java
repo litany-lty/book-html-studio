@@ -35,7 +35,7 @@ import java.util.function.BooleanSupplier;
  */
 @Component
 public class QwenTextReviewClient {
-    static final String PROMPT_VERSION = "qwen-review-v1";
+    static final String PROMPT_VERSION = "qwen-review-v2-book-context";
     private static final int MAX_RESPONSE_BYTES = 512 * 1024;
     private static final int MAX_TEXT = 1000;
     private static final int MAX_CACHE_ENTRIES = 128;
@@ -51,6 +51,9 @@ public class QwenTextReviewClient {
     private final Transport transport;
     private QwenRequestGate gate;
     private UsageLedger usage;
+    private BookContextService bookContext;
+    @Autowired(required = false)
+    public void setBookContext(BookContextService bookContext) { this.bookContext = bookContext; }
 
     private final Map<String, ReviewResult> cache = new LinkedHashMap<>() {
         @Override
@@ -108,17 +111,25 @@ public class QwenTextReviewClient {
         if (!configured()) throw new ApiException(HttpStatus.BAD_REQUEST, "Qwen 局部核对尚未配置");
         if (task == null || task.ownedRanges().isEmpty())
             throw new ApiException(HttpStatus.BAD_REQUEST, "核对组缺少写入区间");
-        if (!budget.reserve(1)) throw new OcrException("页面调用预算不足，剩余范围保留原文，明确部分增强");
         {
             Map<String, String> slices = sliceTexts(task, parentTexts);
             // U5：缓存身份含调用方书/页；身份变化不误命中。无上下文时退化为文本键（测试直调）。
             UsageContext.Value caller = UsageContext.current();
+            String context = bookContext == null ? "{}" : bookContext.current();
+            HttpRequest prepared;
+            try { prepared = request(task, slices, parentTexts, regionImage, overviewImage, context); }
+            catch (Exception invalid) { throw new OcrException("核对组请求构造失败"); }
             String cacheKey = cacheKey(task, slices, caller == null ? null
                     : caller.bookId() + ":" + caller.pageNumber());
+            // Cache identity covers every evidence input, including immutable context and image bytes.
+            try {
+                cacheKey = studio.bookhtml.decision.DecisionHash.sha256Hex(cacheKey + "|" +
+                        json.writeValueAsString(task) + "|" + json.writeValueAsString(parentTexts) + "|" + context + "|" +
+                        imageHash(regionImage) + "|" + imageHash(overviewImage));
+            } catch (Exception invalid) { throw new OcrException("核对组证据身份无效"); }
             synchronized (cache) {
                 ReviewResult hit = cache.get(cacheKey);
                 if (hit != null) {
-                    budget.release(1);
                     if (usage != null) {
                         try { usage.cacheReused("qwen", config.getModel()); }
                         catch (Exception ignored) {}
@@ -128,15 +139,21 @@ public class QwenTextReviewClient {
             }
             OcrException lastRetryable = null;
             for (int attempt = 0; attempt <= 2; attempt++) {
+                if (cancelled.getAsBoolean()) throw new CancelledException();
                 QwenRequestGate.Permit permit = acquire(foreground);
                 if (permit == null) throw new OcrException("Qwen 并发队列已满，剩余范围保留原文");
                 try {
-                    return executeOnce(task, slices, parentTexts, regionImage, overviewImage, cancelled, cacheKey);
+                    if (cancelled.getAsBoolean()) throw new CancelledException();
+                    if (!budget.reserve(1)) throw new OcrException("页面调用预算不足，剩余范围保留原文");
+                    return executeOnce(task, slices, prepared, cancelled, cacheKey);
                 } catch (RateLimitedException rateLimited) {
                     if (attempt >= 2 || cancelled.getAsBoolean()) throw new OcrException(
                             "Qwen 请求频率受限且重试预算用尽，剩余范围保留原文");
+                    closeQuietly(permit);
                     sleepWithoutSlot(rateLimited.retryAfterMillis());
                     lastRetryable = new OcrException("Qwen 请求频率受限");
+                } catch (CancelledException e) {
+                    throw e;
                 } catch (OcrException e) {
                     throw e;
                 } catch (Exception e) {
@@ -207,18 +224,16 @@ public class QwenTextReviewClient {
     }
 
     private ReviewResult executeOnce(QwenTaskPlanner.ChunkTask task, Map<String, String> slices,
-                                     Map<String, String> parentTexts,
-                                     byte[] regionImage, byte[] overviewImage,
-                                     BooleanSupplier cancelled, String cacheKey) throws Exception {
+                                     HttpRequest request, BooleanSupplier cancelled, String cacheKey) throws Exception {
         if (cancelled.getAsBoolean()) throw new CancelledException();
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(Math.max(1, config.getTimeoutSeconds()));
-        HttpRequest request = request(task, slices, parentTexts, regionImage, overviewImage);
         String attemptId = null;
         boolean responseSeen = false, parsed = false;
         if (usage != null) {
             try { attemptId = usage.start("qwen", config.getModel()); }
             catch (Exception e) { attemptId = null; }
         }
+        try {
         HttpResponse<InputStream> response = transport.send(request);
         if (response == null) throw new OcrException("Qwen 局部核对未返回响应");
         responseSeen = true;
@@ -254,7 +269,9 @@ public class QwenTextReviewClient {
                 cache.put(cacheKey, result);
             }
             return result;
+        }
         } finally {
+            // A transport timeout before response stays STARTED/unknown in the ledger; no blind retry.
             if (usage != null && attemptId != null && responseSeen && !parsed) {
                 try { usage.failed(attemptId); } catch (Exception ignored) {}
             }
@@ -342,6 +359,11 @@ public class QwenTextReviewClient {
         }
     }
 
+    private static String imageHash(byte[] bytes) throws java.security.NoSuchAlgorithmException {
+        return bytes == null ? "none" : java.util.HexFormat.of().formatHex(
+                java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
+    }
+
     private String cacheKey(QwenTaskPlanner.ChunkTask task, Map<String, String> sliceTexts,
                               String callerIdentity) {
         StringBuilder raw = new StringBuilder(config.getModel()).append('|')
@@ -364,6 +386,12 @@ public class QwenTextReviewClient {
     HttpRequest request(QwenTaskPlanner.ChunkTask task, Map<String, String> slices,
                         Map<String, String> parentTexts,
                         byte[] regionImage, byte[] overviewImage) throws Exception {
+        return request(task, slices, parentTexts, regionImage, overviewImage,
+                bookContext == null ? "{}" : bookContext.current());
+    }
+    private HttpRequest request(QwenTaskPlanner.ChunkTask task, Map<String, String> slices,
+                        Map<String, String> parentTexts, byte[] regionImage, byte[] overviewImage,
+                        String bookEvidence) throws Exception {
         if (regionImage == null || regionImage.length == 0)
             throw new ApiException(HttpStatus.BAD_REQUEST, "核对组缺少区域图");
         List<Map<String, Object>> owned = new ArrayList<>();
@@ -403,7 +431,10 @@ public class QwenTextReviewClient {
                 + "start/end 是 slice 内原文的 UTF-16 半开区间，边界不得落在代理对中间；"
                 + "quote 必须与该范围逐字相等。只用于理解的上下文标为 readOnly，不得对其产生发现。"
                 + "owned=" + json.writeValueAsString(owned)
-                + "; context=" + json.writeValueAsString(context);
+                + "; context=" + json.writeValueAsString(context)
+                + "; bookContext=" + bookEvidence
+                + "。本书主题、章节和邻页原始来源只提供弱语境先验，不能代替图像证据。"
+                + "上下文中的 OCR 也可能错误；保留罕见术语、人名、数字、否定词，不因更顺口而改写；证据不足则不推荐。";
         List<Map<String, Object>> content = new ArrayList<>();
         content.add(Map.of("type", "text", "text", prompt));
         content.add(Map.of("type", "text", "text",

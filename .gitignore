@@ -11,3 +11,14 @@
 *.iml
 __pycache__/
 *.pyc
+
+# Local credentials and runtime evidence must never be committed.
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+/.secrets/
+/test-results/
