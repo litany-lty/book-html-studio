@@ -1,0 +1,35 @@
+name: Audit offline toolchain
+on:
+  push:
+    branches: [audit/reader-stream-context-security-20260922]
+    paths: [.github/workflows/audit-toolchain.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Resolve the exact repository test dependencies
+        run: mvn --batch-mode verify
+        continue-on-error: true
+      - name: Package build dependencies only (no credentials or source)
+        run: |
+          mkdir -p audit-toolchain/maven
+          cp -a "$(dirname "$(dirname "$(readlink -f "$(command -v mvn)")")")/." audit-toolchain/maven/
+          cp -a "$HOME/.m2/repository" audit-toolchain/repository
+          rm -f audit-toolchain/maven/conf/settings.xml
+          tar -czf audit-toolchain.tar.gz -C audit-toolchain .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: audit-offline-toolchain
+          path: audit-toolchain.tar.gz
+          retention-days: 1
