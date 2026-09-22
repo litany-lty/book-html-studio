@@ -1,3 +1,5 @@
+import { initFocusReading } from './focus-reading.js';
+
 // U1：阅读/校对模式切换。同一本书、同一页、同一版本；只改变面板可见性，不调用云识别。
 // 校对是用户主动进入的工作台；后台任务变化不得改变布局列数或主工具栏高度。
 const MODE_KEY = 'paper-workshop.reader-mode';
@@ -27,6 +29,7 @@ function applyMode(mode, trigger) {
 }
 
 export function initReaderMode() {
+  initFocusReading({ onProofRequested: () => applyMode('proof', null) });
   let initial = 'reading';
   try { initial = localStorage.getItem(MODE_KEY) === 'proof' ? 'proof' : 'reading'; } catch (_) {}
   // 窄屏默认收起导航与校对，不挤压正文；宽屏尊重用户上次选择。

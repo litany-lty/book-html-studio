@@ -51,6 +51,9 @@ public class DecisionCoordinator {
     private final CandidateResolutionService resolution;
     private final EvidenceCollector evidence;
     private final DecisionStateBuilder stateBuilder;
+    private studio.bookhtml.service.BookContextService bookContext;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setBookContext(studio.bookhtml.service.BookContextService bookContext) { this.bookContext = bookContext; }
     private final JevDecisionClient jev;
     private final DecisionProperties config;
     private final DecisionTransport transport;
@@ -757,7 +760,9 @@ public class DecisionCoordinator {
             }
 
             // 状态构建与快照先行持久化
-            List<String> neighbors = neighborTexts(page, block, 2);
+            List<String> neighbors = new java.util.ArrayList<>(neighborTexts(page, block, 2));
+            if (bookContext != null) neighbors.add("READ_ONLY_UNVERIFIED_BOOK_CONTEXT=" +
+                    bookContext.snapshot(bookId, page.pageNumber()));
             DecisionStateBuilder.BuiltState built;
             try {
                 built = stateBuilder.build(ref, frozenOriginal, set, neighbors, false,
@@ -887,7 +892,7 @@ public class DecisionCoordinator {
         } catch (ApiException e) {
             throw e;
         } catch (Exception e) {
-            if ("true".equals(System.getenv("DECISION_DEBUG"))) e.printStackTrace(System.out);
+            // Never print provider exceptions: upstream messages may contain credentials or source text.
             persistTerminal(bookId, withState(running, "FAILED", "DONE",
                     List.of("INTERNAL_ERROR"), null, null));
         }

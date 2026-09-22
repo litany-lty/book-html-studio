@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, jev-m1]
+    branches: [main, jev-m1, integrate/reader-20260922]
   pull_request:
 
 permissions:
@@ -11,8 +11,12 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Record tested SHA
         run: |
           echo "testedCommit=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
@@ -65,6 +69,8 @@ jobs:
           node scripts/verification/probe_display.js
           node scripts/verification/probe_job_scope.js
           node scripts/verification/probe_api_lifecycle.mjs
+          node scripts/verification/probe_page_progress.mjs
+          node scripts/verification/probe_settings_secrets.mjs
       - name: Python verification tests
         shell: bash
         run: |
@@ -72,6 +78,8 @@ jobs:
           python3 -m py_compile scripts/verification/*.py
           python3 scripts/verification/shadow_eval.py --selftest
           python3 -m unittest discover -s scripts/verification -p 'test_*.py'
+      - name: Redacted credential scan
+        run: python3 scripts/security/scan_secrets.py --history --out test-results/secret-scan.json
       - name: Test and package
         run: mvn --batch-mode verify
       - name: Repeat lifecycle regression gates

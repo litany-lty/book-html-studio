@@ -140,8 +140,10 @@ public class BookStore {
                     throw new PageConflictException(currentRev, "本页正在识别，请等待完成或先取消任务再操作");
             }
             case JOB_START -> {
-                if (!"PROCESSING".equals(proposed.status()))
-                    throw new ApiException(HttpStatus.BAD_REQUEST, "任务开始提交必须为 PROCESSING 页");
+                boolean retainedSnapshot = json.valueToTree(proposed).equals(json.valueToTree(current))
+                        && ("READY".equals(current.status()) || "FAILED".equals(current.status()));
+                if (!"PROCESSING".equals(proposed.status()) && !retainedSnapshot)
+                    throw new ApiException(HttpStatus.BAD_REQUEST, "任务开始须保留原快照或进入 PROCESSING");
                 Job job = requireCurrentJob(id, currentRev, expectedJobId, current.pageNumber());
                 if (!List.of("QUEUED", "RUNNING").contains(job.status()))
                     throw new PageConflictException(currentRev, "任务已不在可开始状态，本页不再写入");

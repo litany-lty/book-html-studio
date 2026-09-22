@@ -91,6 +91,54 @@ class ProcessingProgressTest {
                 List.of(), false, null, List.of(b)), ProcessingResult.Category.TEXT);
     }
 
+    @Test void regionalPartialBaselineNeverBecomesSucceededOrTriggersMoreEnhancement() throws Exception {
+        setup(1);
+        Block b = text("recovered", "局部原图转录");
+        Page page = new Page(1,600,800,"READY","paddle-aistudio",List.of(b),
+                List.of(OcrTextRecovery.PARTIAL + " 待核对"),false,null,List.of(b));
+        when(processor.processBaseline(eq(book.id()), eq(1), anyString(), anyString(), anyBoolean(), any()))
+                .thenReturn(new ProcessingResult(page, ProcessingResult.Category.TEXT_PARTIAL));
+        windows.update(book.id(), assistRequest(UUID.randomUUID(), 1, 1));
+        clock.advance(Duration.ofSeconds(1)); windows.tick();
+        await(() -> { var snap=progress.latest(book.id(),1); return snap!=null && "PARTIAL".equals(snap.lifecycle()); });
+        var snap=progress.latest(book.id(),1);
+        assertTrue(snap.canRead()); assertTrue(snap.canRetry());
+        assertEquals("OCR_RECOVERY_PARTIAL",snap.messageCode());
+        assertEquals("局部原图转录",store.readPage(book.id(),1).blocks().get(0).original());
+        verify(processor,never()).enrichBaseline(anyString(),anyInt(),any(),anyString(),anyString(),any());
+    }
+
+
+    @Test void partialEnrichmentStaysPartialInTelemetryAndJournal() throws Exception {
+        setup(1);
+        when(processor.processBaseline(eq(book.id()),eq(1),anyString(),anyString(),anyBoolean(),any()))
+                .thenReturn(baselineResult(1,"基线正文"));
+        when(processor.enrichBaseline(eq(book.id()),eq(1),any(),anyString(),anyString(),any()))
+                .thenReturn(new PageProcessor.EnrichResult(List.of(text("b1","基线正文")),"paddle-aistudio",
+                        List.of("预算不足，部分核对未执行"),false));
+        windows.update(book.id(),assistRequest(UUID.randomUUID(),1,1));
+        clock.advance(Duration.ofSeconds(1));windows.tick();
+        await(()->{var v=progress.latest(book.id(),1);return v!=null && "PARTIAL".equals(v.lifecycle());});
+        var v=progress.latest(book.id(),1);
+        assertTrue(v.canRead());assertTrue(v.canRetry());assertTrue(v.percent()<100);
+        assertEquals("OCR_READABLE",v.contentAvailability());
+        await(()->"PARTIAL".equals(store.readSidecar(store.pageAttemptsPath(book.id()),PageAttempt.Journal.class).intents().get(book.id()+":1").lifecycle()));
+    }
+    @Test void batchProgressUsesDurableAttemptSequenceAndActualPublishedRevision() throws Exception {
+        setup(1);
+        when(processor.process(eq(book.id()),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any()))
+                .thenReturn(baselineResult(1,"批处理正文"));
+        jobs.submit(book.id(),new JobRequest("1","paddle-aistudio","auto",false,false,false));
+        await(()->{var v=progress.latest(book.id(),1);return v!=null && "SUCCEEDED".equals(v.lifecycle());});
+        var before=progress.latest(book.id(),1);
+        assertEquals(store.readPage(book.id(),1).revision(),before.publishedRevision());assertEquals(1,before.units().succeeded());
+        assertTrue(before.attemptSeq()>0);assertEquals(100,before.percent());
+        jobs.close();
+        jobs=new JobService(store,books,processor);jobs.setSettings(settings);jobs.setProgress(progress);
+        jobs.submit(book.id(),new JobRequest("1","paddle-aistudio","auto",false,true,false));
+        await(()->{var v=progress.latest(book.id(),1);return v.attemptSeq()>before.attemptSeq() && "SUCCEEDED".equals(v.lifecycle());});
+        assertNotEquals(before.attemptId(),progress.latest(book.id(),1).attemptId());
+    }
     @Test void prog04_baselineReadableWhileEnhancementBlocked() throws Exception {
         setup(5);
         CountDownLatch enrichEntered = new CountDownLatch(1);
@@ -99,9 +147,8 @@ class ProcessingProgressTest {
                 .thenAnswer(inv -> baselineResult(inv.getArgument(1), "基线正文" + inv.getArgument(1)));
         when(processor.enrichBaseline(eq(book.id()), anyInt(), any(), anyString(), anyString(), any()))
                 .thenAnswer(inv -> {
-                    enrichEntered.countDown();
-                    assertTrue(enrichRelease.await(4, TimeUnit.SECONDS));
                     int n = inv.getArgument(1);
+                    if(n==1){enrichEntered.countDown();assertTrue(enrichRelease.await(4, TimeUnit.SECONDS));}
                     return new PageProcessor.EnrichResult(List.of(text("e" + n, "增强正文" + n)),
                             "paddle-aistudio+qwen-assist", List.of());
                 });
@@ -121,6 +168,7 @@ class ProcessingProgressTest {
         assertTrue(snap.canRead());
         enrichRelease.countDown();
         await(() -> "增强正文1".equals(store.readPage(book.id(), 1).blocks().get(0).original()));
+        await(() -> "SUCCEEDED".equals(progress.latest(book.id(),1).lifecycle()));
         ProcessingSnapshot done = progress.latest(book.id(), 1);
         assertEquals("ENHANCED", done.contentAvailability());
         assertEquals("SUCCEEDED", done.lifecycle());
@@ -155,8 +203,7 @@ class ProcessingProgressTest {
                 .thenAnswer(inv -> baselineResult(inv.getArgument(1), "基线正文"));
         when(processor.enrichBaseline(eq(book.id()), anyInt(), any(), anyString(), anyString(), any()))
                 .thenAnswer(inv -> {
-                    enrichEntered.countDown();
-                    assertTrue(enrichRelease.await(4, TimeUnit.SECONDS));
+                    if((int)inv.getArgument(1)==1){enrichEntered.countDown();assertTrue(enrichRelease.await(4, TimeUnit.SECONDS));}
                     return new PageProcessor.EnrichResult(List.of(text("e1", "增强改写")),
                             "paddle-aistudio+qwen-assist", List.of());
                 });

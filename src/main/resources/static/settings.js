@@ -1,4 +1,6 @@
 import { api } from './api.js';
+import { secretFields, secretValidation, buildSecretUpdates, scrubSecretInputs, wipeSecretPayload,
+  syncSecretControls, secretStorageMessage } from './settings-secret-store.js';
 
 const dialog = document.querySelector('#settings-dialog');
 const form = document.querySelector('#settings-form');
@@ -13,8 +15,8 @@ let saving = false;
 function lockInputs(locked) {
   form.querySelectorAll('input, select').forEach(control => { control.disabled = locked; });
   document.querySelector('#settings-local-check').disabled = locked;
+  syncSecretControls(form, current, locked);
 }
-
 const field = name => form.elements.namedItem(name);
 const checked = name => Boolean(field(name).checked);
 const value = name => field(name).value.trim();
@@ -32,18 +34,10 @@ function updateEndpoint() {
     node.textContent = '保存后由服务端按区域确定官方地址；不接受自定义网址。';
   }
 }
-
-function setStatus(message, tone = '') {
-  status.textContent = message;
-  status.dataset.tone = tone;
-}
-
+function setStatus(message, tone = '') { status.textContent = message; status.dataset.tone = tone; }
 function setPill(id, label, tone) {
-  const pill = document.querySelector(`#${id}`);
-  pill.textContent = label;
-  pill.dataset.tone = tone;
+  const pill = document.querySelector(`#${id}`); pill.textContent = label; pill.dataset.tone = tone;
 }
-
 const jevReason = {
   DECISION_OFF: '候选比较已关闭', MISSING_API_KEY: '缺少 API Key', MISSING_MODEL: '缺少模型',
   DATA_EGRESS_NOT_AUTHORIZED: '尚未允许外发', BUDGET_NOT_SET: '尚未设置本地调用预算',
@@ -51,61 +45,36 @@ const jevReason = {
 const calibrationLabel = { UNCALIBRATED: '未校准', CALIBRATED: '已校准', UNKNOWN: '未知' };
 const rateProviders = [
   ['paddle-aistudio', 'PaddleOCR-VL-1.6', 'PaddleOCR-VL-1.6'],
-  ['ppocr', 'PP-OCRv6', 'PP-OCRv6'],
-  ['qwen', 'Qwen 结构辅助', ''],
-  ['jev', 'JEV 候选比较', ''],
+  ['ppocr', 'PP-OCRv6', 'PP-OCRv6'], ['qwen', 'Qwen 结构辅助', ''], ['jev', 'JEV 候选比较', ''],
 ];
-
 function renderRates(settings) {
-  const host = document.querySelector('#settings-rates');
-  host.replaceChildren();
+  const host = document.querySelector('#settings-rates'); host.replaceChildren();
   const rates = settings.billing?.rates || [];
   for (const [provider, label, fixedModel] of rateProviders) {
     const rate = rates.find(item => item.provider === provider) || {};
-    const row = document.createElement('div');
-    row.className = 'settings-rate';
-    row.dataset.provider = provider;
-    const title = document.createElement('strong');
-    title.textContent = label;
-    row.append(title);
-    const fields = document.createElement('div');
-    fields.className = 'settings-rate-fields';
+    const row = document.createElement('div'); row.className = 'settings-rate'; row.dataset.provider = provider;
+    const title = document.createElement('strong'); title.textContent = label; row.append(title);
+    const fields = document.createElement('div'); fields.className = 'settings-rate-fields';
     const makeField = (text, key, initial, readonly = false) => {
-      const wrapper = document.createElement('label');
-      wrapper.className = 'field';
-      const caption = document.createElement('span');
-      caption.textContent = text;
-      const input = document.createElement('input');
-      input.dataset.rateField = key;
-      input.value = initial || '';
-      input.readOnly = readonly;
-      input.spellcheck = false;
-      input.autocomplete = 'off';
+      const wrapper = document.createElement('label'); wrapper.className = 'field';
+      const caption = document.createElement('span'); caption.textContent = text;
+      const input = document.createElement('input'); input.dataset.rateField = key; input.value = initial || '';
+      input.readOnly = readonly; input.spellcheck = false; input.autocomplete = 'off';
       if (key !== 'model') input.inputMode = 'decimal';
-      wrapper.append(caption, input);
-      fields.append(wrapper);
+      wrapper.append(caption, input); fields.append(wrapper);
     };
     makeField('精确匹配模型', 'model', fixedModel || rate.model || '', Boolean(fixedModel));
-    const currency = document.createElement('label');
-    currency.className = 'field';
-    const currencyCaption = document.createElement('span');
-    currencyCaption.textContent = '币种';
-    const currencySelect = document.createElement('select');
-    currencySelect.dataset.rateField = 'currency';
+    const currency = document.createElement('label'); currency.className = 'field';
+    const currencyCaption = document.createElement('span'); currencyCaption.textContent = '币种';
+    const currencySelect = document.createElement('select'); currencySelect.dataset.rateField = 'currency';
     currencySelect.append(new Option('人民币 CNY', 'CNY'), new Option('美元 USD', 'USD'));
     currencySelect.value = rate.currency === 'USD' ? 'USD' : 'CNY';
-    currency.append(currencyCaption, currencySelect);
-    fields.append(currency);
+    currency.append(currencyCaption, currencySelect); fields.append(currency);
     if (fixedModel) makeField('每次送识请求', 'perRequest', rate.perRequest);
-    else {
-      makeField('每百万输入 tokens', 'inputPerMillion', rate.inputPerMillion);
-      makeField('每百万输出 tokens', 'outputPerMillion', rate.outputPerMillion);
-    }
-    row.append(fields);
-    host.append(row);
+    else { makeField('每百万输入 tokens', 'inputPerMillion', rate.inputPerMillion); makeField('每百万输出 tokens', 'outputPerMillion', rate.outputPerMillion); }
+    row.append(fields); host.append(row);
   }
 }
-
 function rateValues() {
   return [...document.querySelectorAll('#settings-rates .settings-rate')].map(row => {
     const entry = { provider: row.dataset.provider, model: '', currency: 'CNY', perRequest: '', inputPerMillion: '', outputPerMillion: '' };
@@ -113,33 +82,23 @@ function rateValues() {
     return entry;
   });
 }
-
 function safeError(error) {
   let message = error?.message || '读取配置失败，请稍后重试。';
-  // The server should never echo credentials. Also mask anything newly entered if an upstream error does.
-  for (const name of ['paddleAccessToken', 'ppocrApiKey', 'ppocrSecretKey', 'qwenApiKey', 'jevApiKey']) {
+  for (const [name] of secretFields) {
     const secret = field(name).value;
     if (secret) message = message.replaceAll(secret, '［凭据已隐藏］');
     if (secret.trim() && secret.trim() !== secret) message = message.replaceAll(secret.trim(), '［凭据已隐藏］');
   }
   return message;
 }
-
 function setSelectValue(selectElement, val, defaultVal) {
   const target = val || defaultVal;
   if (!target || !selectElement) return;
-  const exists = Array.from(selectElement.options).some(opt => opt.value === target);
-  if (!exists) {
-    const opt = new Option(`${target}（当前已保存）`, target);
-    selectElement.add(opt);
-  }
+  if (!Array.from(selectElement.options).some(opt => opt.value === target)) selectElement.add(new Option(`${target}（当前已保存）`, target));
   selectElement.value = target;
 }
-
 function render(settings) {
-  current = settings;
-  form.hidden = false;
-  form.reset();
+  current = settings; form.hidden = false; form.reset();
   const provider = settings.ocr?.defaultProvider;
   const radio = form.querySelector(`input[name="defaultProvider"][value="${provider === 'ppocr' ? 'ppocr' : 'paddle-aistudio'}"]`);
   if (radio) radio.checked = true;
@@ -152,31 +111,16 @@ function render(settings) {
   setSelectValue(field('jevModel'), settings.jev?.model, 'jev-1.13.0');
   field('jevBudgetUnits').value = settings.jev?.budgetUnits || '';
   field('jevAllowCloudData').checked = Boolean(settings.jev?.allowCloudData);
-  field('paddleAccessToken').placeholder = '留空保持已保存凭据';
-  field('paddleAccessToken').value = ''; // write-only: never refill a stored credential
-  if (settings.ocr?.paddleAiStudio?.accessTokenSet) field('paddleAccessToken').placeholder = '•••••••• （服务端已保存凭据）';
-  field('ppocrApiKey').placeholder = '留空保持已保存凭据';
-  field('ppocrApiKey').value = ''; // write-only: never refill a stored credential
-  if (settings.ocr?.ppocr?.apiKeySet) field('ppocrApiKey').placeholder = '•••••••• （服务端已保存凭据）';
-  field('ppocrSecretKey').placeholder = '留空保持已保存凭据';
-  field('ppocrSecretKey').value = ''; // write-only: never refill a stored credential
-  if (settings.ocr?.ppocr?.secretKeySet) field('ppocrSecretKey').placeholder = '•••••••• （服务端已保存凭据）';
-  field('qwenApiKey').placeholder = '留空保持已保存凭据';
-  field('qwenApiKey').value = ''; // write-only: never refill a stored credential
-  if (settings.qwen?.apiKeySet) field('qwenApiKey').placeholder = '•••••••• （服务端已保存凭据）';
-  field('jevApiKey').placeholder = '留空保持已保存凭据';
-  field('jevApiKey').value = ''; // write-only: never refill a stored credential
-  if (settings.jev?.apiKeySet) field('jevApiKey').placeholder = '•••••••• （服务端已保存凭据）';
-  document.querySelectorAll('.password-toggle-btn').forEach(btn => {
-    const input = field(btn.dataset.target);
-    if (input) input.type = 'password';
-    btn.textContent = '👁️';
-    btn.setAttribute('aria-pressed', 'false');
-  });
+  scrubSecretInputs(form);
+  const configured = [settings.ocr?.paddleAiStudio?.accessTokenSet, settings.ocr?.ppocr?.apiKeySet,
+    settings.ocr?.ppocr?.secretKeySet, settings.qwen?.apiKeySet, settings.jev?.apiKeySet];
+  secretFields.forEach(([name], i) => { field(name).placeholder = configured[i] ? '已配置；留空保留，输入新值替换' : '未配置'; });
+  let note = form.querySelector('#settings-secret-storage-note');
+  if (!note) { note = document.createElement('p'); note.id = 'settings-secret-storage-note'; form.prepend(note); }
+  note.textContent = secretStorageMessage(settings);
   renderRates(settings);
   document.querySelector('#jev-budget-label').textContent = settings.jev?.budgetUnitLabel || '本地调用预算单位';
-  updateEndpoint();
-  syncToggles();
+  updateEndpoint(); syncToggles();
   const calibration = calibrationLabel[settings.jev?.calibrationStatus] || settings.jev?.calibrationStatus || '未知';
   const mode = settings.jev?.mode || 'OFF';
   document.querySelector('#jev-detail').textContent = `当前模式：${mode}；校准：${calibration}；${jevReason[settings.jev?.reason] || settings.jev?.reason || '调用门槛当前已满足，结果仍需对照原图。'}`;
@@ -186,22 +130,13 @@ function render(settings) {
   setPill('ppocr-status', ppocr.configured ? '已配置 · 未验证连通' : `未配置 · 缺 ${ppocrMissing}`, ppocr.configured ? 'ready' : 'muted');
   setPill('qwen-status', !settings.qwen?.enabled ? '已关闭' : settings.qwen?.configured ? '已配置 · 未验证连通' : '未配置', settings.qwen?.enabled && settings.qwen?.configured ? 'ready' : 'muted');
   setPill('jev-status', !settings.jev?.enabled ? '已关闭' : !settings.jev?.apiKeySet ? '未配置' : settings.jev?.available ? '已配置 · 未验证连通' : '已配置 · 受门槛限制', settings.jev?.enabled && settings.jev?.available ? 'ready' : 'muted');
-  const busy = Boolean(settings.busy);
-  saveButton.disabled = busy;
+  const busy = Boolean(settings.busy); saveButton.disabled = busy;
   setStatus(busy ? '当前有处理或评估任务运行。配置变更暂被锁定，请待任务结束后重新打开。' : '只检查本地填写，不会自动调用云服务或消耗额度。', busy ? 'warning' : '');
-  saveStatus.textContent = '';
-  if (saving) lockInputs(true);
+  saveStatus.textContent = ''; lockInputs(saving);
 }
-
 function validate() {
+  const secretError = secretValidation(form); if (secretError) return secretError;
   const modelPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/;
-  for (const [secret, clear] of [
-    ['paddleAccessToken', 'clearPaddleAccessToken'], ['ppocrApiKey', 'clearPpocrApiKey'],
-    ['ppocrSecretKey', 'clearPpocrSecretKey'], ['qwenApiKey', 'clearQwenApiKey'], ['jevApiKey', 'clearJevApiKey'],
-  ]) {
-    if (value(secret) && checked(clear)) return '同一项凭据不能同时填写新值并勾选清除。';
-    if (/^[＊*•●]+$/.test(value(secret))) return '不能将掩码作为新凭据，请留空保持或填写真实新值。';
-  }
   if (value('qwenModel') && !modelPattern.test(value('qwenModel'))) return 'Qwen 模型需为 1–120 位字母、数字、点、下划线或连字符。';
   if (value('jevModel') && !modelPattern.test(value('jevModel'))) return 'JEV 模型需为 1–120 位字母、数字、点、下划线或连字符。';
   if (value('jevBudgetUnits') && !/^[1-9]\d{0,17}$/.test(value('jevBudgetUnits'))) return 'JEV 本地调用预算单位必须为不超过 18 位的正整数。';
@@ -210,13 +145,10 @@ function validate() {
   const pricePattern = /^(?:0|[1-9]\d{0,11})(?:\.\d{1,8})?$/;
   for (const rate of rateValues()) {
     if (rate.model && !modelPattern.test(rate.model)) return `${rate.provider} 的单价模型标识格式无效。`;
-    for (const key of ['perRequest', 'inputPerMillion', 'outputPerMillion']) {
-      if (rate[key] && !pricePattern.test(rate[key])) return `${rate.provider} 的参考单价须为非负小数，最多 8 位小数。`;
-    }
+    for (const key of ['perRequest', 'inputPerMillion', 'outputPerMillion']) if (rate[key] && !pricePattern.test(rate[key])) return `${rate.provider} 的参考单价须为非负小数，最多 8 位小数。`;
   }
   return '';
 }
-
 function readinessWarnings() {
   const hasKey = (set, clear, typed) => !clear && (set || Boolean(typed));
   const warnings = [];
@@ -237,33 +169,18 @@ function readinessWarnings() {
   }
   return warnings;
 }
-
 function payload() {
-  const secretUpdates = {};
-  for (const [name, clearName] of [
-    ['paddleAccessToken', 'clearPaddleAccessToken'], ['ppocrApiKey', 'clearPpocrApiKey'],
-    ['ppocrSecretKey', 'clearPpocrSecretKey'], ['qwenApiKey', 'clearQwenApiKey'], ['jevApiKey', 'clearJevApiKey'],
-  ]) {
-    if (checked(clearName)) secretUpdates[name] = { clearSecret: true };
-    else if (value(name)) secretUpdates[name] = { value: value(name) };
-  }
   return {
     revision: current.revision,
     ocr: { defaultProvider: field('defaultProvider').value, fallbackEnabled: checked('fallbackEnabled') },
     qwen: { enabled: checked('qwenEnabled'), region: value('qwenRegion'), model: value('qwenModel'), workspaceId: value('qwenWorkspaceId') },
     jev: { enabled: checked('jevEnabled'), model: value('jevModel'), ...(value('jevBudgetUnits') ? { budgetUnits: value('jevBudgetUnits') } : {}), allowCloudData: checked('jevAllowCloudData') },
-    billing: { rates: rateValues() },
-    ...(Object.keys(secretUpdates).length ? { secretUpdates } : {}),
+    secretUpdates: buildSecretUpdates(form, current?.secretStorage?.writable), billing: { rates: rateValues() },
   };
 }
-
 async function refresh() {
-  const epoch = ++requestEpoch;
-  form.hidden = true;
-  if (saving) {
-    setStatus('前次保存仍在进行。完成后会重新读取配置；请勿重复提交。', 'warning');
-    return;
-  }
+  const epoch = ++requestEpoch; form.hidden = true;
+  if (saving) { setStatus('前次保存仍在进行。完成后会重新读取配置；请勿重复提交。', 'warning'); return; }
   setStatus('正在读取本机配置…');
   try {
     const settings = await api.settings();
@@ -274,52 +191,29 @@ async function refresh() {
     setStatus(safeError(error), 'error');
   }
 }
-
-document.querySelector('#settings-open').addEventListener('click', () => {
-  opener = document.activeElement;
-  dialog.showModal();
-  void refresh();
-});
+document.querySelector('#settings-open').addEventListener('click', () => { opener = document.activeElement; dialog.showModal(); void refresh(); });
 document.querySelector('#settings-close').addEventListener('click', () => dialog.close());
 dialog.addEventListener('close', () => {
-  requestEpoch++;
-  current = null;
-  form.reset();
-  form.hidden = true;
-  document.querySelectorAll('.password-toggle-btn').forEach(btn => {
-    const input = field(btn.dataset.target);
-    if (input) input.type = 'password';
-    btn.textContent = '👁️';
-    btn.setAttribute('aria-pressed', 'false');
-  });
-  if (opener?.isConnected) opener.focus({ preventScroll: true });
-  opener = null;
+  requestEpoch++; current = null; form.reset(); scrubSecretInputs(form); form.hidden = true;
+  if (opener?.isConnected) opener.focus({ preventScroll: true }); opener = null;
 });
 document.querySelectorAll('.password-toggle-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    const input = field(btn.dataset.target);
-    if (!input) return;
-    const isPass = input.type === 'password';
-    input.type = isPass ? 'text' : 'password';
-    btn.textContent = isPass ? '🙈' : '👁️';
-    btn.setAttribute('aria-pressed', String(isPass));
+    const input = field(btn.dataset.target); if (!input || btn.disabled) return;
+    const isPass = input.type === 'password'; input.type = isPass ? 'text' : 'password';
+    btn.textContent = isPass ? '🙈' : '👁️'; btn.setAttribute('aria-pressed', String(isPass));
   });
 });
 document.querySelector('#settings-local-check').addEventListener('click', () => {
-  const error = validate();
-  const warnings = error ? [] : readinessWarnings();
+  const error = validate(); const warnings = error ? [] : readinessWarnings();
   setStatus(error || (warnings.length ? `本地格式通过，但以下配置尚不可用：${warnings.join('；')}。未调用云服务。` : '本地填写符合格式要求；未向云服务发起连通验证。'), error ? 'error' : warnings.length ? 'warning' : 'ready');
 });
 function syncToggles() {
-  const jevOn = field('jevEnabled')?.checked;
-  document.querySelector('#settings-jev-body')?.classList.toggle('is-disabled-body', !jevOn);
-  const qwenOn = field('qwenEnabled')?.checked;
-  document.querySelector('#settings-qwen-body')?.classList.toggle('is-disabled-body', !qwenOn);
-  const model = field('jevModel')?.value;
-  const modelTag = document.querySelector('#jev-active-model-tag');
+  document.querySelector('#settings-jev-body')?.classList.toggle('is-disabled-body', !field('jevEnabled')?.checked);
+  document.querySelector('#settings-qwen-body')?.classList.toggle('is-disabled-body', !field('qwenEnabled')?.checked);
+  const model = field('jevModel')?.value; const modelTag = document.querySelector('#jev-active-model-tag');
   if (modelTag && model) modelTag.textContent = `模型: ${model}`;
 }
-
 field('qwenRegion').addEventListener('change', updateEndpoint);
 field('qwenWorkspaceId').addEventListener('input', updateEndpoint);
 field('jevEnabled').addEventListener('change', syncToggles);
@@ -328,35 +222,24 @@ field('jevModel').addEventListener('change', syncToggles);
 form.addEventListener('submit', async event => {
   event.preventDefault();
   if (!current || saveButton.disabled || saving) return;
-  const error = validate();
-  if (error) { setStatus(error, 'error'); return; }
+  const error = validate(); if (error) { setStatus(error, 'error'); return; }
   const cleared = [...form.querySelectorAll('input[name^="clear"]:checked')];
   if (cleared.length && !window.confirm(`将清除 ${cleared.length} 项已保存凭据。保存后无法恢复，确定继续吗？`)) return;
-  const body = payload();
-  const csrfToken = current.csrfToken;
-  const saveEpoch = requestEpoch;
-  saving = true;
-  lockInputs(true);
-  saveButton.disabled = true;
-  saveStatus.textContent = '正在保存…';
-  let saved = false;
-  let needsRefresh = false;
+  const body = payload(); const csrfToken = current.csrfToken; const saveEpoch = requestEpoch;
+  saving = true; lockInputs(true); saveButton.disabled = true; saveStatus.textContent = '正在保存…';
+  let saved = false; let needsRefresh = false;
   const sameOpen = () => dialog.open && requestEpoch === saveEpoch;
   try {
-    await api.saveSettings(body, csrfToken);
-    saved = true;
+    await api.saveSettings(body, csrfToken); saved = true;
     let settings = null;
-    try { settings = await api.settings(); } catch (_) { /* 已保存，但读回可能失败。 */ }
+    try { settings = await api.settings(); } catch (_) { /* The save succeeded; only the read-back failed. */ }
     if (sameOpen()) {
       if (settings) {
-        render(settings);
-        saveButton.disabled = true;
+        render(settings); saveButton.disabled = true;
         saveStatus.textContent = '配置已保存；连通与额度尚未验证。';
         setStatus('配置已保存；正在刷新可用处理通道。', 'ready');
       } else {
-        current = null;
-        form.hidden = true;
-        saveStatus.textContent = '已保存 · 待核对';
+        current = null; form.hidden = true; saveStatus.textContent = '已保存 · 待核对';
         setStatus('配置已保存，但读取最新状态失败。请关闭并重新打开配置页核对，再开始处理。', 'warning');
       }
     }
@@ -369,15 +252,14 @@ form.addEventListener('submit', async event => {
   } catch (failure) {
     if (!saved && failure?.status === 409) needsRefresh = true;
     else if (!saved && sameOpen()) {
-      setStatus(`配置未确认保存：${safeError(failure)} 请重新读取配置确认状态。`, 'error');
-      saveStatus.textContent = '';
+      setStatus(`配置未确认保存：${safeError(failure)} 请重新读取配置确认状态。`, 'error'); saveStatus.textContent = '';
     }
   } finally {
-    saving = false;
-    lockInputs(false);
+    // Also clear values when the save/read-back fails or the user closes the dialog in flight.
+    scrubSecretInputs(form); wipeSecretPayload(body); saving = false; lockInputs(false);
     if (dialog.open && (!sameOpen() || needsRefresh)) {
       await refresh();
-      if (needsRefresh && dialog.open && !form.hidden) setStatus('配置未保存：版本已变化或任务正在运行。已重新读取服务端状态，请核对后再修改。', 'warning');
+      if (needsRefresh && dialog.open && !form.hidden) setStatus('配置未保存：版本、任务占用或秘密存储策略已变化。已重新读取服务端状态，请核对后再修改。', 'warning');
     } else if (dialog.open) saveButton.disabled = !current || Boolean(current.busy);
   }
 });

@@ -14,6 +14,8 @@ import studio.bookhtml.BookHtmlStudioApplication;
 import studio.bookhtml.domain.*;
 import studio.bookhtml.service.PageProcessor;
 import studio.bookhtml.service.ProcessingResult;
+import studio.bookhtml.service.JobService;
+import studio.bookhtml.api.JobRequest;
 
 import java.nio.file.*;
 import java.time.Instant;
@@ -30,8 +32,22 @@ import static org.mockito.Mockito.*;
 public class ReadingWindowQaServer {
     public static final String BOOK = "bbbbbbbb-2222-2222-2222-222222222222";
     private static final List<Map<String, Object>> calls = new CopyOnWriteArrayList<>();
-    // U5：并行在途每调用一门；/__qa/release 按派发先后逐个放行。
+    // Admission order is the scheduling contract. Independent worker arrival times
+    // are not a dispatch trace: OS scheduling and mock setup can reverse them.
+    private static final List<Map<String, Object>> admissions = new CopyOnWriteArrayList<>();
+    private static final Object callLock = new Object();
     private static final java.util.Deque<CountDownLatch> gates = new java.util.concurrent.ConcurrentLinkedDeque<>();
+
+    private static Map<String, Object> recordCall(int page, CountDownLatch gate) {
+        synchronized (callLock) {
+            Map<String, Object> call = Collections.synchronizedMap(new LinkedHashMap<>());
+            call.put("pageNumber", page); call.put("startedAt", System.currentTimeMillis());
+            call.put("completed", false);
+            // Keep the release FIFO paired with the observable physical call order.
+            gates.add(gate); calls.add(call);
+            return call;
+        }
+    }
 
     public static void main(String[] args) throws Exception {
         if (args.length != 2) throw new IllegalArgumentException("需要全新临时数据目录与独立端口");
@@ -81,6 +97,15 @@ public class ReadingWindowQaServer {
         @Bean static BeanPostProcessor mockProcessor() {
             return new BeanPostProcessor() {
                 @Override public Object postProcessAfterInitialization(Object bean, String name) {
+                    if (bean instanceof JobService jobs) {
+                        JobService observed = spy(jobs);
+                        doAnswer(invocation -> {
+                            Job accepted = (Job) invocation.callRealMethod();
+                            admissions.add(Map.of("pageNumber", accepted.currentPage(), "jobId", accepted.id()));
+                            return accepted;
+                        }).when(observed).submitReserved(any(UUID.class), anyString(), any(JobRequest.class));
+                        return observed;
+                    }
                     if (!(bean instanceof PageProcessor)) return bean;
                     PageProcessor mock = mock(PageProcessor.class);
                     try {
@@ -89,10 +114,8 @@ public class ReadingWindowQaServer {
                                 .thenAnswer(invocation -> {
                                     String id = invocation.getArgument(0); int n = invocation.getArgument(1);
                                     if (!BOOK.equals(id)) throw new IllegalArgumentException("禁止处理非随读合成书");
-                                    CountDownLatch latch = new CountDownLatch(1); gates.add(latch);
-                                    Map<String, Object> call = Collections.synchronizedMap(new LinkedHashMap<>());
-                                    call.put("pageNumber", n); call.put("startedAt", System.currentTimeMillis());
-                                    call.put("completed", false); calls.add(call);
+                                    CountDownLatch latch = new CountDownLatch(1);
+                                    Map<String, Object> call = recordCall(n, latch);
                                     try {
                                         if (!latch.await(45, TimeUnit.SECONDS)) throw new IllegalStateException("测试未释放模拟识别");
                                         String text = "这是第 " + n + " 页的模拟识别内容，仅用于随读导航与安全保存验证。";
@@ -117,10 +140,8 @@ public class ReadingWindowQaServer {
                                 .thenAnswer(invocation -> {
                                     String id = invocation.getArgument(0); int n = invocation.getArgument(1);
                                     if (!BOOK.equals(id)) throw new IllegalArgumentException("禁止处理非随读合成书");
-                                    CountDownLatch latch = new CountDownLatch(1); gates.add(latch);
-                                    Map<String, Object> call = Collections.synchronizedMap(new LinkedHashMap<>());
-                                    call.put("pageNumber", n); call.put("startedAt", System.currentTimeMillis());
-                                    call.put("completed", false); calls.add(call);
+                                    CountDownLatch latch = new CountDownLatch(1);
+                                    Map<String, Object> call = recordCall(n, latch);
                                     try {
                                         if (!latch.await(45, TimeUnit.SECONDS)) throw new IllegalStateException("测试未释放模拟识别");
                                         String text = "这是第 " + n + " 页的模拟识别内容，仅用于随读导航与安全保存验证。";
@@ -144,13 +165,17 @@ public class ReadingWindowQaServer {
     @RestController
     static class QaController {
         @GetMapping("/__qa/reading-calls") public Map<String, Object> calls() {
-            return Map.of("fixture", BOOK, "calls", List.copyOf(calls), "waiting", !gates.isEmpty());
+            List<Map<String, Object>> snapshot = calls.stream().map(call -> {
+                synchronized (call) { return Map.copyOf(call); }
+            }).toList();
+            return Map.of("fixture", BOOK, "calls", snapshot, "admissions", List.copyOf(admissions), "waiting", !gates.isEmpty());
         }
         @PostMapping("/__qa/release") public Map<String, Object> release() {
-            // U5 并行在途：按派发先后逐个放行，还原脚本步进控制语义。
-            CountDownLatch oldest = gates.pollFirst();
-            if (oldest != null) oldest.countDown();
-            return Map.of("released", oldest != null);
+            synchronized (callLock) {
+                CountDownLatch oldest = gates.pollFirst();
+                if (oldest != null) oldest.countDown();
+                return Map.of("released", oldest != null);
+            }
         }
     }
 }

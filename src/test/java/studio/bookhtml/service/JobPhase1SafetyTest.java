@@ -98,38 +98,58 @@ class JobPhase1SafetyTest {
         BookService books=mock(BookService.class);when(books.get(id)).thenReturn(book);
         PageProcessor processor=mock(PageProcessor.class);
         CountDownLatch entered=new CountDownLatch(1);
+        CountDownLatch releaseWorker=new CountDownLatch(1);
         when(processor.process(eq(id),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any())).thenAnswer(inv->{
             entered.countDown();
-            try{Thread.sleep(30_000);}catch(InterruptedException e){Thread.currentThread().interrupt();throw new CancelledException();}
-            Block b=textBlock("s","新任务结果");
-            return new ProcessingResult(new Page(1,600,800,"READY","local",List.of(b),List.of(),false,null,List.of(b)),ProcessingResult.Category.TEXT);
+            // Hold the physical worker until the assertion. An interruptible sleep may
+            // end before submit() executes, in which case accepting a retry is correct.
+            boolean interrupted=false;
+            try {
+                while(releaseWorker.getCount()>0){
+                    try { assertTrue(releaseWorker.await(5,TimeUnit.SECONDS),"old worker must be explicitly released"); }
+                    catch(InterruptedException ignored){ interrupted=true; }
+                }
+            } finally { if(interrupted)Thread.currentThread().interrupt(); }
+            throw new CancelledException();
         });
         JobService jobs=new JobService(store,books,processor);
         try{
             Job first=jobs.submit(id,new JobRequest("1","local","auto",false,false,false));
-            assertTrue(entered.await(2,TimeUnit.SECONDS));
+            assertTrue(entered.await(5,TimeUnit.SECONDS));
             Job cancelling=jobs.cancel(id);
             assertEquals("CANCELLING",cancelling.status());
-            // 取消后立即重试应被拒绝（旧 worker 尚未退出）
-            try{jobs.submit(id,new JobRequest("1","local","auto",false,false,false));fail("应返回 409");}
-            catch(ApiException e){assertEquals(HttpStatus.CONFLICT,e.status());}
-            long deadline=System.currentTimeMillis()+3000;
-            while(System.currentTimeMillis()<deadline){if("CANCELLED".equals(store.readJob(id).status()))break;Thread.sleep(50);}
+            ApiException conflict=assertThrows(ApiException.class,
+                    ()->jobs.submit(id,new JobRequest("1","local","auto",false,false,false)));
+            assertEquals(HttpStatus.CONFLICT,conflict.status());
+            assertEquals(first.id(),store.readJob(id).id());
+            releaseWorker.countDown();
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+            while(!"CANCELLED".equals(store.readJob(id).status()) && System.nanoTime()<deadline)Thread.sleep(10);
             assertEquals("CANCELLED",store.readJob(id).status());
-            String cancelledId=store.readJob(id).id();
-            assertEquals(first.id(),cancelledId);
-            // 取消完成后可重试，且旧 worker 不再回写新 job：第二轮 mock 直接成功
+            assertEquals(first.id(),store.readJob(id).id());
             reset(processor);
-            when(books.get(id)).thenReturn(book);
             Block done=textBlock("s","新任务结果");
             Page ready=new Page(1,600,800,"READY","local",List.of(done),List.of(),false,null,List.of(done));
-            when(processor.process(eq(id),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any())).thenReturn(new ProcessingResult(ready,ProcessingResult.Category.TEXT));
-            Job second=jobs.submit(id,new JobRequest("1","local","auto",false,false,false));
+            when(processor.process(eq(id),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any()))
+                    .thenReturn(new ProcessingResult(ready,ProcessingResult.Category.TEXT));
+            Job second=null;
+            deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+            // The persistent terminal status may precede final admission/lease cleanup.
+            while(second==null){
+                try{second=jobs.submit(id,new JobRequest("1","local","auto",false,false,false));}
+                catch(ApiException draining){
+                    assertEquals(HttpStatus.CONFLICT,draining.status());
+                    assertTrue(System.nanoTime()<deadline,"cancelled worker failed to drain");
+                    Thread.sleep(10);
+                }
+            }
             assertNotEquals(first.id(),second.id());
-            deadline=System.currentTimeMillis()+5000;
-            while(System.currentTimeMillis()<deadline){String s=store.readJob(id).status();if(s.startsWith("COMPLETED")||"FAILED".equals(s))break;Thread.sleep(50);}
+            deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+            while(System.nanoTime()<deadline){String status=store.readJob(id).status();if(status.startsWith("COMPLETED")||"FAILED".equals(status))break;Thread.sleep(10);}
+            assertEquals("COMPLETED",store.readJob(id).status());
             assertEquals(second.id(),store.readJob(id).id());
-        }finally{jobs.close();}
+            assertEquals("新任务结果",store.readPage(id,1).blocks().get(0).original());
+        }finally{releaseWorker.countDown();jobs.close();}
     }
 
     @Test void manualSaveConflict409AndRevisionIncrement()throws Exception{

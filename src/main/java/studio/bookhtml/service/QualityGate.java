@@ -35,10 +35,10 @@ public final class QualityGate {
         return false;
     }
 
-    /** 真空白：图像信息极少（复用 SparsePageGuard 阈值）。 */
+    /** 近空白：低墨量并且没有连贯微弱笔画；不以视觉块标签代替原图证据。 */
     public static boolean isTrueBlank(BufferedImage image) {
         if (image == null) return false;
-        return SparsePageGuard.hasExtremelyLowVisualInformation(image);
+        return ScanTextEvidence.inspect(image).nearBlank();
     }
 
     public static double inkRatio(BufferedImage image, int threshold) {

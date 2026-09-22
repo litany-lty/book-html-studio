@@ -9,9 +9,11 @@ import { createReadingWindow } from './reading-window.js';
 import { createLibrary } from './library.js';
 import { initReaderMode } from './reader-mode.js';
 import { recordAnchor, restoreAnchor } from './reading-anchor.js';
+import { createPageProgress } from './page-progress.js';
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
+const pageProgress = createPageProgress({ api, onPublished: (n, page) => acceptReadyPage(n, page) });
 const activeJobs = new Set(['QUEUED', 'RUNNING', 'CANCELLING']);
 const readerNavigation = globalThis.BookReaderNavigation;
 let cancelDrawing = null;
@@ -45,6 +47,8 @@ function olderRevision(incoming, current) {
 
 function renderReadingWindowStatus(snapshot = readingSnapshot) {
   readingSnapshot = snapshot;
+  const currentProgress = snapshot?.pages?.find(p => p.pageNumber === state.currentPage)?.processing;
+  if (currentProgress) pageProgress.update(currentProgress);
   const active = readingWindow?.active() || false;
   const bar = $('#reading-window-bar');
   bar.hidden = !active && !snapshot && !deferredReady;
@@ -1167,6 +1171,7 @@ function syncOverlays() {
 
 function renderCurrent(full = true) {
   if (!state.page || !state.book) return;
+  pageProgress.setPage(state.book.id, state.currentPage, state.page);
   const paper = $('#paper');
   const message = renderPaper(paper, {
     book: state.book,
@@ -1257,6 +1262,7 @@ async function goToPage(n, options = {}) {
     activeOutlineBlockId: state.activeOutlineBlockId, editorEpoch: state.editorEpoch, conflict: state.conflict };
   cancelDrawing?.(); cancelDrawing = null; state.drawType = null; $('#draw-hint').hidden = true;
   if (!options.skipSavePosition) saveReadingPosition();
+  pageProgress.clear();
   state.currentPage = n; state.page = null; state.blocks = []; state.selectedBlockId = null; state.selectedIssueId = null; state.dirty = false; state.activeOutlineBlockId = options.outlineBlockId || null;
   updateSaveStatus();
   // A1-01：进入新页面即开启新编辑会话，旧保存响应不得回写
@@ -1316,7 +1322,8 @@ async function goToPage(n, options = {}) {
 
 async function selectBook(id) {
   if (hasDirtyChanges()) { $('#book-select').value = state.book?.id || ''; return; }
-  void readingWindow.stop({ silent: true });
+  const previousWindowStopped = readingWindow.stop({ silent: true });
+  pageProgress.clear();
   readingMetadataSignatures.clear(); readingMetadataVersions.clear(); readingMetadataProfiles.clear();
   deferredReady = null;
   renderReadingWindowStatus(null);
@@ -1339,29 +1346,44 @@ async function selectBook(id) {
     state.book = null; state.summaries = []; state.focus = false; document.body.classList.remove('focus-reading'); $('#workspace').classList.add('is-empty'); $('#empty-state').hidden = false; $('#reader-shell').hidden = true; renderBookMeta(); renderToc(); return;
   }
   try {
-    const [book, summaries] = await Promise.all([api.book(id), api.pages(id)]);
+    const book = await api.readerBook(id);
     if (requestId !== bookRequest) return;
-    state.book = book; state.summaries = Array.isArray(summaries) ? summaries : []; $('#book-select').value = id;
+    state.book = book; state.summaries = []; $('#book-select').value = id;
     $('#workspace').classList.remove('is-empty'); $('#empty-state').hidden = true; $('#reader-shell').hidden = false;
     renderBookMeta(); renderBookmarks();
     const finiteDefault = Math.min(20, book.totalPages);
     if (!$('#all-pages').checked) $('#page-range').value = finiteDefault > 1 ? `1-${finiteDefault}` : '1';
     const prefs = loadPreferences(id);
     state.view = ['original', 'facsimile', 'reading'].includes(prefs.view) ? prefs.view : 'reading';
-    state.script = prefs.script === 'original' ? 'original' : 'simplified'; state.fontSize = Number(prefs.fontSize || 20); state.lineHeight = Number(prefs.lineHeight || 1.8); state.focus = Boolean(prefs.focus);
+    state.script = prefs.script === 'original' ? 'original' : 'simplified'; state.fontSize = Math.max(14, Math.min(36, Number(prefs.fontSize) || 20)); state.lineHeight = Math.max(1.2, Math.min(2.6, Number(prefs.lineHeight) || 1.8)); state.focus = Boolean(prefs.focus);
     // J08：阅读依据默认保真（已确认）；旧偏好无此项，不迁移、不把旧显示当自动确认授权
     state.evidenceMode = prefs.evidenceMode === 'assisted' ? 'assisted' : 'confirmed'; state.assistMap = {};
     $('#font-size').value = state.fontSize; $('#font-output').value = state.fontSize; $('#line-height').value = state.lineHeight; $('#line-output').value = state.lineHeight;
-    const page = Math.min(book.totalPages, Math.max(1, Number(prefs.page || 1)));
+    const page = Math.min(book.totalPages, Math.max(1, (Number.isSafeInteger(Number(prefs.page)) ? Number(prefs.page) : 1)));
     state.currentPage = page;
-    const outlinePromise = refreshOutline(id);
     await goToPage(page, { force: true, restoreScroll: true, scrollTop: prefs.scrollTop, skipSavePosition: true });
     if (requestId !== bookRequest) return;
-    await Promise.all([refreshJob(), outlinePromise]);
+    // First paint must not wait for an O(book-size) outline/statistics pass.
+    void api.pages(id).then(summaries => {
+      if (requestId !== bookRequest) return;
+      state.summaries = Array.isArray(summaries) ? summaries : [];
+      renderToc(); renderBookMeta();
+    }).catch(() => { /* Metadata can be refreshed; never replace readable content. */ });
+    void refreshOutline(id);
+    const jobSynced = refreshJob();
+    await previousWindowStopped;
+    await jobSynced;
     if (requestId !== bookRequest) return;
-    // U2/SAFE-12：选书不自动启动云端随读。页面图片外发须经用户在任务入口的明确授权
-    // （授权绑定本次任务）；自动启动会绕过授权并与“默认关闭不识别”的验收冲突。
-    // 用户明确开启后，本次会话内连续随读不再重复确认。
+    if (isAutoReadEnabled() && !jobSyncError && !activeJobs.has(state.job?.status)) {
+      const provider = selectedProvider();
+      if (state.config?.providers?.some(p => p.id === provider && p.available)) {
+        const form = new FormData($('#job-form'));
+        await readingWindow.enable({ provider, layout: form.get('layout') || 'auto',
+          splitSpreads: form.get('splitSpreads') === 'on',
+          assist: $('#qwen-assist').checked && !$('#qwen-assist').disabled,
+          autoProcessAll: isAutoProcessAll() });
+      }
+    }
   } catch (error) { if (requestId === bookRequest) showError(error); }
 }
 
@@ -1807,9 +1829,19 @@ $('#reading-window-refresh').addEventListener('click', () => { void readingWindo
 $('#retry-page-header')?.addEventListener('click', retryCurrentPage);
 $('#reload-page-header')?.addEventListener('click', reloadCurrentPage);
 $('#reader-reload-page')?.addEventListener('click', reloadCurrentPage);
-const isAutoProcessAll = () => localStorage.getItem('book_html_auto_process_all') !== 'false';
+const storedOption = (key, fallback) => { try { const value = localStorage.getItem(key); return value == null ? fallback : value === 'true'; } catch (_) { return fallback; } };
+const isAutoProcessAll = () => storedOption('book_html_auto_process_all_v2', false);
+// Configured credentials are not consent to start paid recognition on book open.
+const isAutoReadEnabled = () => storedOption('book_html_auto_read', false);
+const autoReadCheckbox = $('#reading-window-auto-start');
+if (autoReadCheckbox) {
+  autoReadCheckbox.checked = isAutoReadEnabled();
+  autoReadCheckbox.addEventListener('change', () => {
+    try { localStorage.setItem('book_html_auto_read', String(autoReadCheckbox.checked)); } catch (_) {}
+  });
+}
 function setAutoProcessAll(val) {
-  localStorage.setItem('book_html_auto_process_all', String(val));
+  try { localStorage.setItem('book_html_auto_process_all_v2', String(val)); } catch (_) {}
   const cb1 = $('#auto-process-all');
   if (cb1) cb1.checked = val;
   const cb2 = $('#reading-window-auto-all');

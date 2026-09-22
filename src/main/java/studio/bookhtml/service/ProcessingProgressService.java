@@ -104,7 +104,7 @@ public class ProcessingProgressService {
     /** Compatibility adapter for callers with one completion callback per unit. */
     public synchronized void unitDone(String bookId, int pageNumber, UUID attemptId, boolean ok) {
         Entry e = entries.get(key(bookId, pageNumber, attemptId));
-        if (e == null || e.terminal()) return;
+        if (e == null || e.terminal() || e.endedUnits.size() >= e.total) return;
         unitDone(bookId, pageNumber, attemptId, "compat:" + (++e.compatibilityUnit), ok ? "SUCCEEDED" : "FAILED");
     }
 
@@ -145,8 +145,10 @@ public class ProcessingProgressService {
         Entry e = entries.get(key(bookId, pageNumber, attemptId));
         if (e == null || e.terminal()) return;
         if (!TERMINAL.contains(lifecycle)) throw new IllegalArgumentException("not a terminal lifecycle");
-        e.lifecycle = "SUCCEEDED".equals(lifecycle) && (e.failed + e.skipped + e.cancelled > 0) ? "PARTIAL" : lifecycle;
-        e.messageCode = messageCode; e.canRetry = canRetry; e.canStop = false; e.inFlight = 0; e.changed();
+        boolean incomplete = "SUCCEEDED".equals(lifecycle)
+                && (e.failed + e.skipped + e.cancelled > 0 || e.endedUnits.size() < e.total);
+        e.lifecycle = incomplete ? "PARTIAL" : lifecycle;
+        e.messageCode = incomplete ? "WORK_PLAN_INCOMPLETE" : messageCode; e.canRetry = canRetry || incomplete; e.canStop = false; e.inFlight = 0; e.changed();
     }
 
     public synchronized ProcessingSnapshot snapshot(String bookId, int pageNumber, UUID attemptId) {

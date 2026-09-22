@@ -2,34 +2,29 @@ package studio.bookhtml.config;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.DeserializationFeature;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Service;
 import studio.bookhtml.api.ApiException;
 
 import java.io.IOException;
 import java.math.BigDecimal;
-import java.nio.file.*;
-import java.nio.file.attribute.PosixFilePermission;
 import java.util.*;
 
 /** One immutable runtime snapshot; admissions and replacement share the same monitor. */
 @Service
+@DependsOn("bookStore") // Acquire the existing data-directory lease before any startup migration.
 public class SettingsService {
     public static final String QWEN_CN = "https://dashscope.aliyuncs.com/compatible-mode/v1";
     public static final String QWEN_INTL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
     private static final Map<String, String> LEGACY_HOSTS = Map.of(
             "cn-beijing", "dashscope.aliyuncs.com", "ap-southeast-1", "dashscope-intl.aliyuncs.com",
             "us-east-1", "dashscope-us.aliyuncs.com", "cn-hongkong", "cn-hongkong.dashscope.aliyuncs.com");
-    private static final Set<PosixFilePermission> DIR_PERMS = Set.of(PosixFilePermission.OWNER_READ,
-            PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE);
-    private static final Set<PosixFilePermission> FILE_PERMS = Set.of(PosixFilePermission.OWNER_READ,
-            PosixFilePermission.OWNER_WRITE);
-    private final ObjectMapper json;
-    private final Path directory;
-    private final Path file;
     private final QwenAssistProperties qwen;
     private final DecisionProperties jev;
+    private final SecretStore secrets;
+    private final SettingsPersistence persistence;
     private volatile State state;
     private int activeWork;
 
@@ -38,26 +33,36 @@ public class SettingsService {
                         boolean qwenEnabled, String qwenApiKey, String qwenRegion, String qwenWorkspaceId, String qwenModel,
                         boolean jevEnabled, String jevApiKey, String jevModel,
                         Long budgetUnits, boolean allowCloudData, List<Rate> billingRates) {
-        // Runtime credentials must never escape through incidental diagnostic formatting.
-        @Override public String toString() { return "SettingsState[revision=" + revision + ", credentials=REDACTED]"; }
+        public State {
+            if (billingRates != null) billingRates = List.copyOf(billingRates);
+        }
+        @Override public String toString() {
+            return "SettingsState[revision=" + revision + ", credentials=REDACTED]";
+        }
     }
     public record Rate(String provider, String model, String currency, String perRequest,
                        String inputPerMillion, String outputPerMillion) {}
 
+    @Autowired
     public SettingsService(AppProperties app, PaddleAiStudioProperties paddle,
                            QwenAssistProperties qwen, DecisionProperties jev, ObjectMapper json) {
-        this.json = json;
+        this(app, paddle, qwen, jev, json, null);
+    }
+    /** Explicit store injection keeps tests independent of real process credentials. */
+    public SettingsService(AppProperties app, PaddleAiStudioProperties paddle,
+                           QwenAssistProperties qwen, DecisionProperties jev, ObjectMapper json, SecretStore secretStore) {
         this.qwen = qwen;
         this.jev = jev;
-        this.directory = app.dataDir().toAbsolutePath().normalize().resolve(".settings");
-        this.file = directory.resolve("settings.json");
         String[] qwenLocation = parseQwenLocation(qwen.getBaseUrl());
-        State baseline = new State(0, "paddle-aistudio", false, paddle.accessToken(),
-                app.baiduOcrApiKey(), app.baiduOcrSecretKey(), qwen.isEnabled() && has(qwen.getApiKey()), qwen.getApiKey(),
+        State baseline = new State(0, "paddle-aistudio", false, nonNull(paddle.accessToken()),
+                nonNull(app.baiduOcrApiKey()), nonNull(app.baiduOcrSecretKey()), qwen.isEnabled() && has(qwen.getApiKey()), nonNull(qwen.getApiKey()),
                 qwenLocation[0], qwenLocation[1], qwen.getModel(),
                 "SHADOW".equalsIgnoreCase(jev.getMode()) || "ASSIST".equalsIgnoreCase(jev.getMode()),
-                jev.getApiKey(), jev.getModel(), jev.getMonetaryBudgetMinor() != null && jev.getMonetaryBudgetMinor() > 0
+                nonNull(jev.getApiKey()), jev.getModel(), jev.getMonetaryBudgetMinor() != null && jev.getMonetaryBudgetMinor() > 0
                 ? jev.getMonetaryBudgetMinor() : null, jev.isAllowCloudData(), defaultRates(qwen.getModel(), jev.getModel()));
+        this.secrets = secretStore == null
+                ? SecretStore.fromEnvironment(app.dataDir(), SettingsPersistence.values(baseline), System.getenv()) : secretStore;
+        this.persistence = new SettingsPersistence(app.dataDir(), json, secrets);
         this.state = readOrBaseline(baseline);
         applyMutable(state);
     }
@@ -72,11 +77,13 @@ public class SettingsService {
         @Override public synchronized void close() { if (owner != null) { owner.endWork(); owner = null; } }
     }
 
-    public Map<String, Object> view() {
+    public synchronized Map<String, Object> view() {
         State s = state;
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("revision", s.revision());
         out.put("busy", busy());
+        out.put("secretStorage", Map.of("mode", secrets.mode().name(), "writable", secrets.writable(),
+                "formatVersion", SettingsPersistence.FORMAT_VERSION, "cleanupPending", persistence.cleanupPending()));
         Map<String, Object> paddleMap = new LinkedHashMap<>();
         paddleMap.put("accessTokenSet", has(s.paddleAccessToken()));
         paddleMap.put("configured", has(s.paddleAccessToken()));
@@ -87,8 +94,7 @@ public class SettingsService {
         ppocrMap.put("configured", has(s.ppocrApiKey()) && has(s.ppocrSecretKey()));
         ppocrMap.put("model", "PP-OCRv6");
         out.put("ocr", Map.of("defaultProvider", s.defaultProvider(), "fallbackEnabled", s.fallbackEnabled(),
-                "paddleAiStudio", paddleMap,
-                "ppocr", ppocrMap));
+                "paddleAiStudio", paddleMap, "ppocr", ppocrMap));
         Map<String, Object> qwenMap = new LinkedHashMap<>();
         qwenMap.put("enabled", s.qwenEnabled());
         qwenMap.put("apiKeySet", has(s.qwenApiKey()));
@@ -118,7 +124,6 @@ public class SettingsService {
     public synchronized Map<String, Object> update(JsonNode body) {
         if (body == null || !body.isObject()) bad();
         only(body, "revision", "ocr", "qwen", "jev", "billing", "secretUpdates");
-        body = normalizeSecretUpdates(body);
         JsonNode revision = body.get("revision");
         if (revision == null || !revision.isIntegralNumber() || !revision.canConvertToLong()) bad();
         if (revision.longValue() != state.revision()) throw new ApiException(HttpStatus.CONFLICT, "设置已被其他修改覆盖，请刷新后重试");
@@ -131,6 +136,7 @@ public class SettingsService {
         JsonNode q = section(body, "qwen", "enabled", "apiKey", "clearApiKey", "region", "workspaceId", "model");
         JsonNode j = section(body, "jev", "enabled", "apiKey", "clearApiKey", "model", "budgetUnits", "allowCloudData");
         JsonNode billing = section(body, "billing", "rates");
+        JsonNode updates = section(body, "secretUpdates", "paddleAccessToken", "ppocrApiKey", "ppocrSecretKey", "qwenApiKey", "jevApiKey");
         String provider = string(o, "defaultProvider", old.defaultProvider());
         if (!Set.of("paddle-aistudio", "ppocr").contains(provider)) bad();
         String region = string(q, "region", old.qwenRegion());
@@ -141,13 +147,15 @@ public class SettingsService {
         String jevModel = model(j, "model", old.jevModel());
         Long budget = budget(j, old.budgetUnits());
         State next = new State(old.revision() + 1, provider, bool(o, "fallbackEnabled", old.fallbackEnabled()),
-                secret(p, "accessToken", "clearAccessToken", old.paddleAccessToken()),
-                secret(b, "apiKey", "clearApiKey", old.ppocrApiKey()),
-                secret(b, "secretKey", "clearSecretKey", old.ppocrSecretKey()),
-                bool(q, "enabled", old.qwenEnabled()), secret(q, "apiKey", "clearApiKey", old.qwenApiKey()),
+                updatedSecret(updates, "paddleAccessToken", p, "accessToken", "clearAccessToken", old.paddleAccessToken()),
+                updatedSecret(updates, "ppocrApiKey", b, "apiKey", "clearApiKey", old.ppocrApiKey()),
+                updatedSecret(updates, "ppocrSecretKey", b, "secretKey", "clearSecretKey", old.ppocrSecretKey()),
+                bool(q, "enabled", old.qwenEnabled()), updatedSecret(updates, "qwenApiKey", q, "apiKey", "clearApiKey", old.qwenApiKey()),
                 region, workspaceId, qwenModel, bool(j, "enabled", old.jevEnabled()),
-                secret(j, "apiKey", "clearApiKey", old.jevApiKey()), jevModel, budget,
+                updatedSecret(updates, "jevApiKey", j, "apiKey", "clearApiKey", old.jevApiKey()), jevModel, budget,
                 bool(j, "allowCloudData", old.allowCloudData()), rates(billing, old.billingRates()));
+        if (!secrets.writable() && !SettingsPersistence.values(old).equals(SettingsPersistence.values(next)))
+            throw new ApiException(HttpStatus.CONFLICT, "SECRET_STORE_ENV_ONLY：密钥由环境注入；界面修改密钥需要先配置加密存储");
         write(next);
         if ("ASSIST".equalsIgnoreCase(jev.getMode())
                 && (!Objects.equals(old.jevModel(), next.jevModel())
@@ -155,40 +163,6 @@ public class SettingsService {
         state = next;
         applyMutable(next);
         return view();
-    }
-
-    /** Explicit write-only updates. Legacy nested input is accepted only when not mixed. */
-    private JsonNode normalizeSecretUpdates(JsonNode body) {
-        JsonNode updates = section(body, "secretUpdates", "paddleAccessToken", "ppocrApiKey",
-                "ppocrSecretKey", "qwenApiKey", "jevApiKey");
-        if (updates == null) return body;
-        var copy = (com.fasterxml.jackson.databind.node.ObjectNode) body.deepCopy();
-        String[][] paths = {
-                {"paddleAccessToken", "ocr", "paddleAiStudio", "accessToken", "clearAccessToken"},
-                {"ppocrApiKey", "ocr", "ppocr", "apiKey", "clearApiKey"},
-                {"ppocrSecretKey", "ocr", "ppocr", "secretKey", "clearSecretKey"},
-                {"qwenApiKey", "qwen", "", "apiKey", "clearApiKey"},
-                {"jevApiKey", "jev", "", "apiKey", "clearApiKey"}};
-        for (String[] path : paths) {
-            JsonNode update = section(updates, path[0], "value", "clearSecret");
-            if (update == null) continue;
-            if (!update.has("value") && !update.has("clearSecret")) bad();
-            JsonNode parent = copy.get(path[1]);
-            if (parent != null && !parent.isObject()) bad();
-            var target = parent == null ? copy.putObject(path[1])
-                    : (com.fasterxml.jackson.databind.node.ObjectNode) parent;
-            if (!path[2].isEmpty()) {
-                JsonNode child = target.get(path[2]);
-                if (child != null && !child.isObject()) bad();
-                target = child == null ? target.putObject(path[2])
-                        : (com.fasterxml.jackson.databind.node.ObjectNode) child;
-            }
-            if (target.has(path[3]) || target.has(path[4])) bad();
-            if (update.has("value")) target.set(path[3], update.get("value"));
-            if (update.has("clearSecret")) target.set(path[4], update.get("clearSecret"));
-        }
-        copy.remove("secretUpdates");
-        return copy;
     }
 
     private void applyMutable(State s) {
@@ -202,14 +176,8 @@ public class SettingsService {
 
     private State readOrBaseline(State baseline) {
         try {
-            if (Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) requirePrivateDirectory(directory);
-            if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) return baseline;
-            requirePrivateDirectory(directory);
-            if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)
-                    || !Files.getPosixFilePermissions(file, LinkOption.NOFOLLOW_LINKS).equals(FILE_PERMS)
-                    || Files.size(file) > 16_384) throw new IOException("unsafe settings file");
-            State saved = json.copy().enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-                    .readValue(Files.readAllBytes(file), State.class);
+            State saved = persistence.read(baseline);
+            if (saved == baseline) return baseline;
             if (saved == null || saved.revision() < 1 || !Set.of("paddle-aistudio", "ppocr").contains(saved.defaultProvider())
                     || !LEGACY_HOSTS.containsKey(saved.qwenRegion()) || saved.qwenWorkspaceId() == null
                     || saved.paddleAccessToken() == null
@@ -221,47 +189,22 @@ public class SettingsService {
                     || !validSecret(saved.ppocrApiKey()) || !validSecret(saved.ppocrSecretKey())
                     || !validSecret(saved.qwenApiKey()) || !validSecret(saved.jevApiKey())
                     || !validRates(saved.billingRates())) throw new IOException("invalid settings");
+            persistence.finishLoad(saved);
             return saved;
         } catch (Exception e) {
-            // Jackson exceptions can quote fragments of malformed private JSON; never surface them in startup logs.
-            throw new IllegalStateException("私有设置文件损坏或权限不安全；请修复后重启，不会静默清空设置");
+            // Parser/crypto exceptions can contain private fragments; do not attach their causes.
+            throw new IllegalStateException("私有设置或秘密存储不可用；请检查权限、存储模式、外部主密钥和部署标识后重启。原文件保留，不会静默清空或回退明文");
         }
     }
-
     private void write(State next) {
-        Path temp = null;
-        try {
-            ensurePrivateDirectory(directory);
-            if (Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
-                if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
-                    throw new IOException("unsafe settings file");
-            }
-            temp = Files.createTempFile(directory, "settings-", ".tmp");
-            Files.setPosixFilePermissions(temp, FILE_PERMS);
-            Files.write(temp, json.writeValueAsBytes(next), StandardOpenOption.TRUNCATE_EXISTING);
-            Files.move(temp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            Files.setPosixFilePermissions(file, FILE_PERMS);
-        } catch (Exception e) {
-            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "私有设置保存失败；旧设置仍生效");
-        } finally {
-            if (temp != null) try { Files.deleteIfExists(temp); } catch (IOException ignored) { }
-        }
+        try { persistence.write(next); }
+        catch (Exception e) { throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "私有设置保存失败；旧设置仍生效"); }
     }
-
-    private static void ensurePrivateDirectory(Path dir) throws IOException {
-        Path parent = dir.getParent();
-        if (!Files.exists(parent, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(parent)
-                || !Files.isDirectory(parent, LinkOption.NOFOLLOW_LINKS)) throw new IOException("unsafe data directory");
-        if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) {
-            Files.createDirectory(dir);
-            Files.setPosixFilePermissions(dir, DIR_PERMS);
-        }
-        requirePrivateDirectory(dir);
-    }
-    private static void requirePrivateDirectory(Path dir) throws IOException {
-        if (Files.isSymbolicLink(dir) || !Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) throw new IOException("unsafe settings directory");
-        if (!Files.getPosixFilePermissions(dir, LinkOption.NOFOLLOW_LINKS).equals(DIR_PERMS))
-            throw new IOException("settings directory permissions are not private");
+    private static String updatedSecret(JsonNode updates, String slot, JsonNode legacy, String key, String clearKey, String fallback) {
+        JsonNode update = section(updates, slot, "value", "clearSecret");
+        if (update == null) return secret(legacy, key, clearKey, fallback);
+        if (legacy != null && (legacy.has(key) || legacy.has(clearKey))) bad();
+        return secret(update, "value", "clearSecret", fallback);
     }
     private static JsonNode section(JsonNode parent, String key, String... allowed) {
         if (parent == null || !parent.has(key)) return null;
@@ -293,8 +236,7 @@ public class SettingsService {
         if (clear && !value.isEmpty()) bad();
         if (clear) return "";
         if (value.isEmpty()) return fallback;
-        if (value.isBlank() || value.matches("[＊*•●]+")) bad();
-        if (value.length() > 4096 || value.chars().anyMatch(c -> c < 32 || c == 127)) bad();
+        if (!validSecret(value) || value.isBlank() || value.matches("[＊*•●]+") || value.equalsIgnoreCase("REDACTED")) bad();
         return value;
     }
     private static Long budget(JsonNode n, Long fallback) {
@@ -303,6 +245,7 @@ public class SettingsService {
         if (!v.isTextual() || !v.textValue().matches("[1-9][0-9]{0,17}")) bad();
         try { return Long.parseLong(v.textValue()); } catch (NumberFormatException e) { bad(); return null; }
     }
+    private static String nonNull(String value) { return value == null ? "" : value; }
     private static boolean has(String s) { return s != null && !s.isBlank(); }
     private static List<Rate> defaultRates(String qwenModel, String jevModel) {
         return List.of(new Rate("paddle-aistudio", "PaddleOCR-VL-1.6", "CNY", "", "", ""),

@@ -78,7 +78,8 @@ class UxU1ReaderQuietTest {
     @Test
     void u1_honestCopyAndInfoLayers() throws Exception {
         String readerJs = read("src/main/resources/static/reader.js");
-        assertTrue(readerJs.contains("空白页或仅含插图"), "U1：空白/纯图页轻量空态");
+        assertFalse(readerJs.contains("本页为空白页或仅含插图"), "空识别结果不得被断言为空白或纯图");
+        assertTrue(readerJs.contains("emptyReadingMessage"), "空态必须区分图像证据与漏识");
         assertFalse(readerJs.contains("请在校对栏手工框选"), "U1：不得诱导纯图页手工框选");
         assertTrue(readerJs.contains("有待核对文字"), "U1：默认阅读只用轻量疑点标记");
         assertFalse(readerJs.contains("模型提示"), "U1：默认标签不再叫“模型提示”");

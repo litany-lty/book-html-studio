@@ -21,6 +21,7 @@
   <!-- 字体 CSS 非阻塞加载：首屏用系统字体，内置子集就绪后无感替换（约 330KB，不挡渲染） -->
   <link rel="preload" href="/fonts/reader-fonts.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
   <noscript><link rel="stylesheet" href="/fonts/reader-fonts.css"></noscript>
+  <link rel="stylesheet" href="/reader-status.css">
 </head>
 <body data-reader-mode="reading">
   <a class="skip-link" href="#reader">跳到正文</a>
@@ -46,7 +47,7 @@
   <section id="job-panel" class="job-panel" aria-labelledby="job-heading">
     <div class="job-title"><div><h1 id="job-heading">开始转换</h1><p id="book-summary">先导入一本 PDF，原稿会始终保留。</p></div><div class="job-title-actions"><button id="reload-page-header" class="button quiet reload-button" type="button" title="重新识别并排版当前页（二次处理）" hidden>重新处理本页</button><button id="retry-page-header" class="button primary retry-button" type="button" hidden>重新转换本页</button><button id="cancel-job" class="button danger" type="button" hidden>取消任务</button><button id="job-toggle" class="button quiet" type="button" aria-expanded="false">处理设置</button></div></div>
     <form id="job-form" class="job-form" hidden>
-      <label class="field"><span>页码范围</span><input id="page-range" name="pages" value="1-20" placeholder="例如 1-20 或 1,3,25" required><small>默认范围为前 20 页，点击“开始处理”后才会识别；必须主动选择才会处理全书。</small></label>
+      <label class="field"><span>页码范围</span><input id="page-range" name="pages" value="1-20" placeholder="例如 1-20 或 1,3,25" required><small>默认前 20 页，点击后才会识别；全书需主动选择。疑似漏识文字时默认至多补识 4 个同通道区域，可能增加费用，可由服务端关闭。</small></label>
       <label class="check full-book"><input id="all-pages" type="checkbox"><span>处理全部页面</span></label>
       <label id="auto-process-all-label" class="check"><input id="auto-process-all" type="checkbox"><span>随读就绪后自动处理全书其他页<small>开启随读时，即时准备当前阅读窗口后，在后台继续处理本书其余未转换页面（仅限当前书籍）。</small></span></label>
       <fieldset><legend>识别通道</legend><div id="provider-options" class="provider-options"></div><p id="provider-note" class="field-note">正在读取服务端识别配置…</p></fieldset>
@@ -103,7 +104,7 @@
           </div>
         </div>
         <div class="page-head">
-          <div><span id="quality-badge" class="quality-badge">等待处理</span><span id="quality-detail"></span><button id="quality-diagnostics-toggle" class="button quiet" type="button" aria-expanded="false" hidden>详情</button><span id="quality-diagnostics" class="quality-diagnostics" hidden></span><span id="page-save-status" class="page-save-status" role="status" aria-live="polite" hidden></span></div>
+          <div><span id="quality-badge" class="quality-badge">等待处理</span><span id="quality-detail"></span><button id="quality-diagnostics-toggle" class="button quiet" type="button" aria-expanded="false" hidden>详情</button><span id="quality-diagnostics" class="quality-diagnostics" hidden></span><span class="page-status-pair"><span id="page-save-status" class="page-save-status" role="status" aria-live="polite" hidden></span><span id="page-processing-progress" class="page-processing-progress" role="progressbar" aria-label="当前页处理进度" aria-valuemin="0" aria-valuemax="100" hidden></span></span></div>
           <button id="bookmark-button" class="button quiet" type="button" aria-pressed="false">加入书签</button>
         </div>
         <div id="page-message" class="page-message" role="status" hidden></div>
@@ -233,7 +234,8 @@
       <div class="settings-actions"><span id="settings-save-status" role="status" aria-live="polite"></span><button id="settings-local-check" class="button" type="button">检查本地填写</button><button id="settings-save" class="button primary" type="submit">保存配置</button></div>
     </form>
   </dialog>
-  <dialog id="reading-window-dialog" class="reading-window-dialog" aria-labelledby="reading-window-heading"><form method="dialog"><div class="reading-window-dialog-head"><div><h2 id="reading-window-heading">随读识别</h2><p>只准备当前页和前后各 5 页；翻页后停留约 1 秒才送识。阅读不等待识别，未完成时照常显示原稿。</p></div><button class="button quiet" value="cancel" aria-label="关闭">关闭</button></div><p id="reading-window-choice"></p><label class="check" style="margin: 12px 0 6px;"><input id="reading-window-auto-all" type="checkbox"><span>随读就绪后自动处理全书其他页</span></label><p class="reading-window-caution">开启后可能产生云服务用量。已识别并缓存的页面不会重复送识；本次选择固定到停止为止。关闭页面或切换书籍将停止新任务，已送出的当前页可能完成。</p><div class="reading-window-dialog-actions"><button id="reading-window-enable" class="button primary" type="button">确认开启随读识别</button></div></form></dialog>
+  <dialog id="reading-window-dialog" class="reading-window-dialog" aria-labelledby="reading-window-heading"><form method="dialog"><div class="reading-window-dialog-head"><div><h2 id="reading-window-heading">随读识别</h2><p>只准备当前页、前 3 页和后 5 页；翻页后停留约 1 秒才送识。阅读不等待识别，未完成时照常显示原稿。</p></div><button class="button quiet" value="cancel" aria-label="关闭">关闭</button></div><p id="reading-window-choice"></p><label class="checkbox"><input id="reading-window-auto-start" type="checkbox" checked>打开书籍时自动随读处理（使用已配置通道，可能计费）</label>
+      <label class="check" style="margin: 12px 0 6px;"><input id="reading-window-auto-all" type="checkbox"><span>随读就绪后自动处理全书其他页</span></label><p class="reading-window-caution">开启后可能产生云服务用量。已识别并缓存的页面不会重复送识；本次选择固定到停止为止。关闭页面或切换书籍将停止新任务，已送出的当前页可能完成。</p><div class="reading-window-dialog-actions"><button id="reading-window-enable" class="button primary" type="button">确认开启随读识别</button></div></form></dialog>
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
   <script src="/reader-navigation.js"></script>
   <script src="/reading-layout.js"></script>
