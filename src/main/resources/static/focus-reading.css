@@ -1,6 +1,6 @@
-/* Full-viewport parsed reading; side hit regions occupy reserved gutters, not text. */
+/* Full-viewport text: invisible edge gestures do not reserve columns or cover text. */
 body.focus-reading {
-  --focus-edge-width: clamp(44px, 8vw, 120px);
+  --focus-text-gutter: clamp(12px, 2vw, 28px);
   --focus-footer-height: 64px;
   height: 100vh;
   height: 100dvh;
@@ -30,9 +30,9 @@ body.focus-reading #reader {
   overflow-x: hidden;
   scrollbar-gutter: stable;
   padding: max(12px, env(safe-area-inset-top, 0px))
-    max(var(--focus-edge-width), env(safe-area-inset-right, 0px))
+    max(var(--focus-text-gutter), env(safe-area-inset-right, 0px))
     calc(var(--focus-footer-height) + 28px)
-    max(var(--focus-edge-width), env(safe-area-inset-left, 0px));
+    max(var(--focus-text-gutter), env(safe-area-inset-left, 0px));
 }
 body.focus-reading #reader-shell { min-height: 100%; }
 body.focus-reading #paper { width: 100%; max-width: 1100px; margin: 0 auto; }
@@ -40,7 +40,8 @@ body.focus-reading #paper .reading-flow {
   border: 0;
   border-radius: 0;
   box-shadow: none;
-  padding: clamp(12px, 3vw, 40px) clamp(4px, 2vw, 28px);
+  width: min(960px, 100%);
+  padding: clamp(12px, 3vw, 40px) 0;
   background: transparent;
 }
 body.focus-reading #paper .reprocessing-progress-line { display: none; }
@@ -60,28 +61,39 @@ body.focus-reading .reading-progress {
   -webkit-backdrop-filter: none;
 }
 body.focus-reading .focus-exit { min-height: 44px; white-space: nowrap; font-size: 12px; }
+/* No arrows, hover tint or invisible full-height hit layer in pointer reading.
+   Only keyboard focus temporarily reveals a small, labelled navigation control. */
 .focus-page-zone {
   position: fixed;
-  z-index: 8;
-  top: max(0px, env(safe-area-inset-top, 0px));
-  bottom: var(--focus-footer-height, 64px);
-  width: var(--focus-edge-width, 44px);
-  min-width: 44px;
+  z-index: 10;
+  bottom: calc(var(--focus-footer-height, 64px) + 8px);
+  width: 1px;
+  height: 1px;
+  min-width: 0;
+  min-height: 0;
   border: 0;
-  border-radius: 0;
   padding: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 28px;
-  touch-action: pan-y pinch-zoom;
-  user-select: none;
-  -webkit-user-select: none;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  pointer-events: none;
 }
-#focus-prev-page { left: env(safe-area-inset-left, 0px); }
-#focus-next-page { right: calc(env(safe-area-inset-right, 0px) + var(--focus-scrollbar-width, 0px)); }
-.focus-page-zone:not(:disabled):hover { background: color-mix(in srgb, var(--primary) 5%, transparent); color: var(--primary-deep); }
-.focus-page-zone:focus-visible { outline: 2px solid var(--primary); outline-offset: -4px; }
-.focus-page-zone:disabled { color: transparent; opacity: 1; cursor: default; }
+#focus-prev-page { left: max(12px, env(safe-area-inset-left, 0px)); }
+#focus-next-page { right: max(12px, env(safe-area-inset-right, 0px)); }
+.focus-page-zone:focus-visible {
+  width: auto;
+  height: auto;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 6px 12px;
+  clip-path: none;
+  pointer-events: auto;
+  background: var(--reading-paper);
+  color: var(--ink);
+  font: 14px var(--sans);
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
 .focus-reading-help { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @media (max-width: 620px) {
   body.focus-reading .reading-progress { gap: 6px; padding-inline: max(8px, env(safe-area-inset-left, 0px)) max(8px, env(safe-area-inset-right, 0px)); }

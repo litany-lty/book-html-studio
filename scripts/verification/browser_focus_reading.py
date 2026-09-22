@@ -74,6 +74,17 @@ def main():
             context = browser.new_context(viewport={'width': 1440, 'height': 1000}, reduced_motion='reduce', has_touch=True)
             context.route('**/*', respond)
             page = context.new_page()
+            def edge_point(direction):
+                bounds = page.locator('#reader').bounding_box()
+                width = page.locator('#reader').evaluate('el=>el.clientWidth')
+                return (bounds['x'] + (20 if direction < 0 else width - 20), bounds['y'] + 180)
+            def edge_click(direction, touch=False):
+                x, y = edge_point(direction)
+                (page.touchscreen.tap if touch else page.mouse.click)(x, y)
+                page.wait_for_timeout(340)  # Includes the word-selection settlement window.
+            def no_turn_after_wait():
+                page.wait_for_timeout(340)
+                return page.locator('#page-jump').input_value()
             page.on('pageerror', lambda error: errors.append(str(error)))
             page.goto('http://focus-reader.test/', wait_until='networkidle')
             page.select_option('#book-select', BOOK)
@@ -89,12 +100,15 @@ def main():
               const r=document.querySelector('#reader').getBoundingClientRect(), p=document.querySelector('#reading-progress').getBoundingClientRect();
               return r.top===0 && Math.abs(r.height-innerHeight)<=1 && Math.abs(p.bottom-innerHeight)<=1 && p.width===innerWidth;
             }'''))
+            check('no_visible_arrows_or_side_overlay', page.evaluate("""() => [...document.querySelectorAll('.focus-page-zone')].every(el=>{
+              const r=el.getBoundingClientRect(); return r.width<=1 && r.height<=1 && getComputedStyle(el).pointerEvents==='none' && !/[‹›]/.test(el.textContent);
+            })"""))
             page.screenshot(path=str(OUT / 'desktop-focus.png'))
             check('first_page_previous_disabled', page.locator('#focus-prev-page').is_disabled())
-            page.click('#focus-next-page')
+            edge_click(1)
             page.wait_for_function("document.querySelector('#page-jump').value==='2' && document.querySelector('#paper').textContent.includes('第2页')")
             check('right_region_turns_next', True)
-            page.click('#focus-prev-page')
+            edge_click(-1)
             page.wait_for_function("document.querySelector('#page-jump').value==='1' && document.querySelector('#paper').textContent.includes('第1页')")
             check('left_region_turns_previous', True)
             page.locator('#reader').focus(); page.keyboard.press('ArrowRight')
@@ -104,27 +118,33 @@ def main():
             page.wait_for_function("document.querySelector('#paper').textContent.includes('第3页')")
             page.keyboard.press('ArrowLeft')
             page.wait_for_function("document.querySelector('#paper').textContent.includes('第2页')")
-            check('arrows_still_work_after_clicking_turn_region', True)
+            check('keyboard_accessible_navigation_controls_work', True)
             page.evaluate("import('/store.js').then(({state})=>{state.pageCache.clear(); for(let i=0;i<3;i++)document.querySelector('#focus-next-page').click();})")
             page.wait_for_function("document.querySelector('#paper').textContent.includes('第5页')")
             check('rapid_clicks_keep_latest_page', page.locator('#page-jump').input_value() == '5')
             page.evaluate("for(let i=0;i<3;i++)document.querySelector('#focus-prev-page').click()")
             page.wait_for_function("document.querySelector('#paper').textContent.includes('第2页')")
             page.evaluate('''() => { const range=document.createRange();range.selectNodeContents(document.querySelector('#paper .reading-flow p'));getSelection().removeAllRanges();getSelection().addRange(range); }''')
-            page.click('#focus-next-page')
+            edge_click(1)
             check('selected_text_not_accidentally_turned', page.locator('#page-jump').input_value() == '2')
             page.evaluate('getSelection().removeAllRanges()')
             # Long press and a drag in a side region are not page turns.
-            region = page.locator('#focus-next-page').bounding_box()
-            x, y = region['x']+region['width']/2, region['y']+150
+            x, y = edge_point(1)
             page.mouse.move(x, y); page.mouse.down(); page.wait_for_timeout(550); page.mouse.up()
-            check('long_press_not_a_turn', page.locator('#page-jump').input_value() == '2')
+            check('long_press_not_a_turn', no_turn_after_wait() == '2')
             page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x, y+60, steps=5); page.mouse.up()
-            check('drag_not_a_turn', page.locator('#page-jump').input_value() == '2')
+            check('drag_not_a_turn', no_turn_after_wait() == '2')
+            page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x, y+70, steps=5); page.mouse.move(x, y, steps=5); page.mouse.up()
+            check('out_and_back_drag_not_a_turn', no_turn_after_wait() == '2')
+            page.mouse.move(x, y); page.mouse.down()
+            page.locator('#reader').evaluate('el=>el.scrollTop+=60')
+            page.wait_for_timeout(50); page.mouse.up()
+            check('scroll_during_tap_not_a_turn', no_turn_after_wait() == '2')
+            page.locator('#reader').evaluate('el=>el.scrollTop=0')
             # Original jump form is the common route, including draft confirmation.
             page.evaluate("import('/store.js').then(({state})=>{state.dirty=true;})")
             page.once('dialog', lambda d: d.dismiss())
-            page.click('#focus-next-page')
+            edge_click(1)
             check('cancelled_dirty_navigation_preserves_page', page.locator('#page-jump').input_value() == '2')
             page.evaluate("import('/store.js').then(({state})=>{state.dirty=false;})")
             page.locator('#reader').focus(); page.keyboard.press('Escape')
@@ -134,13 +154,13 @@ def main():
             page.locator('#reading-progress-range').evaluate("el=>{el.value='8';el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));}")
             page.wait_for_function("document.querySelector('#paper').textContent.includes('第8页')")
             check('existing_progress_scrubber_works_and_last_page_bounded', page.locator('#focus-next-page').is_disabled())
-            page.click('#focus-prev-page')
+            edge_click(-1)
             page.wait_for_selector('#focus-page-empty')
             check('failed_page_not_fabricated', '解析未完成' in page.locator('#focus-page-empty').inner_text())
-            page.click('#focus-prev-page')
+            edge_click(-1)
             page.wait_for_function("document.querySelector('#focus-page-empty').textContent.includes('尚未解析')")
             check('unparsed_page_still_navigable', page.locator('#reading-progress-range').is_enabled())
-            page.click('#focus-prev-page')
+            edge_click(-1)
             page.wait_for_selector('#paper .reading-flow')
             # Center double click remains normal text selection, not navigation.
             page.locator('#paper .reading-flow p').first.dblclick()
@@ -155,9 +175,13 @@ def main():
             page.set_viewport_size({'width': 390, 'height': 844})
             page.wait_for_timeout(100)
             check('mobile_no_horizontal_overflow', page.evaluate('document.documentElement.scrollWidth<=innerWidth'))
-            check('mobile_footer_and_gutters_do_not_cover_text', page.evaluate('''() => {
-              const b=document.querySelector('#paper .reading-flow p').getBoundingClientRect(), l=document.querySelector('#focus-prev-page').getBoundingClientRect(), r=document.querySelector('#focus-next-page').getBoundingClientRect(), f=document.querySelector('#reading-progress').getBoundingClientRect();
-              return l.right<=b.left && r.left>=b.right && Math.abs(l.bottom-f.top)<=1 && f.bottom<=innerHeight+1;
+            check('mobile_text_reclaims_both_side_columns', page.evaluate('''() => {
+              const r=document.querySelector('#reader'), node=document.querySelector('#paper .reading-flow p'), p=node.getBoundingClientRect();
+              return p.width>=r.clientWidth-26 && p.left>=12 && p.right<=innerWidth && parseFloat(getComputedStyle(node).fontSize)===20;
+            }'''))
+            check('edge_text_not_covered_by_transparent_button', page.evaluate('''() => {
+              const p=document.querySelector('#paper .reading-flow p'), r=p.getBoundingClientRect();
+              return p.contains(document.elementFromPoint(r.left+5,r.top+10)) && p.contains(document.elementFromPoint(r.right-5,r.top+10));
             }'''))
             check('mobile_progress_controls_visible_and_unoccluded', page.evaluate('''() => ['reading-progress-range', 'reading-progress-output', 'focus-exit'].every(id=>{
               const el=document.getElementById(id), r=el.getBoundingClientRect();
@@ -166,13 +190,48 @@ def main():
             })'''))
             page.locator('#reader').focus()
             page.screenshot(path=str(OUT / 'mobile-focus.png'))
-            region = page.locator('#focus-next-page').bounding_box()
-            page.touchscreen.tap(region['x']+region['width']/2, region['y']+180)
+            edge_click(1, touch=True)
             page.wait_for_function("document.querySelector('#paper').textContent.includes('第5页')")
-            region = page.locator('#focus-prev-page').bounding_box()
-            page.touchscreen.tap(region['x']+region['width']/2, region['y']+180)
+            edge_click(-1, touch=True)
             page.wait_for_function("document.querySelector('#paper').textContent.includes('第4页')")
             check('mobile_touch_regions_turn_pages', True)
+            # Choose a real glyph within the left tap region; no overlay may block it.
+            glyph = page.evaluate('''() => {
+              const p=document.querySelector('#paper .reading-flow p'), walk=document.createTreeWalker(p,NodeFilter.SHOW_TEXT);
+              for(let text; (text=walk.nextNode());) {
+                if(!text.length) continue;
+                const range=document.createRange();range.setStart(text,0);range.setEnd(text,1);
+                const r=range.getBoundingClientRect();
+                if(r.width>0) return {x:r.x+r.width/2,y:r.y+r.height/2};
+              }
+            }''')
+            page.mouse.dblclick(glyph['x'],glyph['y'],delay=80)
+            check('edge_double_click_selects_text_without_turning', no_turn_after_wait() == '4' and page.evaluate('getSelection().toString().length>0'))
+            page.evaluate('getSelection().removeAllRanges()')
+            page.mouse.click(glyph['x'],glyph['y'])
+            page.wait_for_function("document.querySelector('#paper').textContent.includes('第3页')")
+            check('single_tap_on_edge_text_turns_page', True)
+            # A pending edge tap is cancelled when the user scrolls immediately after it.
+            x,y=edge_point(1)
+            page.mouse.click(x,y)
+            page.locator('#reader').evaluate('el=>el.scrollTop=120')
+            check('scroll_cancels_pending_turn', no_turn_after_wait() == '3')
+            page.locator('#reader').evaluate('el=>el.scrollTop=0')
+            edge_click(1)
+            page.wait_for_function("document.querySelector('#paper').textContent.includes('第4页')")
+            page.evaluate('''() => {
+              const a=document.createElement('a');a.id='fixture-edge-link';a.href='#fixture-link';a.textContent='正文链接';
+              document.querySelector('#paper .reading-flow p').prepend(a);
+            }''')
+            link=page.locator('#fixture-edge-link').bounding_box()
+            page.mouse.click(link['x']+3,link['y']+8)
+            check('edge_link_click_remains_native_and_does_not_turn', no_turn_after_wait() == '4' and page.evaluate("location.hash==='#fixture-link'"))
+            page.locator('#fixture-edge-link').evaluate('el=>el.remove()')
+            # Nothing reappears on hover; touch/pointer use never reveals the keyboard controls.
+            x,y=edge_point(1);page.mouse.move(x,y)
+            check('hover_does_not_reveal_side_buttons', page.evaluate("[...document.querySelectorAll('.focus-page-zone')].every(el=>getComputedStyle(el).clipPath!=='none' && getComputedStyle(el).pointerEvents==='none')"))
+            page.locator('#reader').focus()
+            page.screenshot(path=str(OUT / 'mobile-focus.png'))
             page.locator('#reader').evaluate('el=>el.scrollTop=el.scrollHeight')
             check('last_line_clear_of_footer', page.evaluate("document.querySelector('#paper .reading-flow').getBoundingClientRect().bottom <= document.querySelector('#reading-progress').getBoundingClientRect().top"))
             page.locator('#reader').evaluate('el=>el.scrollTop=0')

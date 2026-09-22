@@ -9,13 +9,20 @@ export function pageAfter(page, total, direction) {
 }
 
 export function isShortTap(start, end) {
-  return Boolean(start && end && start.pointerId === end.pointerId && !start.selected
+  return Boolean(start && end && start.pointerId === end.pointerId && !start.selected && !start.moved
     && end.time >= start.time && end.time - start.time < 500
     && Math.hypot(end.x - start.x, end.y - start.y) <= 12
     && Math.abs(end.scrollTop - start.scrollTop) <= 2);
 }
 
-const interactive = 'input, textarea, select, button, a, summary, [contenteditable]:not([contenteditable="false"]), [role="slider"], [role="textbox"], [role="button"]';
+// Hit width is independent of text padding: no element sits over the text.
+export function edgeDirectionAt(x, left, width) {
+  if (![x, left, width].every(Number.isFinite) || width <= 0 || x < left || x >= left + width) return 0;
+  const edge = Math.min(width / 3, Math.max(44, Math.min(120, width * .18)));
+  return x < left + edge ? -1 : x >= left + width - edge ? 1 : 0;
+}
+
+const interactive = 'input, textarea, select, button, a, summary, [contenteditable]:not([contenteditable="false"]), [role="slider"], [role="textbox"], [role="button"], .content-issue, .issue-inspector, audio, video, iframe';
 
 export function initFocusReading({ document: doc = document, model = state, onProofRequested = () => {} } = {}) {
   const toggle = doc.getElementById('focus-toggle');
@@ -42,12 +49,13 @@ export function initFocusReading({ document: doc = document, model = state, onPr
     button.setAttribute('aria-label', label); button.hidden = true;
     return button;
   };
-  const previous = makeButton('focus-prev-page', '‹', '上一页');
-  const next = makeButton('focus-next-page', '›', '下一页');
+  const previous = makeButton('focus-prev-page', '上一页', '上一页');
+  const next = makeButton('focus-next-page', '下一页', '下一页');
   for (const button of [previous, next]) {
     button.className = 'focus-page-zone';
     button.setAttribute('aria-controls', 'paper');
-    button.title = button === previous ? '上一页（←）' : '下一页（→）';
+    // Visually clipped controls remain available to keyboard/screen-reader users.
+    // Pointer paging is delegated to the reader instead of a text-covering overlay.
     shell.append(button);
   }
   const exit = makeButton('focus-exit', '退出专注', '退出专注模式');
@@ -56,7 +64,7 @@ export function initFocusReading({ document: doc = document, model = state, onPr
   progress.append(exit);
   const help = doc.createElement('p');
   help.id = 'focus-reading-help'; help.className = 'focus-reading-help'; help.hidden = true;
-  help.textContent = '点击左侧空白区域上一页、右侧空白区域下一页，也可用左右方向键。长页可上下滚动；底部进度条可跳页。按 Esc 或退出专注返回工作台。';
+  help.textContent = '轻点页面左侧区域上一页、右侧区域下一页，也可用左右方向键。长页可上下滚动；底部进度条可跳页。按 Esc 或退出专注返回工作台。';
   const empty = doc.createElement('p');
   empty.id = 'focus-page-empty'; empty.className = 'focus-page-empty'; empty.hidden = true;
   empty.setAttribute('role', 'status');
@@ -66,8 +74,15 @@ export function initFocusReading({ document: doc = document, model = state, onPr
   let transition = 0;
   let bookBefore = null;
   let positionBefore = null;
+  let turnTimer = null;
+  let gesture = null;
+  let tap = null;
   const selected = () => Boolean(win.getSelection?.()?.toString());
   const active = () => Boolean(model.focus && model.book && !shell.hidden);
+  const scope = () => `${model.book?.id}:${model.currentPage}:${transition}`;
+  function cancelTap() {
+    win.clearTimeout(turnTimer); turnTimer = null; gesture = null; tap = null;
+  }
   const setClass = (name, value) => {
     if (doc.body.classList.contains(name) !== value) doc.body.classList.toggle(name, value);
   };
@@ -91,8 +106,6 @@ export function initFocusReading({ document: doc = document, model = state, onPr
   }
   function measureFooter() {
     if (!active()) return;
-    const scrollbar = `${Math.max(0, reader.offsetWidth - reader.clientWidth)}px`;
-    if (doc.body.style.getPropertyValue('--focus-scrollbar-width') !== scrollbar) doc.body.style.setProperty('--focus-scrollbar-width', scrollbar);
     const value = `${Math.ceil(progress.getBoundingClientRect().height)}px`;
     if (doc.body.style.getPropertyValue('--focus-footer-height') !== value) doc.body.style.setProperty('--focus-footer-height', value);
   }
@@ -132,6 +145,7 @@ export function initFocusReading({ document: doc = document, model = state, onPr
   // render and preference save. Do not add a second state.focus toggle here.
   toggle.addEventListener('click', event => {
     if (!model.book) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+    cancelTap();
     positionBefore = location();
     if (!model.focus) {
       returnState = positionBefore;
@@ -165,31 +179,68 @@ export function initFocusReading({ document: doc = document, model = state, onPr
     syncNavigation();
   }
   for (const [button, direction] of [[previous, -1], [next, 1]]) {
-    let start = null, tap = false;
-    const point = event => ({ pointerId: event.pointerId, x: event.clientX, y: event.clientY,
-      time: event.timeStamp, scrollTop: reader.scrollTop });
-    button.addEventListener('pointerdown', event => {
-      tap = false;
-      start = event.isPrimary && event.button === 0 && !event.ctrlKey && !event.metaKey && !event.altKey
-        ? { ...point(event), selected: selected() } : null;
-    });
-    button.addEventListener('pointerup', event => { tap = isShortTap(start, point(event)); start = null; });
-    button.addEventListener('pointercancel', () => { start = null; tap = false; });
-    button.addEventListener('click', event => {
-      if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
-      const allowed = event.detail === 0 || tap;
-      tap = false;
-      if (allowed) navigate(direction);
-    });
+    button.addEventListener('click', () => { cancelTap(); navigate(direction); });
   }
+  const point = event => ({ pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+    time: event.timeStamp, scrollTop: reader.scrollTop });
+  function directionAt(event) {
+    if (!active() || doc.hidden || doc.querySelector('dialog[open]') || event.defaultPrevented
+        || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey
+        || event.target.closest?.(interactive) || progress.contains(event.target)) return 0;
+    const bounds = reader.getBoundingClientRect();
+    // clientWidth excludes the scrollbar; the footer has its own native controls.
+    if (event.clientY < bounds.top || event.clientY >= Math.min(bounds.bottom, progress.getBoundingClientRect().top)) return 0;
+    return edgeDirectionAt(event.clientX, bounds.left + reader.clientLeft, reader.clientWidth);
+  }
+  // Do not prevent native pointer defaults or capture a pointer: text selection,
+  // touch scrolling, pinch zoom and links must still receive their real events.
+  doc.addEventListener('pointerdown', cancelTap, { capture: true, passive: true });
+  reader.addEventListener('pointerdown', event => {
+    const direction = directionAt(event);
+    if (direction && event.isPrimary && event.button === 0) {
+      gesture = { ...point(event), direction, scope: scope(), selected: selected() };
+    }
+  }, { passive: true });
+  reader.addEventListener('pointermove', event => {
+    if (gesture && (event.pointerId !== gesture.pointerId
+        || Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 12)) {
+      gesture.moved = true; // Moving out and back is still a drag, not a tap.
+    }
+  }, { passive: true });
+  reader.addEventListener('pointerup', event => {
+    tap = isShortTap(gesture, point(event)) && gesture.scope === scope()
+      && gesture.direction === directionAt(event) ? gesture : null;
+    gesture = null;
+  }, { passive: true });
+  reader.addEventListener('pointercancel', cancelTap, { passive: true });
+  reader.addEventListener('scroll', cancelTap, { passive: true });
+  reader.addEventListener('click', event => {
+    const completed = tap;
+    tap = null;
+    if (!completed || event.detail !== 1 || event.button !== 0 || selected()
+        || completed.direction !== directionAt(event)) return;
+    // A brief settlement window lets a second click select a word instead of
+    // turning away on its first click. Keyboard/assistive controls stay immediate.
+    turnTimer = win.setTimeout(() => {
+      turnTimer = null;
+      if (completed.scope === scope() && Math.abs(reader.scrollTop - completed.scrollTop) <= 2
+          && directionAt(event) === completed.direction && !selected()) navigate(completed.direction);
+    }, 280);
+  });
+  reader.addEventListener('dblclick', cancelTap);
+  doc.addEventListener('selectionchange', () => { if (selected()) cancelTap(); });
+  doc.addEventListener('visibilitychange', cancelTap);
+  win.addEventListener('blur', cancelTap);
   doc.addEventListener('keydown', event => {
     if (!active() || event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || doc.querySelector('dialog[open]')) return;
     if (event.key === 'Escape') {
+      cancelTap();
       event.preventDefault(); event.stopImmediatePropagation(); toggle.click(); return;
     }
     const onTurnControl = event.target === previous || event.target === next;
     if (event.shiftKey || event.repeat || selected() || (!onTurnControl && event.target.closest?.(interactive))) return;
     if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      cancelTap();
       event.preventDefault(); event.stopPropagation(); navigate(event.key === 'ArrowLeft' ? -1 : 1);
     }
   }, true);
