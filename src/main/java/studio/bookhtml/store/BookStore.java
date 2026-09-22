@@ -146,11 +146,20 @@ public class BookStore {
                     throw new PageConflictException(currentRev, "任务已不在可开始状态，本页不再写入");
                 requirePageInJob(job, current, currentRev);
             }
-            case JOB_COMPLETE -> {
+            case JOB_COMPLETE, JOB_BASELINE -> {
                 Job job = requireCurrentJob(id, currentRev, expectedJobId, current.pageNumber());
                 if (!"RUNNING".equals(job.status()))
                     throw new PageConflictException(currentRev, "任务已结束或取消，本页结果不再写入");
                 requirePageInJob(job, current, currentRev);
+            }
+            case JOB_ENHANCEMENT -> {
+                Job job = requireCurrentJob(id, currentRev, expectedJobId, current.pageNumber());
+                if (!"RUNNING".equals(job.status()))
+                    throw new PageConflictException(currentRev, "任务已结束或取消，本页结果不再写入");
+                requirePageInJob(job, current, currentRev);
+                // U4：人工在此期间保存了内容，新的人工版本优先，禁止覆盖。
+                if (current.reviewed() || "manual".equals(current.provider()))
+                    throw new PageConflictException(currentRev, "本页已有人工版本，增强结果保留为候选，不覆盖");
             }
             case JOB_RESTORE -> {
                 Job job = requireCurrentJob(id, currentRev, expectedJobId, current.pageNumber());
@@ -450,6 +459,8 @@ public class BookStore {
      */
     public Path layoutProfilePath(String id) { return bookDir(id).resolve("layout-profile.json"); }
     public Path presentationOverridesPath(String id) { return bookDir(id).resolve("presentation-overrides.json"); }
+    /** U4：页面 attempt 恢复意图（IN_PROGRESS → 终态；重启对照，不重发云请求）。 */
+    public Path pageAttemptsPath(String id) { return bookDir(id).resolve("page-attempts.json"); }
     public <T> T readSidecar(Path path, Class<T> type) {
         return Files.exists(path) ? read(path, type, "展示索引数据损坏") : null;
     }

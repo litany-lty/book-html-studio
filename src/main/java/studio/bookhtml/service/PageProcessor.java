@@ -20,6 +20,13 @@ public class PageProcessor {
     @Autowired public PageProcessor(BookStore store,PdfService pdf,NativeTextExtractor nativeText,TesseractService tesseract,CloudOcrPipeline qwenOcr,PaddleOcrPipeline paddle,MiniMaxVisionClient miniMax,QwenLayoutClient qwenLayout,QwenTocRecoveryService tocRecovery,SparsePageGuard sparsePageGuard,VerticalLayoutNormalizer verticalNormalizer,AssistedReviewService review,TraditionalConverter converter){this.store=store;this.pdf=pdf;this.nativeText=nativeText;this.tesseract=tesseract;this.qwenOcr=qwenOcr;this.paddle=paddle;this.miniMax=miniMax;this.qwenLayout=qwenLayout;this.tocRecovery=tocRecovery;this.sparsePageGuard=sparsePageGuard;this.verticalNormalizer=verticalNormalizer;this.review=review;this.converter=converter;}
     PageProcessor(BookStore store,PdfService pdf,NativeTextExtractor nativeText,TesseractService tesseract,CloudOcrPipeline qwenOcr,PaddleOcrPipeline paddle,MiniMaxVisionClient miniMax,QwenLayoutClient qwenLayout,QwenTocRecoveryService tocRecovery,VerticalLayoutNormalizer verticalNormalizer,AssistedReviewService review,TraditionalConverter converter){this(store,pdf,nativeText,tesseract,qwenOcr,paddle,miniMax,qwenLayout,tocRecovery,new SparsePageGuard(),verticalNormalizer,review,converter);}
     @Autowired public void setSettings(SettingsService settings){this.settings=settings;}
+    /**
+     * U4：可读基线。与完整 process() 同一管线、关闭可选增强：提取/OCR → 原始证据校验 →
+     * 发布安全可读版。Qwen 未完成不阻止读取。
+     */
+    public ProcessingResult processBaseline(String bookId,int pageNumber,String provider,String layout,boolean split,BooleanSupplier cancelled)throws Exception{
+        return process(bookId,pageNumber,provider,layout,split,false,cancelled);
+    }
     public ProcessingResult process(String bookId,int pageNumber,String provider,String layout,boolean split,boolean assist,BooleanSupplier cancelled)throws Exception{
         try(UsageContext.Scope ignored=UsageContext.open(bookId,pageNumber,"OCR_PAGE")){
         if(cancelled.getAsBoolean())throw new CancelledException();Page previous=store.readPage(bookId,pageNumber);String nativeLayout="vertical".equals(layout)?"vertical":"horizontal".equals(layout)?"horizontal":"auto";
@@ -163,6 +170,66 @@ public class PageProcessor {
         catch(Exception ignored){return "处理追溯：页"+pageNumber+" 通道"+provider+" 版式"+layout;}
     }
     private AssistResult assistWithQwen(Path pdfPath,int pageNumber,List<Block>source,String layout,BooleanSupplier cancelled)throws Exception{if(!qwenLayout.configured())return new AssistResult(source,false,"Qwen3.8-Max 结构辅助未配置，本页仅保留原生文字层");BufferedImage image=pdf.renderForOcr(pdfPath,pageNumber);try{return new AssistResult(qwenLayout.assist(qwenOcr.encodeWithin(image).bytes(),source,layout,cancelled),true,null);}catch(CancelledException e){throw e;}catch(Exception e){String detail=JobService.safeDetail(e);return new AssistResult(source,false,"Qwen3.8-Max 结构辅助失败，本页已保留原生文字层"+(detail==null?"":"："+detail));}finally{image.flush();}}
+    /**
+     * U4：可选增强阶段。只产生候选/派生结构，从不直接保存整页；调用方（JobService）
+     * 经质量门与版本校验后最多发布一次合并结果。编排镜像 process() 内同名分支
+     * （native/paddle/qwen 辅助段），基线已 simplify 的块再次 simplify 安全
+     * （由原文重新转简体，幂等）。无原始转录的空白基线直接跳过。
+     */
+    public record EnrichResult(List<Block> blocks, String actualProvider, List<String> warnings) {}
+    public EnrichResult enrichBaseline(String bookId,int pageNumber,Page baseline,String provider,String layout,BooleanSupplier cancelled)throws Exception{
+        try(UsageContext.Scope ignored=UsageContext.open(bookId,pageNumber,"ENRICH_PAGE")){
+        if(cancelled.getAsBoolean())throw new CancelledException();
+        List<Block> sourceRecords=baseline.sourceRecords()==null?List.of():baseline.sourceRecords();
+        List<String> warnings=new ArrayList<>();
+        List<Block> blocks=new ArrayList<>(baseline.blocks()==null?List.of():baseline.blocks());
+        String actualProvider=baseline.provider()==null?"":baseline.provider();
+        if(sourceRecords.isEmpty()){
+            warnings.add("基线无原始转录可供核对，跳过增强，保留基线可读版本");
+            return new EnrichResult(List.copyOf(blocks),actualProvider,List.copyOf(warnings));
+        }
+        boolean baseNative=actualProvider.startsWith("native");
+        boolean wantPaddle=PaddleOcrPipeline.isPaddle(provider);
+        boolean wantQwen="qwen".equals(provider);
+        BufferedImage image=pdf.renderForOcr(store.pdf(bookId),pageNumber);
+        try{
+            if(baseNative&&wantPaddle){
+                AssistResult result=assistWithQwen(store.pdf(bookId),pageNumber,blocks,layout,cancelled);
+                blocks=guardedAssist(blocks,result.blocks(),warnings,"Qwen3.8-Max 结构辅助来源校验失败，已保留原生文字层",QualityGate.GateOp.REORDER_OR_RECLASSIFY);
+                if(result.assisted())actualProvider="native+qwen-assist";else warnings.add(result.warning());
+            }else if(baseNative&&wantQwen){
+                if(miniMax.configured()){
+                    try{List<Block> assisted=miniMax.assist(qwenOcr.encodeWithin(image).bytes(),blocks,layout,cancelled);blocks=simplify(guardedAssist(blocks,assisted,warnings,"MiniMax 结构辅助来源校验失败，已保留原生文字层结果",QualityGate.GateOp.REORDER_OR_RECLASSIFY));actualProvider="native+minimax";}
+                    catch(CancelledException e){throw e;}
+                    catch(Exception e){blocks=new ArrayList<>(sourceRecords);warnings.add("MiniMax 结构辅助失败，本页保留原生文字层结果");}
+                }else warnings.add("MiniMax 辅助未配置，本页仅使用原生文字层，未完成结构辅助");
+            }else if(PaddleOcrPipeline.isPaddle(actualProvider)||(!baseNative&&wantPaddle)){
+                String ocrLabel=PaddleOcrPipeline.ocrShortLabel(PaddleOcrPipeline.isPaddle(actualProvider)?actualProvider:provider);
+                QwenTocRecoveryService.RecoveryResult recovery=tocRecovery.recover(image,blocks,cancelled);
+                if(recovery.warning()!=null)warnings.add(recovery.warning());
+                if(recovery.recovered()){blocks=guardedAssist(sourceRecords,recovery.blocks(),warnings,"目录恢复来源校验失败，已保留"+ocrLabel+"原始结果",QualityGate.GateOp.NEW_VISUAL_TRANSCRIPTION);actualProvider=actualProvider+"+qwen-toc-recovery";}
+                else if(recovery.attempted())blocks=guardedAssist(sourceRecords,recovery.blocks(),warnings,"目录恢复来源校验失败，已保留"+ocrLabel+"原始结果",QualityGate.GateOp.NEW_VISUAL_TRANSCRIPTION);
+                else if(shouldRunLayoutAssist(recovery)&&qwenLayout.configured()){try{List<Block> assisted=qwenLayout.assist(qwenOcr.encodeWithin(image).bytes(),blocks,layout,cancelled);blocks=guardedAssist(sourceRecords,assisted,warnings,"Qwen3.8-Max 结构辅助来源校验失败，已保留"+ocrLabel+"原始结果",QualityGate.GateOp.REORDER_OR_RECLASSIFY);actualProvider=actualProvider+"+qwen-assist";}catch(CancelledException e){throw e;}catch(Exception e){String detail=JobService.safeDetail(e);warnings.add("Qwen3.8-Max 结构辅助失败，本页已保留"+ocrLabel+"原始结果"+(detail==null?"":"："+detail));blocks=new ArrayList<>(sourceRecords);}}
+                else warnings.add("Qwen3.8-Max 结构辅助未配置，本页仅保留"+ocrLabel+"结果");
+            }else if("qwen".equals(actualProvider)||(!baseNative&&wantQwen)){
+                if(miniMax.configured()){
+                    try{byte[]png=qwenOcr.encodeWithin(image).bytes();List<Block> assisted=miniMax.assist(png,blocks,layout,cancelled);blocks=guardedAssist(sourceRecords,assisted,warnings,"MiniMax 结构辅助来源校验失败，已保留 Qwen OCR 原始结果",QualityGate.GateOp.MERGE_TEXT_STRUCTURE);if("vertical".equals(layout))blocks=verticalNormalizer.normalize(blocks,sourceRecords);actualProvider="qwen+minimax";List<Block> reviewed=review.review(image,blocks,cancelled);blocks=guardedAssist(blocks,reviewed,warnings,"局部复核来源校验失败，已保留辅助前结果",QualityGate.GateOp.REORDER_OR_RECLASSIFY);if(blocks.stream().anyMatch(b->b.source()!=null&&b.source().contains("qwen-review")))actualProvider="qwen+minimax+qwen-review";}
+                    catch(CancelledException e){throw e;}
+                    catch(Exception e){String detail=JobService.safeDetail(e);warnings.add("MiniMax 结构辅助失败，本页已保留 Qwen OCR 原始结果"+(detail==null?"":"："+detail));blocks=new ArrayList<>(sourceRecords);}
+                }else warnings.add("MiniMax 辅助未配置，本页仅使用 Qwen OCR，未完成结构辅助");
+            }else{
+                warnings.add("本地基线无可选增强通道，保留基线可读版本");
+                return new EnrichResult(List.copyOf(blocks),actualProvider,List.copyOf(warnings));
+            }
+            blocks=simplify(blocks);
+            AdvertisementFilter.Result advertisements=AdvertisementFilter.classify(blocks,baseline.reviewed(),converter);
+            blocks=new ArrayList<>(advertisements.blocks());
+            if(advertisements.marked()>0)warnings.add("已标记 "+advertisements.marked()+" 个独立页边广告块；原稿和原始识别记录保留可查看");
+            if(advertisements.heldForReview()>0)warnings.add("有 "+advertisements.heldForReview()+" 个疑似广告块含已确认疑点，未自动隐藏，请人工复核");
+            return new EnrichResult(List.copyOf(blocks),actualProvider,List.copyOf(warnings));
+        }finally{image.flush();}
+        }
+    }
     private List<Block>simplify(List<Block>blocks)throws OcrException{List<Block>result=new ArrayList<>();for(Block b:blocks){String original=b.original()==null?"":b.original();String simplified=converter.toSimplified(original);List<ContentIssue>issues=mapIssues(original,b.issues(),converter);result.add(new Block(b.id(),b.type(),b.order(),b.bbox(),b.writingMode(),b.original(),simplified,b.confidence(),true,false,b.headingLevel(),b.source(),b.sourceIds(),b.suggestion(),b.sourceRect(),issues));}BlockValidator.validate(result);return List.copyOf(result);}
     /** J09/T58：问题区间映射（simplified 偏移）；确认元数据原样保留，不重建丢失。 */
     public static List<ContentIssue>mapIssues(String original,List<ContentIssue>input,TraditionalConverter converter)throws OcrException{List<ContentIssue>issues=new ArrayList<>();for(ContentIssue issue:input==null?List.<ContentIssue>of():input){if(issue.start()<0||issue.end()<=issue.start()||issue.end()>original.length())throw new OcrException("内容问题区间超出 OCR 原文范围");int simpleStart=converter.toSimplified(original.substring(0,issue.start())).length();int simpleEnd=converter.toSimplified(original.substring(0,issue.end())).length();String inferred=issue.inferredText()==null?null:converter.toSimplified(issue.inferredText());issues.add(new ContentIssue(issue.id(),issue.kind(),issue.start(),issue.end(),simpleStart,simpleEnd,issue.reason(),issue.resolved(),issue.replacement(),inferred,issue.resolution()));}return List.copyOf(issues);}

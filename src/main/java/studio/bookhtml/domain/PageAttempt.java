@@ -2,6 +2,7 @@ package studio.bookhtml.domain;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -46,5 +47,18 @@ public record PageAttempt(String bookId,
 
     public String key() {
         return bookId + ":" + pageNumber;
+    }
+
+    /** U4：持久恢复意图。重启后对照意图与当前页：已一致补终态；未发布保留可读页
+     * 标 INTERRUPTED；自动恢复不重发云请求。 */
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
+    public record Journal(java.util.Map<String, PageAttempt> intents) {
+        public Journal {
+            intents = intents == null ? Map.of() : Map.copyOf(intents);
+        }
+
+        public static Journal empty() {
+            return new Journal(Map.of());
+        }
     }
 }

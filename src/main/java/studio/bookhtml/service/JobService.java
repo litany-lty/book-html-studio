@@ -32,9 +32,12 @@ public class JobService {
     private UUID readingReservation;
     private String readingReservationBookId;
     private SettingsService settings;
+    private ProcessingProgressService progress;
     public JobService(BookStore store,BookService books,PageProcessor processor){this.store=store;this.books=books;this.processor=processor;}
     @org.springframework.beans.factory.annotation.Autowired public void setSettings(SettingsService settings){this.settings=settings;}
-    @PostConstruct void recover(){store.recoverInterruptedJobs();}
+    /** U4：阶段事件聚合（测试可注入；缺省关闭，不影响正式保存）。 */
+    @org.springframework.beans.factory.annotation.Autowired(required=false) public void setProgress(ProcessingProgressService progress){this.progress=progress;}
+    @PostConstruct void recover(){store.recoverInterruptedJobs();reconcileAttemptIntents();}
     @PreDestroy void close(){worker.shutdownNow();cancelAllReserved();}
     public synchronized void reserveReading(UUID reservation,String bookId){
         if(readingReservation!=null||active!=null||!activeReserved.isEmpty())throw new ApiException(HttpStatus.CONFLICT,"已有识别任务或阅读窗口正在运行");
@@ -113,9 +116,10 @@ public class JobService {
         Running running=new Running(bookId,fingerprint,lease);
         for(int p:pages){activeReserved.put(p,running);}
         // U2：为每页登记 attempt（调度用；最终写入仍以 BookStore 锁内校验为准）。
+        // U4：允许操作含基线/增强/恢复三类提交。
         for(int p:pages){
             Page pg=null;try{pg=store.readPage(bookId,p);}catch(RuntimeException ignored){}
-            registerAttempt(bookId,p,BookStore.revisionOrZero(pg),List.of("JOB_START","JOB_COMPLETE","JOB_RESTORE"));
+            registerAttempt(bookId,p,BookStore.revisionOrZero(pg),List.of("JOB_START","JOB_BASELINE","JOB_ENHANCEMENT","JOB_COMPLETE","JOB_RESTORE"));
         }
         Job queued=new Job(expectedJobId,"RUNNING",0,pages.size(),pages.isEmpty()?null:pages.get(0),
                 null,List.of(),Instant.now(),List.copyOf(pages),provider,layout,
@@ -186,24 +190,102 @@ public class JobService {
         Job queued = submitReserved(reservation, bookId, jobRequest);
         operationFingerprints.put(operationKey, fingerprint);
         operationJobs.put(operationKey, queued);
-        registerAttempt(bookId, pageNumber, currentRev, List.of("JOB_START", "JOB_COMPLETE", "JOB_RESTORE"));
+        registerAttempt(bookId, pageNumber, currentRev, List.of("JOB_START", "JOB_BASELINE", "JOB_ENHANCEMENT", "JOB_RESTORE"));
         return queued;
     }
 
     private void registerAttempt(String bookId, int pageNumber, int expectedRevision, List<String> allowedOps) {
         String key = bookId + ":" + pageNumber;
-        PageAttempt prev = pageAttempts.get(key);
-        String sourceHash = null;
+        PageAttempt prev;
+        synchronized (pageAttempts) {
+            prev = pageAttempts.get(key);
+            String sourceHash = null;
+            try {
+                Page page = store.readPage(bookId, pageNumber);
+                if (page != null && page.sourceRecords() != null && !page.sourceRecords().isEmpty()
+                        && page.sourceRecords().get(0) != null)
+                    sourceHash = page.sourceRecords().get(0).id();
+            } catch (RuntimeException ignored) {}
+            PageAttempt next = (prev != null && prev.bookId().equals(bookId) && prev.pageNumber() == pageNumber)
+                    ? prev.nextGeneration()
+                    : PageAttempt.register(bookId, pageNumber, expectedRevision, sourceHash, allowedOps);
+            pageAttempts.put(key, next);
+            persistIntent(bookId, next);
+        }
+    }
+
+    /**
+     * U4：恢复意图持久化（IN_PROGRESS → 终态）。写持久化意图 → 原子页提交 →
+     * 更新完成标记；自动恢复不重发云请求，不重复收费。
+     */
+    private void persistIntent(String bookId, PageAttempt attempt) {
         try {
-            Page page = store.readPage(bookId, pageNumber);
-            if (page != null && page.sourceRecords() != null && !page.sourceRecords().isEmpty()
-                    && page.sourceRecords().get(0) != null)
-                sourceHash = page.sourceRecords().get(0).id();
-        } catch (RuntimeException ignored) {}
-        if (prev != null && prev.bookId().equals(bookId) && prev.pageNumber() == pageNumber) {
-            pageAttempts.put(key, prev.nextGeneration());
-        } else {
-            pageAttempts.put(key, PageAttempt.register(bookId, pageNumber, expectedRevision, sourceHash, allowedOps));
+            java.util.Map<String, PageAttempt> intents = new java.util.LinkedHashMap<>(readJournal(bookId).intents());
+            intents.put(attempt.key(), attempt);
+            store.writeSidecar(store.pageAttemptsPath(bookId), new PageAttempt.Journal(intents));
+        } catch (Exception ignored) {
+            // 意图落盘失败不阻塞派发；内存登记仍约束本次运行。
+        }
+    }
+
+    private void completeIntent(String bookId, int pageNumber, String lifecycle) {
+        synchronized (pageAttempts) {
+            try {
+                PageAttempt.Journal journal = readJournal(bookId);
+                PageAttempt current = journal.intents().get(bookId + ":" + pageNumber);
+                if (current == null) return;
+                java.util.Map<String, PageAttempt> intents = new java.util.LinkedHashMap<>(journal.intents());
+                intents.put(current.key(), current.withLifecycle(lifecycle));
+                store.writeSidecar(store.pageAttemptsPath(bookId), new PageAttempt.Journal(intents));
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private PageAttempt.Journal readJournal(String bookId) {
+        try {
+            PageAttempt.Journal journal =
+                    store.readSidecar(store.pageAttemptsPath(bookId), PageAttempt.Journal.class);
+            return journal == null ? PageAttempt.Journal.empty() : journal;
+        } catch (RuntimeException e) {
+            return PageAttempt.Journal.empty();
+        }
+    }
+
+    /**
+     * U4：重启对照意图与当前页。内容已一致补终态；尚未发布保留现有可读页标
+     * INTERRUPTED；无法证明所有权不覆盖；绝不重新发送云请求。
+     */
+    public synchronized void reconcileAttemptIntents() {
+        List<String> bookIds;
+        try {
+            bookIds = store.listBooks().stream().map(Book::id).toList();
+        } catch (RuntimeException e) {
+            return;
+        }
+        for (String bookId : bookIds) {
+            PageAttempt.Journal journal = readJournal(bookId);
+            boolean changed = false;
+            java.util.Map<String, PageAttempt> intents = new java.util.LinkedHashMap<>(journal.intents());
+            for (Map.Entry<String, PageAttempt> entry : journal.intents().entrySet()) {
+                PageAttempt intent = entry.getValue();
+                if (List.of("SUCCEEDED", "CANCELLED", "FAILED", "INTERRUPTED").contains(intent.lifecycle())) continue;
+                try {
+                    Page page = store.readPage(bookId, intent.pageNumber());
+                    if (page != null && !"PROCESSING".equals(page.status())
+                            && BookStore.revisionOrZero(page) >= intent.expectedRevision()) {
+                        intents.put(entry.getKey(), intent.withLifecycle("SUCCEEDED"));
+                    } else {
+                        // recoverInterruptedJobs 已处理 PROCESSING 页本身；此处只标意图终态。
+                        intents.put(entry.getKey(), intent.withLifecycle("INTERRUPTED"));
+                    }
+                    changed = true;
+                } catch (RuntimeException ignored) {}
+            }
+            if (changed) {
+                try {
+                    store.writeSidecar(store.pageAttemptsPath(bookId), new PageAttempt.Journal(intents));
+                } catch (Exception ignored) {}
+            }
         }
     }
 
@@ -371,7 +453,7 @@ public class JobService {
         try{
             for(int pageNumber:pages){
                 if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
-                if(!mayRestore(running,reservation,expectedJobId))return;
+                if(!mayRestore(running,reservation,expectedJobId)){completeIntent(running.bookId,pageNumber,"INTERRUPTED");return;}
                 Page old=store.readPage(running.bookId,pageNumber);
                 if(old==null)continue;
                 int baselineRev=BookStore.revisionOrZero(old);
@@ -383,17 +465,30 @@ public class JobService {
                 } catch (PageConflictException | IOException conflict) {
                     continue;
                 }
+                // U4 跨 catch 可见：基线已发布时，取消不再恢复旧版（基线即有效可读版）。
+                boolean pageBaselinePublished = false;
                 try{
-                    ProcessingResult result=processor.process(running.bookId,pageNumber,provider,layout,split,assist,()->running.cancelled||Thread.currentThread().isInterrupted());
-                    Page page=mergeUnresolvedIssues(old,result.page());
+                    // U4：两阶段。基线（OCR/原生）先行发布可读；增强（Qwen 整理/局部核对）
+                    // 只产候选，经门与版本校验后最多发布一次。任一阶段取消/失败不丢基线。
+                    UUID attemptId = progress == null ? null
+                            : progress.begin(running.bookId, pageNumber, baselineRev);
+                    boolean baselinePublishedThisPage = false;
+                    int publishedRev = baselineRev;
+                    Page publishedPage = old;
+                    if (attemptId != null) {
+                        progress.stage(running.bookId, pageNumber, attemptId, "OCR");
+                        progress.plan(running.bookId, pageNumber, attemptId, "PAGE", 1);
+                    }
+                    ProcessingResult baselineResult=processor.processBaseline(running.bookId,pageNumber,provider,layout,split,()->running.cancelled||Thread.currentThread().isInterrupted());
+                    Page baselinePage=mergeUnresolvedIssues(old,baselineResult.page());
                     if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
                     // U2：新内容发布要求未停止且身份一致；取消后只允许恢复旧版本。
                     if(!mayPublish(running,reservation,expectedJobId))return;
-                    boolean confirmedNoText=result.category()==ProcessingResult.Category.BLANK_CONFIRMED
-                            ||result.category()==ProcessingResult.Category.VISUAL_ONLY;
-                    if(isSignificantRegression(baseline,page)||(!confirmedNoText&&isEmptyResult(page))){
+                    boolean confirmedNoText=baselineResult.category()==ProcessingResult.Category.BLANK_CONFIRMED
+                            ||baselineResult.category()==ProcessingResult.Category.VISUAL_ONLY;
+                    if(isSignificantRegression(baseline,baselinePage)||(!confirmedNoText&&isEmptyResult(baselinePage))){
                         String message="第 "+pageNumber+" 页重识别来源文字少于旧记录的 60%（或为空），已拒绝覆盖并保留较完整结果";
-                        try{store.writeCandidate(running.bookId,page);}catch(IOException ignored){}
+                        try{store.writeCandidate(running.bookId,baselinePage);}catch(IOException ignored){}
                         Page fallback;
                         if("READY".equals(baseline.status())){
                             List<String>warnings=new ArrayList<>(baseline.warnings()==null?List.of():baseline.warnings());warnings.add(message);
@@ -405,27 +500,89 @@ public class JobService {
                         try {
                             store.commitPage(running.bookId,fallback,baselineRev+1,CommitActor.JOB,expectedJobId,CommitOp.JOB_RESTORE);
                         } catch (PageConflictException | IOException ignored) {}
+                        if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"FAILED","BASELINE_REJECTED",true);
                     }else{
                         try {
-                            store.commitPage(running.bookId,page,baselineRev+1,CommitActor.JOB,expectedJobId,CommitOp.JOB_COMPLETE);
-                            try{store.preserveOriginal(running.bookId,page);}catch(IOException ignored){}
+                            if(attemptId!=null)progress.stage(running.bookId,pageNumber,attemptId,"PUBLISHING");
+                            Page committed=store.commitPage(running.bookId,baselinePage,baselineRev+1,CommitActor.JOB,expectedJobId,CommitOp.JOB_BASELINE);
+                            try{store.preserveOriginal(running.bookId,committed);}catch(IOException ignored){}
+                            baselinePublishedThisPage = true;
+                            pageBaselinePublished = true;
+                            publishedRev = baselineRev + 1;
+                            publishedPage = committed;
+                            completeIntent(running.bookId, pageNumber, "BASELINE_PUBLISHED");
+                            if(attemptId!=null)progress.baselinePublished(running.bookId,pageNumber,attemptId,publishedRev,false);
                         } catch (PageConflictException | IOException conflict) {
                             // U2：提交失败必须留下可诊断结果，不吞掉异常显示成功。
                             // 随读路径无批量 errors 通道，将诊断记入候选页的 warnings。
-                            List<String> note = new ArrayList<>(page.warnings() == null ? List.of() : page.warnings());
+                            List<String> note = new ArrayList<>(baselinePage.warnings() == null ? List.of() : baselinePage.warnings());
                             note.add("第 " + pageNumber + " 页识别完成但写入失败，已保留旧版本");
-                            Page diagnosed = new Page(page.pageNumber(), page.width(), page.height(), page.status(),
-                                    page.provider(), page.blocks(), List.copyOf(note), page.reviewed(),
-                                    page.error(), page.sourceRecords(), page.revision());
+                            Page diagnosed = new Page(baselinePage.pageNumber(), baselinePage.width(), baselinePage.height(), baselinePage.status(),
+                                    baselinePage.provider(), baselinePage.blocks(), List.copyOf(note), baselinePage.reviewed(),
+                                    baselinePage.error(), baselinePage.sourceRecords(), baselinePage.revision());
                             try{store.writeCandidate(running.bookId,diagnosed);}catch(IOException ignored){}
+                            if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"FAILED","BASELINE_WRITE_FAILED",true);
+                        }
+                    }
+                    // U4 phase 2：可选增强。基线已落盘才可读；增强阻塞/失败/取消不影响基线。
+                    if (baselinePublishedThisPage && assist) {
+                        if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
+                        if(attemptId!=null)progress.stage(running.bookId,pageNumber,attemptId,"STRUCTURE");
+                        try {
+                            PageProcessor.EnrichResult enriched=processor.enrichBaseline(running.bookId,pageNumber,publishedPage,provider,layout,()->running.cancelled||Thread.currentThread().isInterrupted());
+                            if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
+                            if(!mayPublish(running,reservation,expectedJobId))return;
+                            if(attemptId!=null)progress.stage(running.bookId,pageNumber,attemptId,"VALIDATING");
+                            List<String> mergedWarnings=new ArrayList<>(publishedPage.warnings()==null?List.of():publishedPage.warnings());
+                            mergedWarnings.addAll(enriched.warnings());
+                            Page enrichedPage=mergeUnresolvedIssues(publishedPage,new Page(publishedPage.pageNumber(),publishedPage.width(),publishedPage.height(),"READY",enriched.actualProvider(),enriched.blocks(),List.copyOf(mergedWarnings),false,null,publishedPage.sourceRecords()));
+                            if(isSignificantRegression(publishedPage,enrichedPage)||isEmptyResult(enrichedPage)){
+                                try{store.writeCandidate(running.bookId,enrichedPage);}catch(IOException ignored){}
+                                if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"PARTIAL","ENHANCEMENT_SKIPPED_BASELINE_KEPT",false);
+                            } else {
+                                try {
+                                    if(attemptId!=null)progress.stage(running.bookId,pageNumber,attemptId,"PUBLISHING");
+                                    store.commitPage(running.bookId,enrichedPage,publishedRev+1,CommitActor.JOB,expectedJobId,CommitOp.JOB_ENHANCEMENT);
+                                    completeIntent(running.bookId, pageNumber, "SUCCEEDED");
+                                    if(attemptId!=null){progress.baselinePublished(running.bookId,pageNumber,attemptId,publishedRev+1,true);progress.finish(running.bookId,pageNumber,attemptId,"SUCCEEDED","ENHANCED",false);}
+                                } catch (PageConflictException manualKept) {
+                                    // U4：人工在此期间保存，人工版本优先；增强保留为过期候选。
+                                    try{store.writeCandidate(running.bookId,enrichedPage);}catch(IOException ignored){}
+                                    if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"PARTIAL","MANUAL_KEPT_ENHANCEMENT_CANDIDATE",false);
+                                } catch (IOException ioFailed) {
+                                    try{store.writeCandidate(running.bookId,enrichedPage);}catch(IOException ignored){}
+                                    if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"PARTIAL","ENHANCEMENT_WRITE_FAILED",true);
+                                }
+                            }
+                        } catch (CancelledException cancelledDuringEnrich) {
+                            // 基线已可读：不恢复、不降级，只收尾。
+                            completeIntent(running.bookId, pageNumber, "CANCELLED");
+                            if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"CANCELLED","ENHANCEMENT_CANCELLED_BASELINE_KEPT",false);
+                            throw cancelledDuringEnrich;
+                        } catch (Exception enrichFailed) {
+                            try{store.writeCandidate(running.bookId,publishedPage);}catch(IOException ignored){}
+                            if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"PARTIAL","ENHANCEMENT_FAILED_BASELINE_KEPT",false);
+                        }
+                    } else if (baselinePublishedThisPage && attemptId != null
+                            && progress.latest(running.bookId, pageNumber) != null) {
+                        String lifecycle = progress.latest(running.bookId, pageNumber).lifecycle();
+                        if ("RUNNING".equals(lifecycle)) {
+                            progress.finish(running.bookId,pageNumber,attemptId,"SUCCEEDED","BASELINE_ONLY",false);
+                            completeIntent(running.bookId, pageNumber, "SUCCEEDED");
                         }
                     }
                 }
                 catch(CancelledException e){
                     // U2：取消后仍可恢复旧可读版本（mayRestore 不因 cancelled 返回 false）。
+                    // U4：基线已发布时不恢复旧版（基线即有效可读版），只收尾。
                     if(!mayRestore(running,reservation,expectedJobId))return;
+                    if (pageBaselinePublished) {
+                        completeIntent(running.bookId, pageNumber, "CANCELLED");
+                        throw e;
+                    }
                     try {
                         store.commitPage(running.bookId,new Page(old.pageNumber(),old.width(),old.height(),old.status(),old.provider(),old.blocks(),old.warnings(),old.reviewed(),old.error(),old.sourceRecords(),null),baselineRev+1,CommitActor.JOB,expectedJobId,CommitOp.JOB_RESTORE);
+                        completeIntent(running.bookId, pageNumber, "CANCELLED");
                     } catch (PageConflictException | IOException ignored) { }
                     throw e;}
                 catch(Exception e){
@@ -441,6 +598,7 @@ public class JobService {
                     }
                     try {
                         store.commitPage(running.bookId,failed,baselineRev+1,CommitActor.JOB,expectedJobId,CommitOp.JOB_RESTORE);
+                        completeIntent(running.bookId, pageNumber, "FAILED");
                     } catch (PageConflictException | IOException ignored) { }
                 }
             }
