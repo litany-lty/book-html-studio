@@ -22,8 +22,10 @@ import java.util.*;
 public class BookService {
     private final BookStore store; private final PdfService pdf; private final AppProperties config; private final OutlineService outlines;
     private BookPresentationService presentation;
+    // U6：书架统计缓存；失效唯一来源是存储变更通知（保守：任何页/书变更即失效）。
+    private final Map<String, int[]> statsCache = new java.util.concurrent.ConcurrentHashMap<>();
     public BookService(BookStore store,PdfService pdf,AppProperties config){this(store,pdf,config,new OutlineService(store));}
-    @Autowired public BookService(BookStore store,PdfService pdf,AppProperties config,OutlineService outlines){this.store=store;this.pdf=pdf;this.config=config;this.outlines=outlines;}
+    @Autowired public BookService(BookStore store,PdfService pdf,AppProperties config,OutlineService outlines){this.store=store;this.pdf=pdf;this.config=config;this.outlines=outlines;this.store.addChangeListener(statsCache::remove);}
     /** U3：投影注入后，摘要标题使用统一投影；未注入走旧适配器（保守兼容）。 */
     @Autowired(required=false) public void setPresentation(BookPresentationService presentation){this.presentation=presentation;}
     public Book upload(MultipartFile file) {
@@ -92,7 +94,7 @@ public class BookService {
     public byte[] image(String id,int n,int width){page(id,n);java.awt.image.BufferedImage image=null;try{image=pdf.render(store.pdf(id),n,width);return pdf.png(image);}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"页面图片生成失败");}finally{if(image!=null)image.flush();}}
     public byte[] figure(String id,int n,String blockId){Page p=page(id,n);Block b=p.blocks().stream().filter(x->x.id().equals(blockId)).findFirst().orElseThrow(()->new ApiException(HttpStatus.NOT_FOUND,"未找到该内容块"));try{return pdf.cropPng(store.pdf(id),n,config.maxImageWidth(),b.bbox());}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"内容块图片生成失败");}}
     public Path pdfPath(String id){store.readBook(id);return store.pdf(id);}
-    private Book refresh(Book b){int processed=0,reviewed=0;for(int n=1;n<=b.totalPages();n++){Page p=store.readPage(b.id(),n);if(p!=null&&"READY".equals(p.status()))processed++;if(p!=null&&p.reviewed())reviewed++;}return new Book(b.id(),b.title(),b.filename(),b.totalPages(),b.createdAt(),b.updatedAt(),processed,reviewed,b.archived());}
+    private Book refresh(Book b){int[] cached=statsCache.get(b.id());if(cached!=null)return new Book(b.id(),b.title(),b.filename(),b.totalPages(),b.createdAt(),b.updatedAt(),cached[0],cached[1],b.archived());int processed=0,reviewed=0;for(int n=1;n<=b.totalPages();n++){Page p=store.readPage(b.id(),n);if(p!=null&&"READY".equals(p.status()))processed++;if(p!=null&&p.reviewed())reviewed++;}statsCache.put(b.id(),new int[]{processed,reviewed});return new Book(b.id(),b.title(),b.filename(),b.totalPages(),b.createdAt(),b.updatedAt(),processed,reviewed,b.archived());}
     private void touch(String id)throws IOException{Book b=refresh(store.readBook(id));store.updateBook(id,current->new Book(current.id(),current.title(),current.filename(),current.totalPages(),current.createdAt(),Instant.now(),b.processedPages(),b.reviewedPages(),current.archived()));}
     private Page requirePage(String id,int n){Page p=store.readPage(id,n);if(p==null)throw new ApiException(HttpStatus.NOT_FOUND,"页码不存在");return p;}
     static PageSummary summary(Page p){String title=HeadingText.pageTitle(p);List<Block>reading=p.blocks().stream().filter(b->!"advertisement".equals(b.type())).toList();int uncertain=(int)reading.stream().filter(Block::uncertain).count();return new PageSummary(p.pageNumber(),p.status(),reading.size(),uncertain,p.width(),p.height(),title,p.reviewed());}

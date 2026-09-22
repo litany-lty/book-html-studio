@@ -12,6 +12,8 @@ import studio.bookhtml.domain.PresentationOverride;
 import studio.bookhtml.store.BookStore;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * U3：书籍级结构投影。在存储页面之上产生只读展示投影，区分书名、书眉、
@@ -34,9 +36,13 @@ public class BookPresentationService {
 
     private final BookStore store;
     private PresentationOverrideService overrides;
+    // U6：画像内存缓存；失效唯一来源是存储变更通知（保守：任何页/书变更即失效）。
+    private final Map<String, BookLayoutProfile> profileCache = new ConcurrentHashMap<>();
+    private final AtomicLong cacheHits = new AtomicLong();
 
     public BookPresentationService(BookStore store) {
         this.store = store;
+        store.addChangeListener(profileCache::remove);
     }
 
     @Autowired(required = false)
@@ -118,6 +124,12 @@ public class BookPresentationService {
     // ---------- 画像构建 ----------
 
     public BookLayoutProfile buildProfile(String bookId) {
+        // U6：无变更直接返回缓存（失效唯一来源是存储变更通知），避免每页请求全书扫描。
+        BookLayoutProfile cached = profileCache.get(bookId);
+        if (cached != null) {
+            cacheHits.incrementAndGet();
+            return cached;
+        }
         Book book = store.readBook(bookId);
         List<Page> observed = new ArrayList<>();
         for (int n = 1; n <= book.totalPages(); n++) {
@@ -162,12 +174,14 @@ public class BookPresentationService {
         clusters.sort(Comparator.comparing(BookLayoutProfile.EdgeCluster::layoutGroup)
                 .thenComparing(BookLayoutProfile.EdgeCluster::edgeZone)
                 .thenComparing(BookLayoutProfile.EdgeCluster::normalizedText));
+        // U6：缓存未命中时读 sidecar 比对（崩溃重启后恢复连续性）。
         BookLayoutProfile previous =
                 store.readSidecar(store.layoutProfilePath(bookId), BookLayoutProfile.class);
         BookLayoutProfile candidate = new BookLayoutProfile(bookId,
                 previous == null ? 1 : previous.profileRevision(),
                 POLICY_VERSION, observed.size(), clusters, java.time.Instant.now());
         if (previous != null && previous.clusterSignature().equals(candidate.clusterSignature())) {
+            profileCache.put(bookId, previous);
             return previous;
         }
         BookLayoutProfile published = new BookLayoutProfile(bookId,
@@ -178,7 +192,13 @@ public class BookPresentationService {
         } catch (Exception ignored) {
             // sidecar 写失败不阻塞原稿打开；调用方继续使用内存画像。
         }
+        profileCache.put(bookId, published);
         return published;
+    }
+
+    /** U6：测试可见的缓存命中计数。 */
+    long cacheHits() {
+        return cacheHits.get();
     }
 
     private Optional<BookLayoutProfile.EdgeCluster> matchingCluster(BookLayoutProfile profile,
@@ -203,18 +223,67 @@ public class BookPresentationService {
 
     public PagePresentation project(String bookId, Page page, BookLayoutProfile profile) {
         Book book = store.readBook(bookId);
+        // U6：角色判定基于归一化视角（关系图/不可靠矩阵已转 figure、页码已归位），
+        // 内容与身份仍用存储块；复杂版式按证据降级，不拼错误正文。
+        Page normalizedView = ReadingStructureNormalizer.normalize(page);
+        Map<String, String> normalizedTypes = new HashMap<>();
+        if (normalizedView.blocks() != null) {
+            for (Block block : normalizedView.blocks()) {
+                if (block != null && block.id() != null) {
+                    normalizedTypes.putIfAbsent(block.id(), block.type());
+                }
+            }
+        }
         List<PagePresentation.BlockPresentation> out = new ArrayList<>();
         List<Block> blocks = page.blocks() == null ? List.of() : page.blocks();
         int order = 0;
         for (Block block : blocks) {
             if (block == null) continue;
-            out.add(projectBlock(book, page, block, profile, order++));
+            String normalizedType = normalizedTypes.getOrDefault(block.id(), block.type());
+            out.add(projectBlock(book, page, block, normalizedType, profile, order++));
         }
         return new PagePresentation(page.pageNumber(), BookStore.revisionOrZero(page),
-                profile.profileRevision(), profile.policyVersion(), layoutKind(page), "NONE", out);
+                profile.profileRevision(), profile.policyVersion(), layoutKind(page),
+                fallbackMode(page, normalizedTypes), out);
+    }
+
+    /**
+     * U6：复杂版面保真降级。NONE=可靠重排；REGION_IMAGE=归一化转出的视觉区看原图裁片；
+     * PAGE_IMAGE=正文几何缺失、顺序不可验证，整页看原稿。
+     */
+    static String fallbackMode(Page page, Map<String, String> normalizedTypes) {
+        boolean regionVisual = false;
+        boolean hasTextual = false;
+        boolean textualWithGeometry = false;
+        if (page.blocks() != null) {
+            for (Block block : page.blocks()) {
+                if (block == null) continue;
+                String stored = block.type();
+                String normalized = normalizedTypes.getOrDefault(block.id(), stored);
+                if ("figure".equals(normalized) && !"figure".equals(stored)
+                        && !"table".equals(stored) && !"formula".equals(stored)) {
+                    regionVisual = true;
+                }
+                if ("text".equals(stored) || "heading".equals(stored) || "caption".equals(stored)) {
+                    hasTextual = true;
+                    if (validBbox(block.bbox())) textualWithGeometry = true;
+                }
+            }
+        }
+        if (hasTextual && !textualWithGeometry) return "PAGE_IMAGE";
+        if (regionVisual) return "REGION_IMAGE";
+        return "NONE";
+    }
+
+    private static boolean validBbox(double[] bbox) {
+        if (bbox == null || bbox.length != 4) return false;
+        for (double value : bbox) if (!Double.isFinite(value)) return false;
+        return bbox[0] >= 0 && bbox[1] >= 0 && bbox[2] > 0 && bbox[3] > 0
+                && bbox[0] + bbox[2] <= 1.000001 && bbox[1] + bbox[3] <= 1.000001;
     }
 
     private PagePresentation.BlockPresentation projectBlock(Book book, Page page, Block block,
+                                                            String normalizedType,
                                                             BookLayoutProfile profile, int readingOrder) {
         String sourceHash = PresentationOverrideService.sourceHash(block);
         String renderAs = "heading".equals(block.type()) ? "heading" : block.type();
@@ -233,8 +302,8 @@ public class BookPresentationService {
             }
         }
 
-        // 2. 明确的页码类型。
-        if ("page-number".equals(block.type())) {
+        // 2. 明确的页码类型（归一化视角：页边符号已归位）。
+        if ("page-number".equals(normalizedType)) {
             return presentation(block, sourceHash, PagePresentation.ROLE_PAGE_NUMBER, renderAs,
                     readingOrder, !manual, false, PagePresentation.EVIDENCE_SUFFICIENT,
                     List.of("PAGE_NUMBER_TYPE"));
@@ -247,8 +316,8 @@ public class BookPresentationService {
                     List.of("PRINTED_TOC_PATTERN"));
         }
 
-        // 4. 视觉原子区域：图、表、公式不拆。
-        if ("figure".equals(block.type()) || "table".equals(block.type()) || "formula".equals(block.type())) {
+        // 4. 视觉原子区域：图、表、公式不拆（含归一化识别出的关系图/不可靠矩阵）。
+        if ("figure".equals(normalizedType) || "table".equals(normalizedType) || "formula".equals(normalizedType)) {
             return presentation(block, sourceHash, PagePresentation.ROLE_VISUAL, renderAs,
                     readingOrder, true, false, PagePresentation.EVIDENCE_SUFFICIENT,
                     List.of("ATOMIC_VISUAL"));
@@ -258,7 +327,7 @@ public class BookPresentationService {
                     readingOrder, true, false, PagePresentation.EVIDENCE_SUFFICIENT,
                     List.of("ADVERTISEMENT"));
         }
-        if ("caption".equals(block.type())) {
+        if ("caption".equals(block.type()) && "caption".equals(normalizedType)) {
             return presentation(block, sourceHash, PagePresentation.ROLE_CAPTION, renderAs,
                     readingOrder, true, false, PagePresentation.EVIDENCE_SUFFICIENT,
                     List.of("CAPTION"));

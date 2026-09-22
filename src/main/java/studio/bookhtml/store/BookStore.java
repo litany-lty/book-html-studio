@@ -77,7 +77,7 @@ public class BookStore {
     public Path pagePath(String id, int page) { return bookDir(id).resolve("pages").resolve(page + ".json"); }
     public Path originalPagePath(String id, int page) { return bookDir(id).resolve("pages").resolve(page + ".original.json"); }
 
-    public void writeBook(Book book) throws IOException { synchronized (dirLock) { checkInjected("book"); atomic(bookDir(book.id()).resolve("book.json"), book); } }
+    public void writeBook(Book book) throws IOException { synchronized (dirLock) { checkInjected("book"); atomic(bookDir(book.id()).resolve("book.json"), book); notifyBookChanged(book.id()); } }
     public Book readBook(String id) { return read(bookDir(id).resolve("book.json"), Book.class, "未找到该书籍"); }
     /** Read-modify-write under the directory lease lock, so page-stat touches cannot undo a library edit. */
     public Book updateBook(String id, UnaryOperator<Book> change) throws IOException {
@@ -86,6 +86,7 @@ public class BookStore {
             Book updated = change.apply(read(path, Book.class, "未找到该书籍"));
             checkInjected("book");
             atomic(path, updated);
+            notifyBookChanged(id);
             return updated;
         }
     }
@@ -209,7 +210,25 @@ public class BookStore {
         Page toWrite = new Page(proposed.pageNumber(), proposed.width(), proposed.height(), proposed.status(), proposed.provider(),
             proposed.blocks(), proposed.warnings(), proposed.reviewed(), proposed.error(), proposed.sourceRecords(), newRev);
         atomic(pagePath(id, proposed.pageNumber()), toWrite);
+        // U6：页变更唯一出口；派生索引（画像/统计缓存）据此失效，不轮询。
+        notifyBookChanged(id);
         return toWrite;
+    }
+
+    /** U6：书籍变更监听（画像/统计等派生缓存失效用）。监听器只做轻量失效，不得阻塞。 */
+    private final List<java.util.function.Consumer<String>> changeListeners =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    public void addChangeListener(java.util.function.Consumer<String> listener) {
+        if (listener != null) changeListeners.add(listener);
+    }
+
+    private void notifyBookChanged(String id) {
+        for (java.util.function.Consumer<String> listener : changeListeners) {
+            try {
+                listener.accept(id);
+            } catch (RuntimeException ignored) {}
+        }
     }
     public Page readPage(String id, int page) {
         Path p = pagePath(id, page);

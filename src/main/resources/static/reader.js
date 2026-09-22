@@ -221,6 +221,9 @@ function renderReading(container, ctx) {
       figure.className = `reading-figure type-${block.type}`;
       figure.dataset.blockId = block.id;
       const img = document.createElement('img');
+      // U6：按需加载图片（懒加载 + 尺寸占位在 CSS max 约束内），防布局跳动。
+      img.loading = 'lazy';
+      img.decoding = 'async';
       img.src = api.figureImage(book.id, page.pageNumber, block.id);
       img.alt = block.type === 'table' ? '原稿中的表格裁图' : block.type === 'formula' ? '原稿中的公式裁图' : '原稿中的插图';
       figure.append(img);
@@ -331,6 +334,19 @@ export function renderPaper(container, ctx) {
   }
   const hasProcessedBlocks = Array.isArray(ctx.blocks) && ctx.blocks.length > 0;
   const isReprocessing = Boolean(ctx.page?.isReprocessing || ctx.isReprocessing);
+
+  // U6：复杂版面保真降级。正文几何缺失、顺序不可验证时整页看原稿，不拼错误正文。
+  if (ctx.view === 'reading' && ctx.page?.presentation?.fallbackMode === 'PAGE_IMAGE') {
+    const frame = document.createElement('div');
+    frame.className = 'original-frame';
+    frame.style.aspectRatio = `${ctx.page.width || 1} / ${ctx.page.height || 1}`;
+    frame.append(originalImage(ctx.book, ctx.page, 'original-image'));
+    const note = document.createElement('p');
+    note.className = 'layout-note';
+    note.textContent = '本页版式复杂，暂以原稿呈现；原稿保留，可随时对照。';
+    container.append(frame, note);
+    return statusMessage(ctx.page);
+  }
 
   if (ctx.view === 'original' || (ctx.page.status !== 'READY' && !hasProcessedBlocks)) {
     const frame = document.createElement('div');
