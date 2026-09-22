@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import studio.bookhtml.api.ApiException;
 import studio.bookhtml.config.QwenAssistProperties;
 import studio.bookhtml.domain.Block;
 import studio.bookhtml.domain.ContentIssue;
@@ -36,10 +37,17 @@ public class QwenTocRecoveryService {
     private final QwenAssistProperties config;private final ObjectMapper json;private final Transport transport;
     private UsageLedger usage;
 
+    // U5：连接复用。不为每个子请求重新创建 HttpClient。
+    private static final HttpClient SHARED_HTTP=HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+    private static HttpResponse<InputStream> sharedSend(HttpRequest request)throws Exception{return SHARED_HTTP.send(request,HttpResponse.BodyHandlers.ofInputStream());}
+
     @Autowired
-    public QwenTocRecoveryService(QwenAssistProperties config,ObjectMapper json){this(config,json,request->HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build().send(request,HttpResponse.BodyHandlers.ofInputStream()));}
+    public QwenTocRecoveryService(QwenAssistProperties config,ObjectMapper json){this(config,json,QwenTocRecoveryService::sharedSend);}
     QwenTocRecoveryService(QwenAssistProperties config,ObjectMapper json,Transport transport){this.config=config;this.json=json;this.transport=transport;}
     @Autowired public void setUsageLedger(UsageLedger usage){this.usage=usage;}
+    private QwenRequestGate gate;
+    /** U5：目录恢复与结构/核对共用同一闸门；未注入走旧行为。 */
+    @Autowired(required=false) public void setRequestGate(QwenRequestGate gate){this.gate=gate;}
 
     public RecoveryResult recover(BufferedImage image,List<Block> source,BooleanSupplier cancelled){
         List<Block> original=source==null?List.of():List.copyOf(source);
@@ -48,10 +56,14 @@ public class QwenTocRecoveryService {
         if(cancelled.getAsBoolean())throw new CancelledException();
         if(!configured())return new RecoveryResult(original,true,false,false,null);
         boolean attempted=false,responseSeen=false,parsed=false;String attemptId=null;
+        // U5：物理 permit 覆盖发送到响应流收尾；目录恢复与结构/核对共用同一闸门。
+        QwenRequestGate.Permit permit=null;
         try{
             List<Region>regions=regions(image,plan);HttpRequest request=request(regions,plan,image);long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(Math.max(1,config.getTimeoutSeconds()));
             if(usage!=null)attemptId=usage.start("qwen",config.getModel());
-            attempted=true;HttpResponse<InputStream>response=transport.send(request);if(response==null)throw new OcrException("目录恢复未返回响应");
+            attempted=true;permit=acquirePermit();
+            HttpResponse<InputStream> response;
+            try{response=transport.send(request);}catch(CancelledException|OcrException|ApiException propagate){closeQuietly(permit);permit=null;throw propagate;}catch(Exception sendFailed){closeQuietly(permit);permit=null;throw new OcrException("目录恢复发送失败");}
             responseSeen=true;
             if(cancelled.getAsBoolean()){close(response.body());throw new CancelledException();}
             if(response.statusCode()==429){close(response.body());throw new OcrException("目录恢复请求频率受限");}
@@ -65,8 +77,18 @@ public class QwenTocRecoveryService {
             parsed=true;if(usage!=null)usage.succeeded(attemptId);
             return new RecoveryResult(merged,true,true,true,warning);
         }catch(CancelledException e){throw e;}catch(OcrException e){return fallback(original,attempted,failureWarning(attempted,e.getMessage()));}catch(Exception e){return fallback(original,attempted,failureWarning(attempted,null));}
-        finally{if(usage!=null&&responseSeen&&!parsed)try{usage.failed(attemptId);}catch(java.io.IOException ignored){}}
+        finally{if(usage!=null&&responseSeen&&!parsed)try{usage.failed(attemptId);}catch(java.io.IOException ignored){}closeQuietly(permit);}
     }
+
+    private QwenRequestGate.Permit acquirePermit() throws OcrException{
+        if(gate==null)return null;
+        try{
+            QwenRequestGate.Permit permit=gate.acquire(true,java.time.Duration.ofSeconds(Math.max(1,config.getTimeoutSeconds())));
+            if(permit==null)throw new OcrException("Qwen 并发队列已满，目录恢复保留原文");
+            return permit;
+        }catch(InterruptedException e){Thread.currentThread().interrupt();throw new CancelledException();}
+    }
+    private static void closeQuietly(QwenRequestGate.Permit permit){if(permit!=null)permit.close();}
 
     boolean configured(){return config.isEnabled()&&notBlank(config.getApiKey())&&notBlank(config.getBaseUrl())&&notBlank(config.getModel());}
 
