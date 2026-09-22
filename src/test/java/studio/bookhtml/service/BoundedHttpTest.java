@@ -132,4 +132,23 @@ class BoundedHttpTest {
             assertEquals(BoundedHttp.Kind.CANCELLED, e.kind());
         }
     }
+    @Test void rejectedBodySubmissionClosesAlreadyReceivedStream() throws Exception {
+        var rejected = Executors.newSingleThreadExecutor();
+        rejected.shutdown();
+        var closed = new java.util.concurrent.atomic.AtomicBoolean();
+        var body = new java.io.ByteArrayInputStream(new byte[]{1}) {
+            @Override public void close() throws IOException { closed.set(true); super.close(); }
+        };
+        @SuppressWarnings("unchecked")
+        java.net.http.HttpResponse<java.io.InputStream> response = org.mockito.Mockito.mock(java.net.http.HttpResponse.class);
+        org.mockito.Mockito.when(response.statusCode()).thenReturn(200);
+        org.mockito.Mockito.when(response.body()).thenReturn(body);
+        try (var http = new BoundedHttp(1, Duration.ofSeconds(2), rejected)) {
+            var failure = assertThrows(BoundedHttp.BoundedHttpException.class,
+                    () -> http.consumeResponse(response, System.nanoTime() + Duration.ofSeconds(2).toNanos(), 32, () -> false));
+            assertEquals(BoundedHttp.Kind.IO, failure.kind());
+            assertTrue(closed.get());
+        }
+    }
+
 }

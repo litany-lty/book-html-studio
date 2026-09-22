@@ -118,10 +118,8 @@ class PageAttemptLifecycleTest {
         windows.update(book.id(), retry(session, 2, 1));
         assertTrue(entered.await(3, TimeUnit.SECONDS), "重试 attempt 应已派发");
         // 阻塞期间：原正文仍可读，快照未先写空 PENDING。
-        // 注：单 status 字段在重处理期间为 PROCESSING（旧机制），但内容保持可读；
-        // 内容可用性与任务生命周期的彻底分离见 U4 ProcessingSnapshot。
         Page during = store.readPage(book.id(), 1);
-        assertNotEquals("PENDING", during.status(), "重试不得先清空快照");
+        assertEquals("READY", during.status(), "后台重试不得改变已发布内容的可读状态");
         assertFalse(during.blocks().isEmpty(), "重处理期间原正文仍可读");
         assertEquals(1, during.blocks().size());
         assertEquals("旧可读正文", during.blocks().get(0).original());
@@ -169,6 +167,7 @@ class PageAttemptLifecycleTest {
 
     @Test void safe05_sameOperationIdReturnsSameAttemptWithoutNewPhysicalCall() throws Exception {
         setup(3);
+        store.writePage(book.id(), readyWith(1, "旧正文").page(), false);
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         List<Integer> calls = new CopyOnWriteArrayList<>();
@@ -201,7 +200,11 @@ class PageAttemptLifecycleTest {
         assertThrows(ApiException.class, () -> jobs.requestReprocess(reservation, book.id(), 1, changed,
                 "ppocr", "auto", false, false));
         release.countDown();
-        await(() -> "READY".equals(store.readPage(book.id(), 1).status()));
+        await(() -> !jobs.readingJobActive(reservation, 1));
+        assertEquals("READY", store.readPage(book.id(), 1).status());
+        assertEquals(one.id(), jobs.requestReprocess(reservation, book.id(), 1, first,
+                "paddle-aistudio", "auto", false, false).id(), "完成后重放仍返回原操作");
+        assertEquals(1, calls.stream().filter(n -> n == 1).count());
     }
 
     @Test void safe0607_cancelKeepsRegistrationUntilWorkerFinishesThenRestores() throws Exception {
@@ -215,12 +218,16 @@ class PageAttemptLifecycleTest {
         when(processor.processBaseline(eq(book.id()), eq(3), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
                     entered.countDown();
+                    boolean interrupted = false;
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4);
                     try {
-                        assertTrue(release.await(4, TimeUnit.SECONDS));
-                    } catch (InterruptedException interrupted) {
-                        Thread.currentThread().interrupt();
-                        assertTrue(release.await(4, TimeUnit.SECONDS));
-                    }
+                        while (true) {
+                            try {
+                                assertTrue(release.await(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS));
+                                break;
+                            } catch (InterruptedException cancellation) { interrupted = true; }
+                        }
+                    } finally { if (interrupted) Thread.currentThread().interrupt(); }
                     return readyWith(3, "取消后返回的新文本");
                 });
         UUID session = UUID.randomUUID();

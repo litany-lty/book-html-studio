@@ -152,15 +152,20 @@ function render(settings) {
   setSelectValue(field('jevModel'), settings.jev?.model, 'jev-1.13.0');
   field('jevBudgetUnits').value = settings.jev?.budgetUnits || '';
   field('jevAllowCloudData').checked = Boolean(settings.jev?.allowCloudData);
-  field('paddleAccessToken').value = settings.ocr?.paddleAiStudio?.accessToken || '';
+  field('paddleAccessToken').placeholder = '留空保持已保存凭据';
+  field('paddleAccessToken').value = ''; // write-only: never refill a stored credential
   if (settings.ocr?.paddleAiStudio?.accessTokenSet) field('paddleAccessToken').placeholder = '•••••••• （服务端已保存凭据）';
-  field('ppocrApiKey').value = settings.ocr?.ppocr?.apiKey || '';
+  field('ppocrApiKey').placeholder = '留空保持已保存凭据';
+  field('ppocrApiKey').value = ''; // write-only: never refill a stored credential
   if (settings.ocr?.ppocr?.apiKeySet) field('ppocrApiKey').placeholder = '•••••••• （服务端已保存凭据）';
-  field('ppocrSecretKey').value = settings.ocr?.ppocr?.secretKey || '';
+  field('ppocrSecretKey').placeholder = '留空保持已保存凭据';
+  field('ppocrSecretKey').value = ''; // write-only: never refill a stored credential
   if (settings.ocr?.ppocr?.secretKeySet) field('ppocrSecretKey').placeholder = '•••••••• （服务端已保存凭据）';
-  field('qwenApiKey').value = settings.qwen?.apiKey || '';
+  field('qwenApiKey').placeholder = '留空保持已保存凭据';
+  field('qwenApiKey').value = ''; // write-only: never refill a stored credential
   if (settings.qwen?.apiKeySet) field('qwenApiKey').placeholder = '•••••••• （服务端已保存凭据）';
-  field('jevApiKey').value = settings.jev?.apiKey || '';
+  field('jevApiKey').placeholder = '留空保持已保存凭据';
+  field('jevApiKey').value = ''; // write-only: never refill a stored credential
   if (settings.jev?.apiKeySet) field('jevApiKey').placeholder = '•••••••• （服务端已保存凭据）';
   document.querySelectorAll('.password-toggle-btn').forEach(btn => {
     const input = field(btn.dataset.target);
@@ -195,6 +200,7 @@ function validate() {
     ['ppocrSecretKey', 'clearPpocrSecretKey'], ['qwenApiKey', 'clearQwenApiKey'], ['jevApiKey', 'clearJevApiKey'],
   ]) {
     if (value(secret) && checked(clear)) return '同一项凭据不能同时填写新值并勾选清除。';
+    if (/^[＊*•●]+$/.test(value(secret))) return '不能将掩码作为新凭据，请留空保持或填写真实新值。';
   }
   if (value('qwenModel') && !modelPattern.test(value('qwenModel'))) return 'Qwen 模型需为 1–120 位字母、数字、点、下划线或连字符。';
   if (value('jevModel') && !modelPattern.test(value('jevModel'))) return 'JEV 模型需为 1–120 位字母、数字、点、下划线或连字符。';
@@ -233,18 +239,21 @@ function readinessWarnings() {
 }
 
 function payload() {
-  const secret = (name, key, clearName, clearKey) => ({ ...(value(name) ? { [key]: value(name) } : {}), ...(checked(clearName) ? { [clearKey]: true } : {}) });
+  const secretUpdates = {};
+  for (const [name, clearName] of [
+    ['paddleAccessToken', 'clearPaddleAccessToken'], ['ppocrApiKey', 'clearPpocrApiKey'],
+    ['ppocrSecretKey', 'clearPpocrSecretKey'], ['qwenApiKey', 'clearQwenApiKey'], ['jevApiKey', 'clearJevApiKey'],
+  ]) {
+    if (checked(clearName)) secretUpdates[name] = { clearSecret: true };
+    else if (value(name)) secretUpdates[name] = { value: value(name) };
+  }
   return {
     revision: current.revision,
-    ocr: {
-      defaultProvider: field('defaultProvider').value,
-      fallbackEnabled: checked('fallbackEnabled'),
-      paddleAiStudio: secret('paddleAccessToken', 'accessToken', 'clearPaddleAccessToken', 'clearAccessToken'),
-      ppocr: { ...secret('ppocrApiKey', 'apiKey', 'clearPpocrApiKey', 'clearApiKey'), ...secret('ppocrSecretKey', 'secretKey', 'clearPpocrSecretKey', 'clearSecretKey') },
-    },
-    qwen: { enabled: checked('qwenEnabled'), region: value('qwenRegion'), model: value('qwenModel'), workspaceId: value('qwenWorkspaceId'), ...secret('qwenApiKey', 'apiKey', 'clearQwenApiKey', 'clearApiKey') },
-    jev: { enabled: checked('jevEnabled'), model: value('jevModel'), ...(value('jevBudgetUnits') ? { budgetUnits: value('jevBudgetUnits') } : {}), allowCloudData: checked('jevAllowCloudData'), ...secret('jevApiKey', 'apiKey', 'clearJevApiKey', 'clearApiKey') },
+    ocr: { defaultProvider: field('defaultProvider').value, fallbackEnabled: checked('fallbackEnabled') },
+    qwen: { enabled: checked('qwenEnabled'), region: value('qwenRegion'), model: value('qwenModel'), workspaceId: value('qwenWorkspaceId') },
+    jev: { enabled: checked('jevEnabled'), model: value('jevModel'), ...(value('jevBudgetUnits') ? { budgetUnits: value('jevBudgetUnits') } : {}), allowCloudData: checked('jevAllowCloudData') },
     billing: { rates: rateValues() },
+    ...(Object.keys(secretUpdates).length ? { secretUpdates } : {}),
   };
 }
 

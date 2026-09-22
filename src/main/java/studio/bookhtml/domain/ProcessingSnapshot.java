@@ -24,7 +24,8 @@ public record ProcessingSnapshot(int schemaVersion,
                                  boolean canRead,
                                  boolean canStop,
                                  boolean canRetry,
-                                 String messageCode) {
+                                 String messageCode,
+                                 long attemptSeq) {
     // 内容可用性：ORIGINAL_ONLY / OCR_READABLE / ENHANCED / MANUAL
     // 任务生命周期：QUEUED / RUNNING / DRAINING / SUCCEEDED / PARTIAL / FAILED / CANCELLED / INTERRUPTED
     // 当前阶段：PREPARING / OCR / STRUCTURE / REVIEW / VALIDATING / PUBLISHING
@@ -42,6 +43,6 @@ public record ProcessingSnapshot(int schemaVersion,
         return new ProcessingSnapshot(2, bookId, pageNumber, null, 0, "SUCCEEDED", "PUBLISHING",
                 availability, publishedRevision, now, now, now,
                 new UnitCounts("PAGE", 1, 1, 0, 0, 0, 0),
-                true, false, false, "IDLE_NO_TASK");
+                true, false, false, "IDLE_NO_TASK", 0);
     }
 }

@@ -64,6 +64,7 @@ jobs:
           done
           node scripts/verification/probe_display.js
           node scripts/verification/probe_job_scope.js
+          node scripts/verification/probe_api_lifecycle.mjs
       - name: Python verification tests
         shell: bash
         run: |

@@ -139,27 +139,30 @@ public class ReadingWindowService {
     }
 
     private void retryPage(Session session, int pageNumber, Instant now) {
-        // U2：安全重新处理。保持当前可读 Page 不变（不在此处写 PENDING），经统一准入
-        // 校验版本/人工保护/活动 attempt 后创建独立 attempt；后台候选经 CAS 通过才替换。
-        // 幂等键绑定本次会话序号：同序号重复提交走 update() 的同序号快照路径，不重复派发。
         Page page = store.readPage(session.bookId, pageNumber);
         if (page == null) return;
         String operationId = "window:" + session.sessionId + ":" + session.sequence + ":" + pageNumber;
-        PageReprocessRequest request = new PageReprocessRequest(
-                BookStore.revisionOrZero(page), operationId, false, session.provider, session.assist);
-        try {
-            jobs.requestReprocess(session.reservation, session.bookId, pageNumber, request,
-                    session.provider, session.layout, session.splitSpreads, session.assist);
-        } catch (ApiException conflict) {
-            // 已有活动 attempt 或人工保护：不清空、不重派发，仅把该页排到队首等待自然收尾。
-            session.message = conflict.getMessage();
+        // Freeze the original revision for retransmission of the same accepted operation.
+        if (!operationId.equals(session.retryOperationId)) {
+            session.retryOperationId = operationId;
+            session.retryRequest = new PageReprocessRequest(BookStore.revisionOrZero(page), operationId,
+                    false, session.provider, session.assist);
         }
-        session.dispatched.remove(pageNumber);
-        session.queued.remove(Integer.valueOf(pageNumber));
-        session.queued.addFirst(pageNumber);
-        // U2：显式重试页进入重试集；tick 以 force=true 派发（绕过 PENDING 门），
-        // 仍受容量与本次授权约束，不清空当前可读内容。
-        session.retryPages.add(pageNumber);
+        try {
+            jobs.requestReprocess(session.reservation, session.bookId, pageNumber, session.retryRequest,
+                    session.provider, session.layout, session.splitSpreads, session.assist);
+            session.retryPages.remove(pageNumber);
+            session.queued.remove(Integer.valueOf(pageNumber));
+            session.dispatched.add(pageNumber);
+            if (jobs.readingJobActive(session.reservation, pageNumber)) {
+                session.processingPages.add(pageNumber);
+                session.processingChannels.put(pageNumber, session.provider);
+            }
+        } catch (ApiException rejected) {
+            session.message = rejected.getMessage();
+            // A rejected manual-overwrite/revision check must NEVER become a force=true retry.
+            return;
+        }
         session.notBefore = now;
         tick();
     }
@@ -276,37 +279,7 @@ public class ReadingWindowService {
         int center = s.centerPage;
         boolean centerEligible = eligible(store.readPage(s.bookId, center));
 
-        // U2：先派发显式重试页（force=true，绕过 PENDING 门；容量/授权仍约束）。
-        // 已有活动 attempt（CONFLICT）则移出重试集，等待在途结果，不反复重发。
-        if (!s.retryPages.isEmpty()) {
-            for (int retry : new ArrayList<>(s.retryPages)) {
-                if (s.processingPages.contains(retry)) { s.retryPages.remove(retry); continue; }
-                if (s.processingPages.size() >= totalCapacity) break;
-                String retryChannel = null;
-                for (String ch : channels) {
-                    if (channelCount(s, ch) < CHANNEL_CONCURRENCY) { retryChannel = ch; break; }
-                }
-                if (retryChannel == null) break;
-                try {
-                    jobs.submitReserved(s.reservation, s.bookId, new JobRequest(String.valueOf(retry),
-                            retryChannel, s.layout, s.splitSpreads, true, s.assist));
-                    s.retryPages.remove(Integer.valueOf(retry));
-                    s.dispatched.add(retry);
-                    s.processingPages.add(retry);
-                    s.processingChannels.put(retry, retryChannel);
-                } catch (ApiException busy) {
-                    s.retryPages.remove(Integer.valueOf(retry));
-                    if (!s.queued.contains(retry)) s.queued.addLast(retry);
-                } catch (RuntimeException error) {
-                    s.retryPages.remove(Integer.valueOf(retry));
-                    s.dispatched.remove(retry);
-                    s.processingChannels.remove(retry);
-                    disable(s, "BLOCKED", "随读处理无法提交重试任务：" + safeMessage(error));
-                    finish(s);
-                    return;
-                }
-            }
-        }
+        // Explicit retries are admitted only by requestReprocess, never by an unchecked force queue.
 
         // 1. Guarantee centerPage is Priority #1.
         // U2：容量满时等待自然收尾，不强杀最远页的已发出云请求。当前页保持队首，
@@ -581,6 +554,8 @@ public class ReadingWindowService {
         final Set<Integer> retryPages = ConcurrentHashMap.newKeySet();
         final Set<Integer> processingPages = ConcurrentHashMap.newKeySet();
         final Map<Integer, String> processingChannels = new ConcurrentHashMap<>();
+        String retryOperationId;
+        PageReprocessRequest retryRequest;
         long sequence;
         int centerPage, fromPage, toPage;
         Instant deadline, notBefore;

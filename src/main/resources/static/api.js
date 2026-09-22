@@ -21,7 +21,8 @@ async function request(path, options = {}, timeout = 30000) {
       failure.body = body;
       throw failure;
     }
-    return response.status === 204 ? null : response.json();
+    // Keep cancellation and the deadline alive until the complete body has been consumed.
+    return response.status === 204 ? null : await response.json();
   } catch (error) {
     // 阶段2：快速翻页丢弃过时请求——外部取消不提示超时，后端仍以自身预算为准
     if (error.name === 'AbortError' && externalSignal?.aborted) {

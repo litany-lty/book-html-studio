@@ -12,6 +12,10 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -45,16 +49,21 @@ public final class BoundedHttp implements AutoCloseable {
     private final HttpClient client;
     private final ThreadPoolExecutor workers;
     private final int maxThreads;
+    private final ExecutorService bodyReaders;
+    private final Set<InputStream> openBodies = ConcurrentHashMap.newKeySet();
 
     public BoundedHttp(int maxThreads, Duration connectTimeout) {
-        if (maxThreads < 1) throw new IllegalArgumentException("线程数非法");
+        this(maxThreads, connectTimeout, null);
+    }
+
+    // The injected body executor is for deterministic saturation/rejection tests.
+    BoundedHttp(int maxThreads, Duration connectTimeout, ExecutorService bodyReaders) {
+        if (maxThreads < 1 || maxThreads > 64) throw new IllegalArgumentException("线程数非法");
+        if (connectTimeout == null || connectTimeout.isZero() || connectTimeout.isNegative())
+            throw new IllegalArgumentException("连接时限非法");
         this.maxThreads = maxThreads;
-        this.workers = new ThreadPoolExecutor(maxThreads, maxThreads, 60, TimeUnit.SECONDS,
-                new ArrayBlockingQueue<>(maxThreads * 4), r -> {
-                    Thread t = new Thread(r, "bounded-http-" + POOL_SEQ.incrementAndGet());
-                    t.setDaemon(true);
-                    return t;
-                }, new ThreadPoolExecutor.AbortPolicy());
+        this.workers = pool(maxThreads, "transport");
+        this.bodyReaders = bodyReaders == null ? pool(maxThreads, "body") : bodyReaders;
         this.client = HttpClient.newBuilder()
                 .connectTimeout(connectTimeout)
                 .followRedirects(HttpClient.Redirect.NEVER)
@@ -62,25 +71,61 @@ public final class BoundedHttp implements AutoCloseable {
                 .build();
     }
 
+    private static ThreadPoolExecutor pool(int threads, String kind) {
+        return new ThreadPoolExecutor(threads, threads, 60, TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(threads * 4), r -> {
+                    Thread t = new Thread(r, "bounded-http-" + kind + "-" + POOL_SEQ.incrementAndGet());
+                    t.setDaemon(true);
+                    return t;
+                }, new ThreadPoolExecutor.AbortPolicy());
+    }
+
     public int maxThreads() { return maxThreads; }
 
-    public int activeThreads() { return workers.getActiveCount(); }
+    public int activeThreads() {
+        return workers.getActiveCount() + (bodyReaders instanceof ThreadPoolExecutor pool ? pool.getActiveCount() : 0);
+    }
 
     public Response send(HttpRequest request, long deadlineNanos, int maxBytes, BooleanSupplier cancelled)
             throws BoundedHttpException {
+        if (deadlineNanos <= 0 || deadlineNanos > TimeUnit.DAYS.toNanos(1) || maxBytes < 1)
+            throw new IllegalArgumentException("请求期限或响应上限非法");
+        if (cancelled.getAsBoolean() || Thread.currentThread().isInterrupted())
+            throw new BoundedHttpException(Kind.CANCELLED, "请求已取消");
         long deadline = System.nanoTime() + deadlineNanos;
-        CompletableFuture<HttpResponse<InputStream>> future =
-                client.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream());
-        HttpResponse<InputStream> response = awaitFuture(future, null, deadline, cancelled, "响应头等待超时");
+        CompletableFuture<HttpResponse<InputStream>> future;
+        try {
+            future = client.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream());
+        } catch (RejectedExecutionException rejected) {
+            throw new BoundedHttpException(Kind.IO, "传输队列已满或已关闭");
+        }
+        HttpResponse<InputStream> response;
+        try {
+            response = awaitFuture(future, null, deadline, cancelled, "响应头等待超时");
+        } catch (BoundedHttpException failure) {
+            // If the headers won a cancellation race, dispose of their unconsumed body.
+            future.thenAccept(late -> closeQuietly(late.body()));
+            throw failure;
+        }
+        return consumeResponse(response, deadline, maxBytes, cancelled);
+    }
+
+    Response consumeResponse(HttpResponse<InputStream> response, long deadline, int maxBytes,
+                             BooleanSupplier cancelled) throws BoundedHttpException {
         int status = response.statusCode();
         InputStream stream = response.body();
         if (stream == null) return new Response(status, new byte[0]);
-        CompletableFuture<byte[]> bodyFuture = CompletableFuture.supplyAsync(
-                () -> readBounded(stream, maxBytes), workers);
+        openBodies.add(stream);
         try {
+            // Submission is inside the close scope: a saturated executor owns no leaked stream.
+            CompletableFuture<byte[]> bodyFuture = CompletableFuture.supplyAsync(
+                    () -> readBounded(stream, maxBytes), bodyReaders);
             return new Response(status, awaitFuture(bodyFuture, stream, deadline, cancelled, "响应体读取超时"));
+        } catch (RejectedExecutionException rejected) {
+            throw new BoundedHttpException(Kind.IO, "响应体读取队列已满或已关闭");
         } finally {
             closeQuietly(stream);
+            openBodies.remove(stream);
         }
     }
 
@@ -89,9 +134,9 @@ public final class BoundedHttp implements AutoCloseable {
             byte[] buffer = new byte[8192];
             int total = 0, read;
             while ((read = in.read(buffer)) != -1) {
-                total += read;
-                if (total > maxBytes) throw new CompletionException(
+                if (read > maxBytes - total) throw new CompletionException(
                         new BoundedHttpException(Kind.TOO_LARGE, "响应超过最大字节限制"));
+                total += read;
                 out.write(buffer, 0, read);
             }
             return out.toByteArray();
@@ -143,6 +188,8 @@ public final class BoundedHttp implements AutoCloseable {
 
     @Override
     public void close() {
+        bodyReaders.shutdownNow();
+        openBodies.forEach(BoundedHttp::closeQuietly);
         workers.shutdownNow();
     }
 }

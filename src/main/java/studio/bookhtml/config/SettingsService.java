@@ -37,7 +37,10 @@ public class SettingsService {
                         String paddleAccessToken, String ppocrApiKey, String ppocrSecretKey,
                         boolean qwenEnabled, String qwenApiKey, String qwenRegion, String qwenWorkspaceId, String qwenModel,
                         boolean jevEnabled, String jevApiKey, String jevModel,
-                        Long budgetUnits, boolean allowCloudData, List<Rate> billingRates) {}
+                        Long budgetUnits, boolean allowCloudData, List<Rate> billingRates) {
+        // Runtime credentials must never escape through incidental diagnostic formatting.
+        @Override public String toString() { return "SettingsState[revision=" + revision + ", credentials=REDACTED]"; }
+    }
     public record Rate(String provider, String model, String currency, String perRequest,
                        String inputPerMillion, String outputPerMillion) {}
 
@@ -76,14 +79,11 @@ public class SettingsService {
         out.put("busy", busy());
         Map<String, Object> paddleMap = new LinkedHashMap<>();
         paddleMap.put("accessTokenSet", has(s.paddleAccessToken()));
-        paddleMap.put("accessToken", s.paddleAccessToken() == null ? "" : s.paddleAccessToken());
         paddleMap.put("configured", has(s.paddleAccessToken()));
         paddleMap.put("model", "PaddleOCR-VL-1.6");
         Map<String, Object> ppocrMap = new LinkedHashMap<>();
         ppocrMap.put("apiKeySet", has(s.ppocrApiKey()));
-        ppocrMap.put("apiKey", s.ppocrApiKey() == null ? "" : s.ppocrApiKey());
         ppocrMap.put("secretKeySet", has(s.ppocrSecretKey()));
-        ppocrMap.put("secretKey", s.ppocrSecretKey() == null ? "" : s.ppocrSecretKey());
         ppocrMap.put("configured", has(s.ppocrApiKey()) && has(s.ppocrSecretKey()));
         ppocrMap.put("model", "PP-OCRv6");
         out.put("ocr", Map.of("defaultProvider", s.defaultProvider(), "fallbackEnabled", s.fallbackEnabled(),
@@ -92,7 +92,6 @@ public class SettingsService {
         Map<String, Object> qwenMap = new LinkedHashMap<>();
         qwenMap.put("enabled", s.qwenEnabled());
         qwenMap.put("apiKeySet", has(s.qwenApiKey()));
-        qwenMap.put("apiKey", s.qwenApiKey() == null ? "" : s.qwenApiKey());
         qwenMap.put("region", s.qwenRegion());
         qwenMap.put("workspaceId", s.qwenWorkspaceId());
         qwenMap.put("model", s.qwenModel());
@@ -102,7 +101,6 @@ public class SettingsService {
         Map<String, Object> j = new LinkedHashMap<>();
         j.put("enabled", s.jevEnabled());
         j.put("apiKeySet", has(s.jevApiKey()));
-        j.put("apiKey", s.jevApiKey() == null ? "" : s.jevApiKey());
         j.put("model", s.jevModel());
         j.put("mode", jev.getMode());
         j.put("budgetUnits", s.budgetUnits() == null ? "" : s.budgetUnits().toString());
@@ -119,7 +117,8 @@ public class SettingsService {
 
     public synchronized Map<String, Object> update(JsonNode body) {
         if (body == null || !body.isObject()) bad();
-        only(body, "revision", "ocr", "qwen", "jev", "billing");
+        only(body, "revision", "ocr", "qwen", "jev", "billing", "secretUpdates");
+        body = normalizeSecretUpdates(body);
         JsonNode revision = body.get("revision");
         if (revision == null || !revision.isIntegralNumber() || !revision.canConvertToLong()) bad();
         if (revision.longValue() != state.revision()) throw new ApiException(HttpStatus.CONFLICT, "设置已被其他修改覆盖，请刷新后重试");
@@ -156,6 +155,40 @@ public class SettingsService {
         state = next;
         applyMutable(next);
         return view();
+    }
+
+    /** Explicit write-only updates. Legacy nested input is accepted only when not mixed. */
+    private JsonNode normalizeSecretUpdates(JsonNode body) {
+        JsonNode updates = section(body, "secretUpdates", "paddleAccessToken", "ppocrApiKey",
+                "ppocrSecretKey", "qwenApiKey", "jevApiKey");
+        if (updates == null) return body;
+        var copy = (com.fasterxml.jackson.databind.node.ObjectNode) body.deepCopy();
+        String[][] paths = {
+                {"paddleAccessToken", "ocr", "paddleAiStudio", "accessToken", "clearAccessToken"},
+                {"ppocrApiKey", "ocr", "ppocr", "apiKey", "clearApiKey"},
+                {"ppocrSecretKey", "ocr", "ppocr", "secretKey", "clearSecretKey"},
+                {"qwenApiKey", "qwen", "", "apiKey", "clearApiKey"},
+                {"jevApiKey", "jev", "", "apiKey", "clearApiKey"}};
+        for (String[] path : paths) {
+            JsonNode update = section(updates, path[0], "value", "clearSecret");
+            if (update == null) continue;
+            if (!update.has("value") && !update.has("clearSecret")) bad();
+            JsonNode parent = copy.get(path[1]);
+            if (parent != null && !parent.isObject()) bad();
+            var target = parent == null ? copy.putObject(path[1])
+                    : (com.fasterxml.jackson.databind.node.ObjectNode) parent;
+            if (!path[2].isEmpty()) {
+                JsonNode child = target.get(path[2]);
+                if (child != null && !child.isObject()) bad();
+                target = child == null ? target.putObject(path[2])
+                        : (com.fasterxml.jackson.databind.node.ObjectNode) child;
+            }
+            if (target.has(path[3]) || target.has(path[4])) bad();
+            if (update.has("value")) target.set(path[3], update.get("value"));
+            if (update.has("clearSecret")) target.set(path[4], update.get("clearSecret"));
+        }
+        copy.remove("secretUpdates");
+        return copy;
     }
 
     private void applyMutable(State s) {
@@ -260,6 +293,7 @@ public class SettingsService {
         if (clear && !value.isEmpty()) bad();
         if (clear) return "";
         if (value.isEmpty()) return fallback;
+        if (value.isBlank() || value.matches("[＊*•●]+")) bad();
         if (value.length() > 4096 || value.chars().anyMatch(c -> c < 32 || c == 127)) bad();
         return value;
     }

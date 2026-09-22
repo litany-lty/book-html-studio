@@ -36,8 +36,13 @@ public record PageAttempt(String bookId,
     }
 
     public PageAttempt nextGeneration() {
-        return new PageAttempt(bookId, pageNumber, runId, UUID.randomUUID(), generation + 1,
-                expectedRevision, expectedSourceHash, allowedCommitOps, "RUNNING", startedAt, Instant.now());
+        return nextGeneration(expectedRevision, expectedSourceHash, allowedCommitOps);
+    }
+
+    public PageAttempt nextGeneration(int revision, String sourceHash, List<String> operations) {
+        Instant now = Instant.now();
+        return new PageAttempt(bookId, pageNumber, runId, UUID.randomUUID(), Math.addExact(generation, 1),
+                revision, sourceHash, operations, "RUNNING", now, now);
     }
 
     public PageAttempt withLifecycle(String next) {

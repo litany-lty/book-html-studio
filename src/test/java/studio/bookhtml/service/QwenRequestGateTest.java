@@ -108,4 +108,64 @@ class QwenRequestGateTest {
         assertEquals(0, errors.get());
         assertEquals(0, gate.inFlight());
     }
+    @Test void refreshKeepsExistingOwnersAndDuplicateConcurrentCloseIsHarmless() throws Exception {
+        QwenAssistProperties properties = config(3, 2, 0);
+        QwenRequestGate gate = new QwenRequestGate(properties);
+        var first = gate.acquire(true, Duration.ZERO);
+        var second = gate.acquire(false, Duration.ZERO);
+        var third = gate.acquire(false, Duration.ZERO);
+        assertNotNull(first); assertNotNull(second); assertNotNull(third);
+        gate.refresh();
+        assertNull(gate.acquire(true, Duration.ZERO), "refresh must not mint extra capacity");
+        properties.setMaxConcurrentRequests(1);
+        gate.refresh();
+        first.close();
+        second.close();
+        assertEquals(1, gate.inFlight());
+        assertNull(gate.acquire(true, Duration.ZERO), "lowering capacity drains old owners");
+        var start = new CountDownLatch(1);
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(8);
+        try {
+            var futures = new ArrayList<java.util.concurrent.Future<?>>();
+            for (int i = 0; i < 8; i++) futures.add(pool.submit(() -> {
+                start.await(); third.close(); return null;
+            }));
+            start.countDown();
+            for (var future : futures) future.get(3, TimeUnit.SECONDS);
+            assertEquals(0, gate.inFlight());
+            assertEquals(0, gate.backgroundInFlight());
+            var only = gate.acquire(true, Duration.ZERO);
+            assertNotNull(only);
+            assertNull(gate.acquire(true, Duration.ZERO));
+            only.close();
+        } finally { start.countDown(); pool.shutdownNow(); }
+    }
+
+    @Test void concurrentBackgroundAdmissionsDoNotCrossTheirCap() throws Exception {
+        var gate = new QwenRequestGate(config(3, 2, 0));
+        var occupied = gate.acquire(false, Duration.ZERO);
+        var start = new CountDownLatch(1);
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(12);
+        var winners = new CopyOnWriteArrayList<QwenRequestGate.Permit>();
+        try {
+            var futures = new ArrayList<java.util.concurrent.Future<?>>();
+            for (int i = 0; i < 12; i++) futures.add(pool.submit(() -> {
+                start.await();
+                var permit = gate.acquire(false, Duration.ZERO);
+                if (permit != null) winners.add(permit);
+                return null;
+            }));
+            start.countDown();
+            for (var future : futures) future.get(3, TimeUnit.SECONDS);
+            assertEquals(1, winners.size());
+            assertEquals(2, gate.backgroundInFlight());
+            var foreground = gate.acquire(true, Duration.ZERO);
+            assertNotNull(foreground);
+            foreground.close();
+        } finally {
+            start.countDown(); winners.forEach(QwenRequestGate.Permit::close);
+            occupied.close(); pool.shutdownNow();
+        }
+    }
+
 }
