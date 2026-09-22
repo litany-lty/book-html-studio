@@ -23,6 +23,19 @@ export function progressView(snapshot, pageStatus) {
     state: String(life || 'waiting').toLowerCase(), done, total, terminal: terminal.has(life) };
 }
 
+// Keep these related statuses together when the page header wraps on a narrow screen.
+// Group once, preserving the live save-status node and both public DOM IDs.
+function groupSaveAndProgress(node) {
+  const document = node.ownerDocument;
+  const saved = document?.getElementById('page-save-status');
+  if (!saved || saved.nextElementSibling !== node || saved.parentElement?.classList.contains('page-save-progress-group')) return;
+  const group = document.createElement('span');
+  group.className = 'page-save-progress-group';
+  group.style.cssText = 'display:inline-flex;align-items:center;white-space:nowrap;max-inline-size:100%';
+  saved.before(group);
+  group.append(saved, node);
+}
+
 export function createPageProgress({ api, state, element }) {
   let scope = null, snapshot = null, timer = null, controller = null, generation = 0;
   const retired = new Set();
@@ -34,6 +47,7 @@ export function createPageProgress({ api, state, element }) {
     const view = progressView(snapshot, state.page.status);
     node.hidden = view.hidden;
     if (view.hidden) { node.textContent = ''; return; }
+    groupSaveAndProgress(node);
     const text = `${view.label} ${view.percent}%`;
     if (node.textContent !== text) node.textContent = text;
     node.dataset.state = view.state;

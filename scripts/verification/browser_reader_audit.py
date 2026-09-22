@@ -51,6 +51,7 @@ class Handler(SimpleHTTPRequestHandler):
         WRITES.append(self.path); self.send_json({'message': 'Synthetic test forbids writes/cloud calls'}, 403)
     do_PUT = do_POST
     do_PATCH = do_POST
+    do_DELETE = do_POST
     def do_GET(self):
         path = self.path.split('?')[0]
         if not path.startswith('/api/'): return super().do_GET()
@@ -107,13 +108,18 @@ def main():
             check('event_driven_percentage', '77%' in page.locator('#page-processing-progress').inner_text())
             page.screenshot(path=str(OUT / 'reader-desktop.png'), full_page=True)
             page.wait_for_timeout(1800)
-            check('bounded_readonly_prefetch', COUNTERS['peak'] <= 3, COUNTERS['peak'])
+            check('bounded_readonly_prefetch', 1 < COUNTERS['peak'] <= 3, COUNTERS['peak'])
             page.locator('#page-jump').fill('8'); page.locator('#page-jump').press('Enter')
             page.wait_for_function("document.querySelector('#paper').textContent.includes('第8页合成正文')")
             page.wait_for_function("document.querySelector('#page-processing-progress').textContent.includes('10%')")
             check('page_change_clears_old_progress', '77%' not in page.locator('#page-processing-progress').inner_text())
             page.set_viewport_size({'width': 390, 'height': 844})
             page.screenshot(path=str(OUT / 'reader-mobile.png'), full_page=True)
+            check('mobile_progress_stays_right_of_saved', page.evaluate('''() => {
+              const saved = document.querySelector('#page-save-status').getBoundingClientRect();
+              const progress = document.querySelector('#page-processing-progress').getBoundingClientRect();
+              return progress.left >= saved.right && Math.abs((saved.top + saved.bottom) / 2 - (progress.top + progress.bottom) / 2) <= 2;
+            }'''))
             check('no_mobile_horizontal_overflow', page.evaluate('document.documentElement.scrollWidth <= window.innerWidth + 1'))
             check('no_task_overlay_on_open', page.locator('#drawer-scrim').is_hidden())
             check('no_automatic_paid_writes', not WRITES, WRITES)
@@ -121,7 +127,7 @@ def main():
             browser.close()
     finally:
         server.shutdown(); server.server_close()
-        report = {'status': 'PASS' if len(results) == 9 and all(x['pass'] for x in results) else 'FAIL_OR_BLOCKED', 'fixture': 'synthetic-only; not real OCR latency or accuracy', 'checks': results, 'javascriptErrors': errors,
+        report = {'status': 'PASS' if len(results) == 10 and all(x['pass'] for x in results) else 'FAIL_OR_BLOCKED', 'fixture': 'synthetic-only; not real OCR latency or accuracy', 'checks': results, 'javascriptErrors': errors,
                   'peakPageJsonReads': COUNTERS['peak'], 'writes': WRITES,
                   'trace': [{**x, 't': round(x['t'] - TRACE[0]['t'], 3)} for x in TRACE] if TRACE else []}
         (OUT / 'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
