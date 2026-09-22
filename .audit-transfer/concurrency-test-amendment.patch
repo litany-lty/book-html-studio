@@ -1,0 +1,56 @@
+diff --git a/src/test/java/studio/bookhtml/service/ProcessingProgressTest.java b/src/test/java/studio/bookhtml/service/ProcessingProgressTest.java
+index ab064835f2f3eb261af9b6a1f30603b745a77be9..985d2cfed77a559704adbace19ea620232c5a384 100644
+--- a/src/test/java/studio/bookhtml/service/ProcessingProgressTest.java
++++ b/src/test/java/studio/bookhtml/service/ProcessingProgressTest.java
+@@ -99,9 +99,11 @@ class ProcessingProgressTest {
+                 .thenAnswer(inv -> baselineResult(inv.getArgument(1), "基线正文" + inv.getArgument(1)));
+         when(processor.enrichBaseline(eq(book.id()), anyInt(), any(), anyString(), anyString(), any()))
+                 .thenAnswer(inv -> {
+-                    enrichEntered.countDown();
+-                    assertTrue(enrichRelease.await(4, TimeUnit.SECONDS));
+                     int n = inv.getArgument(1);
++                    if (n == 1) {
++                        enrichEntered.countDown(); // The barrier belongs to the displayed page, not a neighbour.
++                        assertTrue(enrichRelease.await(4, TimeUnit.SECONDS));
++                    }
+                     return new PageProcessor.EnrichResult(List.of(text("e" + n, "增强正文" + n)),
+                             "paddle-aistudio+qwen-assist", List.of());
+                 });
+@@ -121,6 +123,10 @@ class ProcessingProgressTest {
+         assertTrue(snap.canRead());
+         enrichRelease.countDown();
+         await(() -> "增强正文1".equals(store.readPage(book.id(), 1).blocks().get(0).original()));
++        await(() -> {
++            ProcessingSnapshot s = progress.latest(book.id(), 1);
++            return s != null && "SUCCEEDED".equals(s.lifecycle());
++        }); // Durable page publication happens before the terminal telemetry event.
+         ProcessingSnapshot done = progress.latest(book.id(), 1);
+         assertEquals("ENHANCED", done.contentAvailability());
+         assertEquals("SUCCEEDED", done.lifecycle());
+@@ -155,8 +161,10 @@ class ProcessingProgressTest {
+                 .thenAnswer(inv -> baselineResult(inv.getArgument(1), "基线正文"));
+         when(processor.enrichBaseline(eq(book.id()), anyInt(), any(), anyString(), anyString(), any()))
+                 .thenAnswer(inv -> {
+-                    enrichEntered.countDown();
+-                    assertTrue(enrichRelease.await(4, TimeUnit.SECONDS));
++                    if ((int) inv.getArgument(1) == 1) {
++                        enrichEntered.countDown();
++                        assertTrue(enrichRelease.await(4, TimeUnit.SECONDS));
++                    }
+                     return new PageProcessor.EnrichResult(List.of(text("e1", "增强改写")),
+                             "paddle-aistudio+qwen-assist", List.of());
+                 });
+diff --git a/src/test/java/studio/bookhtml/service/ReadingWindowServiceTest.java b/src/test/java/studio/bookhtml/service/ReadingWindowServiceTest.java
+index 3006f69940f4ab7dc444c772c0930b4c569da44f..68f6e2ba907440a9917f8d1fc60f3f2e5838aae0 100644
+--- a/src/test/java/studio/bookhtml/service/ReadingWindowServiceTest.java
++++ b/src/test/java/studio/bookhtml/service/ReadingWindowServiceTest.java
+@@ -134,7 +134,8 @@ class ReadingWindowServiceTest {
+         advanceAndTick(Duration.ofSeconds(1));
+         await(() -> calls.contains(17));
+         assertEquals(17, windows.get(book.id(), session).centerPage());
+-        assertTrue(calls.subList(admittedBeforeJump.size(), calls.size()).contains(17));
++        List<Integer> afterJump = List.copyOf(calls);
++        assertTrue(afterJump.subList(admittedBeforeJump.size(), afterJump.size()).contains(17));
+     }
+ 
+     @Test void currentPageLoadsInParallelWithExistingInFlightPage() throws Exception {

@@ -36,6 +36,8 @@ jobs:
           git apply --index --unidiff-zero "$RUNNER_TEMP/reader-audit.patch"
           echo '0855c74c2f61720449cb79b8f8cdc3bcfd63f076455576bd83d532a7ecd99cab  .audit-transfer/scanner-amendment.patch' | sha256sum --check --status
           git apply --index .audit-transfer/scanner-amendment.patch
+          echo 'd8a052c474354990a2444391e60b999317b74fb62f286b0b7e4a53c91c7835b9  .audit-transfer/concurrency-test-amendment.patch' | sha256sum --check --status
+          git apply --index .audit-transfer/concurrency-test-amendment.patch
           git diff --cached --check
       - uses: actions/setup-java@v6
         with:
@@ -113,6 +115,8 @@ jobs:
           git apply --index --unidiff-zero "$RUNNER_TEMP/reader-audit.patch"
           echo '0855c74c2f61720449cb79b8f8cdc3bcfd63f076455576bd83d532a7ecd99cab  .audit-transfer/scanner-amendment.patch' | sha256sum --check --status
           git apply --index .audit-transfer/scanner-amendment.patch
+          echo 'd8a052c474354990a2444391e60b999317b74fb62f286b0b7e4a53c91c7835b9  .audit-transfer/concurrency-test-amendment.patch' | sha256sum --check --status
+          git apply --index .audit-transfer/concurrency-test-amendment.patch
           git diff --cached --check
           test "$(git write-tree)" = "$TESTED_TREE"
           target='refs/heads/audit/reader-stream-context-security-20260922'
