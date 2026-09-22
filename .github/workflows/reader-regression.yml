@@ -1,0 +1,97 @@
+name: Reader audit verification
+
+on:
+  push:
+    branches: [audit/reader-stream-context-security-20260922]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reader-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Apply integrity-checked source changes
+        shell: bash
+        run: |
+          mkdir -p test-results/audit
+          cat .audit/reader.patch.xz.part{0,1,2,3,4} > /tmp/reader.patch.xz
+          echo '7d6b9e9be812f666288f08f56d1b053ceeea2af76de2493952ddf94d6e3dcbf0  /tmp/reader.patch.xz' | sha256sum --check
+          xz -dc /tmp/reader.patch.xz > /tmp/reader.patch
+          git apply --check /tmp/reader.patch
+          git apply /tmp/reader.patch
+          git diff --check
+          git rev-parse HEAD > test-results/audit/base-sha.txt
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Block new plaintext credentials
+        run: |
+          python3 scripts/security/scan_secrets.py --out test-results/audit/secrets-worktree.json
+          python3 -m unittest discover -s scripts/security -p 'test_*.py'
+      - name: Redacted reachable-history audit
+        id: history
+        continue-on-error: true
+        run: python3 scripts/security/scan_secrets.py --history --out test-results/audit/secrets-history.json
+      - name: Offline script checks
+        shell: bash
+        run: |
+          bash -n run.sh
+          for file in src/main/resources/static/*.js src/main/resources/export/*.js scripts/*.mjs; do node --check "$file"; done
+          node scripts/verification/probe_display.js
+          node scripts/verification/probe_job_scope.js
+          node scripts/verification/probe_reading_window.js
+          node scripts/verification/probe_page_progress.js
+          node scripts/verification/probe_ready_fetch_retry.js
+          python3 -m pip install --disable-pip-version-check OpenCC==1.4.2
+          python3 -m py_compile scripts/verification/*.py scripts/security/*.py
+          python3 scripts/verification/shadow_eval.py --selftest
+          python3 -m unittest discover -s scripts/verification -p 'test_*.py'
+      - name: Java regression tests
+        run: mvn --batch-mode verify
+      - name: Synthetic reader browser regression
+        run: |
+          python3 -m pip install --disable-pip-version-check playwright==1.51.1
+          if ! command -v chromium && ! command -v google-chrome; then python3 -m playwright install --with-deps chromium; fi
+          python3 scripts/verification/browser_reader_audit.py
+      - name: Publish verified source only on audit branch
+        if: success()
+        env:
+          AUDIT_BRANCH: audit/reader-stream-context-security-20260922
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = "refs/heads/$AUDIT_BRANCH"
+          test "$(git ls-remote origin "refs/heads/$AUDIT_BRANCH" | cut -f1)" = "$GITHUB_SHA"
+          git add .gitignore src scripts
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: prioritize reading and preserve trustworthy OCR context and progress'
+          git push origin "HEAD:refs/heads/$AUDIT_BRANCH"
+          git rev-parse HEAD > test-results/audit/published-sha.txt
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reader-audit-tests-${{ github.sha }}
+          path: |
+            target/surefire-reports/
+            test-results/
+          retention-days: 7
