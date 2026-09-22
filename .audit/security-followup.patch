@@ -1,0 +1,90 @@
+diff --git a/src/main/java/studio/bookhtml/config/SettingsService.java b/src/main/java/studio/bookhtml/config/SettingsService.java
+index 95cef86..8529d81 100644
+--- a/src/main/java/studio/bookhtml/config/SettingsService.java
++++ b/src/main/java/studio/bookhtml/config/SettingsService.java
+@@ -39,3 +39,7 @@ public class SettingsService {
+                         boolean jevEnabled, String jevApiKey, String jevModel,
+-                        Long budgetUnits, boolean allowCloudData, List<Rate> billingRates) {}
++                        Long budgetUnits, boolean allowCloudData, List<Rate> billingRates) {
++        @Override public String toString() {
++            return "SettingsState[revision=" + revision + ", credentials=REDACTED]";
++        }
++    }
+     public record Rate(String provider, String model, String currency, String perRequest,
+@@ -78,3 +82,3 @@ public class SettingsService {
+         paddleMap.put("accessTokenSet", has(s.paddleAccessToken()));
+-        paddleMap.put("accessToken", s.paddleAccessToken() == null ? "" : s.paddleAccessToken());
++        paddleMap.put("accessToken", ""); // Write-only credential: never echo a stored secret.
+         paddleMap.put("configured", has(s.paddleAccessToken()));
+@@ -83,5 +87,5 @@ public class SettingsService {
+         ppocrMap.put("apiKeySet", has(s.ppocrApiKey()));
+-        ppocrMap.put("apiKey", s.ppocrApiKey() == null ? "" : s.ppocrApiKey());
++        ppocrMap.put("apiKey", ""); // Write-only credential: never echo a stored secret.
+         ppocrMap.put("secretKeySet", has(s.ppocrSecretKey()));
+-        ppocrMap.put("secretKey", s.ppocrSecretKey() == null ? "" : s.ppocrSecretKey());
++        ppocrMap.put("secretKey", ""); // Write-only credential: never echo a stored secret.
+         ppocrMap.put("configured", has(s.ppocrApiKey()) && has(s.ppocrSecretKey()));
+@@ -94,3 +98,3 @@ public class SettingsService {
+         qwenMap.put("apiKeySet", has(s.qwenApiKey()));
+-        qwenMap.put("apiKey", s.qwenApiKey() == null ? "" : s.qwenApiKey());
++        qwenMap.put("apiKey", ""); // Write-only credential: never echo a stored secret.
+         qwenMap.put("region", s.qwenRegion());
+@@ -104,3 +108,3 @@ public class SettingsService {
+         j.put("apiKeySet", has(s.jevApiKey()));
+-        j.put("apiKey", s.jevApiKey() == null ? "" : s.jevApiKey());
++        j.put("apiKey", ""); // Write-only credential: never echo a stored secret.
+         j.put("model", s.jevModel());
+diff --git a/src/main/resources/static/settings.js b/src/main/resources/static/settings.js
+index 7c736fb..ea97b59 100644
+--- a/src/main/resources/static/settings.js
++++ b/src/main/resources/static/settings.js
+@@ -154,11 +154,11 @@ function render(settings) {
+   field('jevAllowCloudData').checked = Boolean(settings.jev?.allowCloudData);
+-  field('paddleAccessToken').value = settings.ocr?.paddleAiStudio?.accessToken || '';
++  field('paddleAccessToken').value = ''; // Only a newly typed replacement may enter this field.
+   if (settings.ocr?.paddleAiStudio?.accessTokenSet) field('paddleAccessToken').placeholder = '•••••••• （服务端已保存凭据）';
+-  field('ppocrApiKey').value = settings.ocr?.ppocr?.apiKey || '';
++  field('ppocrApiKey').value = ''; // Only a newly typed replacement may enter this field.
+   if (settings.ocr?.ppocr?.apiKeySet) field('ppocrApiKey').placeholder = '•••••••• （服务端已保存凭据）';
+-  field('ppocrSecretKey').value = settings.ocr?.ppocr?.secretKey || '';
++  field('ppocrSecretKey').value = ''; // Only a newly typed replacement may enter this field.
+   if (settings.ocr?.ppocr?.secretKeySet) field('ppocrSecretKey').placeholder = '•••••••• （服务端已保存凭据）';
+-  field('qwenApiKey').value = settings.qwen?.apiKey || '';
++  field('qwenApiKey').value = ''; // Only a newly typed replacement may enter this field.
+   if (settings.qwen?.apiKeySet) field('qwenApiKey').placeholder = '•••••••• （服务端已保存凭据）';
+-  field('jevApiKey').value = settings.jev?.apiKey || '';
++  field('jevApiKey').value = ''; // Only a newly typed replacement may enter this field.
+   if (settings.jev?.apiKeySet) field('jevApiKey').placeholder = '•••••••• （服务端已保存凭据）';
+diff --git a/src/test/java/studio/bookhtml/api/SettingsControllerTest.java b/src/test/java/studio/bookhtml/api/SettingsControllerTest.java
+index 8379d17..59d7ee4 100644
+--- a/src/test/java/studio/bookhtml/api/SettingsControllerTest.java
++++ b/src/test/java/studio/bookhtml/api/SettingsControllerTest.java
+@@ -34,4 +34,4 @@ class SettingsControllerTest {
+         String token = (String) initial.get("csrfToken");
+-        assertTrue(json.writeValueAsString(initial).contains("env-studio-secret"));
+-        assertEquals("env-studio-secret", ((Map<?, ?>)((Map<?, ?>) initial.get("ocr")).get("paddleAiStudio")).get("accessToken"));
++        assertFalse(json.writeValueAsString(initial).contains("env-studio-secret"));
++        assertEquals("", ((Map<?, ?>)((Map<?, ?>) initial.get("ocr")).get("paddleAiStudio")).get("accessToken"));
+         assertTrue(json.writeValueAsString(initial).contains("accessTokenSet"));
+@@ -63,2 +63,21 @@ class SettingsControllerTest {
+ 
++    @Test
++    void allCredentialViewsAndUpdateResponsesAreWriteOnly() throws Exception {
++        SettingsService settings = service();
++        var response = settings.update(json.readTree("""
++                {"revision":0,"ocr":{"ppocr":{"apiKey":"test-private-pp-api","secretKey":"test-private-pp-secret"}},
++                 "qwen":{"apiKey":"test-private-qwen"},"jev":{"apiKey":"test-private-jev"}}
++                """));
++        for (String secret : java.util.List.of("env-studio-secret", "test-private-pp-api",
++                "test-private-pp-secret", "test-private-qwen", "test-private-jev")) {
++            assertFalse(json.writeValueAsString(response).contains(secret));
++            assertFalse(json.writeValueAsString(settings.view()).contains(secret));
++            assertFalse(settings.state().toString().contains(secret));
++        }
++        assertTrue(((Map<?, ?>)response.get("qwen")).get("apiKeySet").equals(true));
++        assertEquals("test-private-qwen", settings.state().qwenApiKey(), "Internal outbound still uses the configured key");
++        settings.update(json.readTree("{\"revision\":1,\"qwen\":{\"apiKey\":\"\"}}"));
++        assertEquals("test-private-qwen", settings.state().qwenApiKey(), "Empty UI value does not erase the saved credential");
++    }
++
+     @Test

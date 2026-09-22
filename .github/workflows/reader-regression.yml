@@ -33,6 +33,8 @@ jobs:
           git apply /tmp/reader.patch
           git apply --check .audit/followup.patch
           git apply .audit/followup.patch
+          git apply --check .audit/security-followup.patch
+          git apply .audit/security-followup.patch
           git diff --check
           git rev-parse HEAD > test-results/audit/base-sha.txt
       - uses: actions/setup-java@v6
@@ -73,7 +75,7 @@ jobs:
       - name: Synthetic reader browser regression
         if: ${{ !cancelled() && steps.apply.outcome == 'success' }}
         run: |
-          python3 -m pip install --disable-pip-version-check playwright==1.51.1
+          python3 -m pip install --disable-pip-version-check playwright==1.51.0
           if ! command -v chromium && ! command -v google-chrome; then python3 -m playwright install --with-deps chromium; fi
           python3 scripts/verification/browser_reader_audit.py
       - name: Publish verified source only on audit branch
