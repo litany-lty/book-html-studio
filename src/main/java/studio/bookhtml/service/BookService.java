@@ -22,10 +22,9 @@ import java.util.*;
 public class BookService {
     private final BookStore store; private final PdfService pdf; private final AppProperties config; private final OutlineService outlines;
     private BookPresentationService presentation;
-    // U6：书架统计缓存；失效唯一来源是存储变更通知（保守：任何页/书变更即失效）。
-    private final Map<String, int[]> statsCache = new java.util.concurrent.ConcurrentHashMap<>();
+    private final PageStatisticsCache statistics;
     public BookService(BookStore store,PdfService pdf,AppProperties config){this(store,pdf,config,new OutlineService(store));}
-    @Autowired public BookService(BookStore store,PdfService pdf,AppProperties config,OutlineService outlines){this.store=store;this.pdf=pdf;this.config=config;this.outlines=outlines;this.store.addChangeListener(statsCache::remove);}
+    @Autowired public BookService(BookStore store,PdfService pdf,AppProperties config,OutlineService outlines){this.store=store;this.pdf=pdf;this.config=config;this.outlines=outlines;this.statistics=new PageStatisticsCache(store);}
     /** U3：投影注入后，摘要标题使用统一投影；未注入走旧适配器（保守兼容）。 */
     @Autowired(required=false) public void setPresentation(BookPresentationService presentation){this.presentation=presentation;}
     public Book upload(MultipartFile file) {
@@ -84,18 +83,35 @@ public class BookService {
         // R03/A1-04：人工保存必须携带版本；缺失或非法 400，冲突 409（含当前版本）
         if(request.revision()==null)throw new ApiException(HttpStatus.BAD_REQUEST,"缺少 revision，请刷新后重试");
         if(request.revision()<0)throw new ApiException(HttpStatus.BAD_REQUEST,"revision 非法");
-        BlockValidator.validate(request.blocks());List<Block> reviewed=request.blocks().stream().map(b->new Block(b.id(),b.type(),b.order(),b.bbox(),b.writingMode(),b.original(),b.simplified(),b.confidence(),b.uncertain(),request.reviewed()||b.reviewed(),b.headingLevel(),"manual",b.sourceIds(),b.suggestion(),b.sourceRect(),b.issues())).toList();Page next=new Page(n,old.width(),old.height(),"READY","manual",reviewed,old.warnings(),request.reviewed(),null,old.sourceRecords(),null);try{Page committed=store.commitPage(id,next,request.revision(),CommitActor.MANUAL,null,CommitOp.MANUAL_SAVE);try{touch(id);}catch(IOException touchFailure){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"页面已保存，但书籍统计更新失败，请刷新后重试");}return committed;}catch(PageConflictException e){throw e;}catch(ApiException e){throw e;}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"保存校对结果失败");}}
+        BlockValidator.validate(request.blocks());List<Block> reviewed=request.blocks().stream().map(b->new Block(b.id(),b.type(),b.order(),b.bbox(),b.writingMode(),b.original(),b.simplified(),b.confidence(),b.uncertain(),request.reviewed()||b.reviewed(),b.headingLevel(),"manual",b.sourceIds(),b.suggestion(),b.sourceRect(),b.issues())).toList();Page next=new Page(n,old.width(),old.height(),"READY","manual",reviewed,old.warnings(),request.reviewed(),null,old.sourceRecords(),null);try{Page committed=store.commitPage(id,next,request.revision(),CommitActor.MANUAL,null,CommitOp.MANUAL_SAVE);touchAfterCommit(id);return committed;}catch(PageConflictException e){throw e;}catch(ApiException e){throw e;}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"保存校对结果失败");}}
     public List<Integer> revisions(String id,int n){page(id,n);return store.listRevisions(id,n);}
     public Page revert(String id,int n,int targetRevision,int expectedRevision){page(id,n);
         // A1-C09：版本号必须为非负整数，不经截断解释
         if(targetRevision<0||expectedRevision<0)throw new ApiException(HttpStatus.BAD_REQUEST,"revision 非法");
-        try{Page next=store.revertPage(id,n,targetRevision,expectedRevision);try{touch(id);}catch(IOException touchFailure){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"版本已回退，但书籍统计更新失败，请刷新后重试");}return next;}catch(ApiException e){throw e;}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"回退版本失败");}}
+        try{Page next=store.revertPage(id,n,targetRevision,expectedRevision);touchAfterCommit(id);return next;}catch(ApiException e){throw e;}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"回退版本失败");}}
     public List<Map<String,Object>> search(String id,String query){Book b=store.readBook(id);String q=query==null?"":query.strip();if(q.isEmpty())return List.of();if(q.length()>200)throw new ApiException(HttpStatus.BAD_REQUEST,"搜索词过长");List<Map<String,Object>> result=new ArrayList<>();for(int n=1;n<=b.totalPages()&&result.size()<500;n++){Page p=requirePage(id,n);for(Block block:p.blocks()){if("advertisement".equals(block.type()))continue;if(contains(block.original(),q)||contains(block.simplified(),q))result.add(Map.of("pageNumber",n,"blockId",block.id(),"text",Optional.ofNullable(block.simplified()).orElse(block.original())));}}return result;}
     public byte[] image(String id,int n,int width){page(id,n);java.awt.image.BufferedImage image=null;try{image=pdf.render(store.pdf(id),n,width);return pdf.png(image);}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"页面图片生成失败");}finally{if(image!=null)image.flush();}}
     public byte[] figure(String id,int n,String blockId){Page p=page(id,n);Block b=p.blocks().stream().filter(x->x.id().equals(blockId)).findFirst().orElseThrow(()->new ApiException(HttpStatus.NOT_FOUND,"未找到该内容块"));try{return pdf.cropPng(store.pdf(id),n,config.maxImageWidth(),b.bbox());}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"内容块图片生成失败");}}
     public Path pdfPath(String id){store.readBook(id);return store.pdf(id);}
-    private Book refresh(Book b){int[] cached=statsCache.get(b.id());if(cached!=null)return new Book(b.id(),b.title(),b.filename(),b.totalPages(),b.createdAt(),b.updatedAt(),cached[0],cached[1],b.archived());int processed=0,reviewed=0;for(int n=1;n<=b.totalPages();n++){Page p=store.readPage(b.id(),n);if(p!=null&&"READY".equals(p.status()))processed++;if(p!=null&&p.reviewed())reviewed++;}statsCache.put(b.id(),new int[]{processed,reviewed});return new Book(b.id(),b.title(),b.filename(),b.totalPages(),b.createdAt(),b.updatedAt(),processed,reviewed,b.archived());}
-    private void touch(String id)throws IOException{Book b=refresh(store.readBook(id));store.updateBook(id,current->new Book(current.id(),current.title(),current.filename(),current.totalPages(),current.createdAt(),Instant.now(),b.processedPages(),b.reviewedPages(),current.archived()));}
+    private Book refresh(Book b) {
+        var counts = statistics.counts(b);
+        return new Book(b.id(),b.title(),b.filename(),b.totalPages(),b.createdAt(),b.updatedAt(),
+                counts.processed(),counts.reviewed(),b.archived());
+    }
+    private void touchAfterCommit(String id) {
+        try {
+            // A saved page is authoritative. Do not scan an entire book before acknowledging it.
+            store.updateBook(id, current -> {
+                var counts = statistics.cached(current);
+                return new Book(current.id(),current.title(),current.filename(),current.totalPages(),
+                        current.createdAt(),Instant.now(),counts == null ? current.processedPages() : counts.processed(),
+                        counts == null ? current.reviewedPages() : counts.reviewed(),current.archived());
+            });
+        } catch (IOException | RuntimeException metadataFailure) {
+            System.getLogger(BookService.class.getName()).log(System.Logger.Level.WARNING,
+                    "PAGE_SAVED_METADATA_STALE: saved page is authoritative; counts refresh on read, book timestamp may lag");
+        }
+    }
     private Page requirePage(String id,int n){Page p=store.readPage(id,n);if(p==null)throw new ApiException(HttpStatus.NOT_FOUND,"页码不存在");return p;}
     static PageSummary summary(Page p){String title=HeadingText.pageTitle(p);List<Block>reading=p.blocks().stream().filter(b->!"advertisement".equals(b.type())).toList();int uncertain=(int)reading.stream().filter(Block::uncertain).count();return new PageSummary(p.pageNumber(),p.status(),reading.size(),uncertain,p.width(),p.height(),title,p.reviewed());}
     private static boolean contains(String value,String q){return value!=null&&value.toLowerCase(Locale.ROOT).contains(q.toLowerCase(Locale.ROOT));}

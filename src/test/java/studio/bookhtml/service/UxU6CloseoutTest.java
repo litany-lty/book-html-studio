@@ -41,7 +41,10 @@ class UxU6CloseoutTest {
         assertTrue(store.contains("addChangeListener"), "U6：派生索引失效走存储通知");
         assertTrue(store.contains("notifyBookChanged"), "U6：页变更唯一出口通知");
         String books = read("src/main/java/studio/bookhtml/service/BookService.java");
-        assertTrue(books.contains("statsCache"), "U6：书架统计增量，不再每次全读");
+        assertTrue(books.contains("PageStatisticsCache"), "U6：书架统计采用有界增量投影");
+        String statistics = read("src/main/java/studio/bookhtml/service/PageStatisticsCache.java");
+        assertTrue(statistics.contains("addPageChangeListener"), "统计由提交事件更新，不依赖页面轮询");
+        assertTrue(statistics.contains("sourceEpoch"), "并发冷扫描不能回填旧统计");
     }
 
     @Test void u6_offlineUsesFrozenProfile() throws Exception {

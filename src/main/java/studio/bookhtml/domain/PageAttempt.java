@@ -9,9 +9,8 @@ import java.util.UUID;
  * U2：页面级处理登记。内存 Map 只用于调度，不单独作为最终写入权限；
  * 最终写入仍以 {@code BookStore} 同一目录锁内的 revision/来源校验为准。
  *
- * <p>重启不恢复：预约本身是进程内状态，重启后旧会话不再派发新任务，
- * 也不自动重发云请求（见 {@code ReadingWindowService} 会话语义）。
- * 持久化恢复意图见 U4（ProcessingSnapshot）。
+ * <p>预约是进程内状态，重启不自动重发云请求。Journal 同时保存权威尝试序号
+ * 与重处理幂等回执；同一操作在新会话或重启后只返回原结果，不获得新执行权限。
  */
 public record PageAttempt(String bookId,
                           int pageNumber,
@@ -54,16 +53,30 @@ public record PageAttempt(String bookId,
         return bookId + ":" + pageNumber;
     }
 
-    /** U4：持久恢复意图。重启后对照意图与当前页：已一致补终态；未发布保留可读页
-     * 标 INTERRUPTED；自动恢复不重发云请求。 */
+    /** Persistent attempts and replay receipts. On restart, unfinished work becomes
+     * INTERRUPTED; a readable page alone is never proof of the attempt's success. */
     @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
-    public record Journal(java.util.Map<String, PageAttempt> intents) {
+    public record Journal(Map<String, PageAttempt> intents, Map<String, ReprocessOperation> operations) {
+        public static final int MAX_OPERATIONS = 4096;
         public Journal {
             intents = intents == null ? Map.of() : Map.copyOf(intents);
+            operations = operations == null ? Map.of() : Map.copyOf(operations);
+            if (operations.size() > MAX_OPERATIONS) throw new IllegalArgumentException("operation capacity exceeded");
         }
+        /** Reads legacy intent-only journals without manufacturing replay receipts. */
+        public Journal(Map<String, PageAttempt> intents) { this(intents, Map.of()); }
+        @com.fasterxml.jackson.annotation.JsonProperty("schemaVersion") public int schemaVersion() { return 2; }
 
-        public static Journal empty() {
-            return new Journal(Map.of());
+        public Journal withIntents(Map<String, PageAttempt> next) {
+            Map<String, ReprocessOperation> updated = new java.util.LinkedHashMap<>(operations);
+            operations.forEach((key, operation) -> {
+                PageAttempt attempt = next.get(operation.bookId() + ":" + operation.response().pages().get(0));
+                if (attempt != null && attempt.attemptId().equals(operation.attemptId())
+                        && attempt.generation() == operation.attemptSeq())
+                    updated.put(key, operation.finish(attempt.lifecycle(), attempt.updatedAt()));
+            });
+            return new Journal(next, updated);
         }
+        public static Journal empty() { return new Journal(Map.of()); }
     }
 }

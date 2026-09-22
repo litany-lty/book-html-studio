@@ -355,17 +355,16 @@ class ConcurrentPageCommitTest {
             BookStore.clearIoFailure();
         }
         assertTrue(Files.notExists(store2.originalPagePath(id2, 1)));
-        // book/stats 阶段：页面已写但统计失败——如实报告已保存，不伪装全未保存
+        // FINAL §5.5: an ancillary metadata failure cannot turn a durable page commit into HTTP 500.
         BookStore.failNextIoAt("book");
         try {
-            service2.update(id2, 1, new PageUpdateRequest(List.of(textBlock("s", "新文字")), false, 0));
-            fail("统计失败必须抛错");
-        } catch (ApiException e) {
-            assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, e.status());
-            assertTrue(e.getMessage().contains("已保存"), "必须说明页面已保存：" + e.getMessage());
+            Page saved = service2.update(id2, 1, new PageUpdateRequest(List.of(textBlock("s", "新文字")), false, 0));
+            assertEquals(1, saved.revision());
+            assertEquals("新文字", saved.blocks().get(0).original());
         } finally {
             BookStore.clearIoFailure();
         }
+        assertEquals(1, service2.get(id2).processedPages(), "read repairs the derived count without resubmitting the page");
         Page committed = store2.readPage(id2, 1);
         assertEquals(1, BookStore.revisionOrZero(committed), "统计失败时页面本身必须已提交");
         assertEquals("新文字", committed.blocks().get(0).original());

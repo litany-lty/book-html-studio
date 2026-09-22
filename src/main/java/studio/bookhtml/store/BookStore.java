@@ -29,6 +29,16 @@ public class BookStore {
     private final ObjectMapper json;
     private final Object dirLock;
     private final DataDirectoryLease lease;
+    public record PageChange(String bookId, Page previous, Page committed, long sourceEpoch) {}
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong> pageEpochs = new java.util.concurrent.ConcurrentHashMap<>();
+    private final List<java.util.function.Consumer<PageChange>> pageListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
+    public long pageEpoch(String id) {
+        var epoch = pageEpochs.get(id);
+        return epoch == null ? 0 : epoch.get();
+    }
+    public void addPageChangeListener(java.util.function.Consumer<PageChange> listener) {
+        pageListeners.add(java.util.Objects.requireNonNull(listener));
+    }
 
     public BookStore(AppProperties properties, ObjectMapper json) throws IOException {
         Path dataDir = properties.dataDir().toAbsolutePath().normalize();
@@ -204,17 +214,26 @@ public class BookStore {
     }
 
     private Page persistNewRevision(String id, Page current, Page proposed) throws IOException {
-        // 阶段1：只归档可读版本（READY/FAILED），避免 PROCESSING 中间态污染历史；R04 按数值保留最近 5 个
-        if (current != null && ("READY".equals(current.status()) || "FAILED".equals(current.status()))) archiveHistory(id, current);
-        int newRev = current == null
-                ? (proposed.revision() == null || proposed.revision() < 0 ? 0 : proposed.revision())
-                : revisionOrZero(current) + 1;
-        Page toWrite = new Page(proposed.pageNumber(), proposed.width(), proposed.height(), proposed.status(), proposed.provider(),
-            proposed.blocks(), proposed.warnings(), proposed.reviewed(), proposed.error(), proposed.sourceRecords(), newRev);
-        atomic(pagePath(id, proposed.pageNumber()), toWrite);
-        // U6：页变更唯一出口；派生索引（画像/统计缓存）据此失效，不轮询。
-        notifyBookChanged(id);
-        return toWrite;
+        var epoch = pageEpochs.computeIfAbsent(id, ignored -> new java.util.concurrent.atomic.AtomicLong());
+        long settledEpoch = Math.addExact(epoch.get(), 2);
+        epoch.set(settledEpoch - 1); // Odd while a page publication is in progress.
+        try {
+            // 阶段1：只归档可读版本（READY/FAILED），避免 PROCESSING 中间态污染历史；R04 按数值保留最近 5 个
+            if (current != null && ("READY".equals(current.status()) || "FAILED".equals(current.status()))) archiveHistory(id, current);
+            int newRev = current == null
+                    ? (proposed.revision() == null || proposed.revision() < 0 ? 0 : proposed.revision())
+                    : revisionOrZero(current) + 1;
+            Page toWrite = new Page(proposed.pageNumber(), proposed.width(), proposed.height(), proposed.status(), proposed.provider(),
+                proposed.blocks(), proposed.warnings(), proposed.reviewed(), proposed.error(), proposed.sourceRecords(), newRev);
+            atomic(pagePath(id, proposed.pageNumber()), toWrite);
+            PageChange event = new PageChange(id, current, toWrite, settledEpoch);
+            for (var listener : pageListeners) {
+                try { listener.accept(event); } catch (RuntimeException ignored) { /* Derived data cannot undo a saved page. */ }
+            }
+            // U6：页变更唯一出口；派生索引（画像/统计缓存）据此失效，不轮询。
+            notifyBookChanged(id);
+            return toWrite;
+        } finally { epoch.set(settledEpoch); }
     }
 
     /** U6：书籍变更监听（画像/统计等派生缓存失效用）。监听器只做轻量失效，不得阻塞。 */
@@ -482,12 +501,75 @@ public class BookStore {
     public Path presentationOverridesPath(String id) { return bookDir(id).resolve("presentation-overrides.json"); }
     /** U4：页面 attempt 恢复意图（IN_PROGRESS → 终态；重启对照，不重发云请求）。 */
     public Path pageAttemptsPath(String id) { return bookDir(id).resolve("page-attempts.json"); }
+    private static final int MAX_ATTEMPT_BYTES = 16 * 1024 * 1024;
+    private static final java.util.concurrent.atomic.AtomicBoolean DIRECTORY_FORCE_WARNING = new java.util.concurrent.atomic.AtomicBoolean();
+
     public <T> T readSidecar(Path path, Class<T> type) {
+        if (type == studio.bookhtml.domain.PageAttempt.Journal.class) {
+            if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return null;
+            try {
+                if (Files.isSymbolicLink(path) || Files.isSymbolicLink(path.getParent())
+                        || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) throw new IOException();
+                byte[] bytes;
+                try (InputStream in = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
+                    bytes = in.readNBytes(MAX_ATTEMPT_BYTES + 1);
+                }
+                if (bytes.length > MAX_ATTEMPT_BYTES) throw new IOException();
+                try (var parser = json.getFactory().createParser(bytes)) {
+                    parser.enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
+                    com.fasterxml.jackson.databind.JsonNode tree = json.readTree(parser);
+                    if (tree == null || !tree.isObject() || parser.nextToken() != null
+                            || !tree.path("intents").isObject()
+                            || tree.has("operations") && !tree.path("operations").isObject()) throw new IOException();
+                    var version = tree.get("schemaVersion");
+                    if (version != null && (!version.isIntegralNumber() || !version.canConvertToInt()
+                            || version.intValue() < 1 || version.intValue() > 2)) throw new IOException();
+                    if (version != null && version.intValue() == 2 && !tree.path("operations").isObject())
+                        throw new IOException();
+                    return json.treeToValue(tree, type);
+                }
+            } catch (Exception invalid) {
+                throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "任务身份记录不可读，未派发云请求");
+            }
+        }
         return Files.exists(path) ? read(path, type, "展示索引数据损坏") : null;
     }
     public <T> void writeSidecar(Path path, T value) throws IOException {
         synchronized (dirLock) {
-            atomic(path, value);
+            if (value instanceof studio.bookhtml.domain.PageAttempt.Journal) durableAttemptWrite(path, value);
+            else atomic(path, value);
+        }
+    }
+
+    /** A receipt and attempt share one forced atomic replacement, never two-file admission. */
+    private void durableAttemptWrite(Path target, Object value) throws IOException {
+        checkInjected("atomic");
+        if (Files.isSymbolicLink(target) || Files.isSymbolicLink(target.getParent()))
+            throw new IOException("unsafe attempt journal");
+        byte[] bytes = json.writeValueAsBytes(value);
+        if (bytes.length > MAX_ATTEMPT_BYTES) throw new IOException("attempt journal capacity exceeded");
+        Path temp = Files.createTempFile(target.getParent(), "attempt-", ".tmp");
+        // Cancellation must not abort its own durable finalizer with ClosedByInterruptException.
+        boolean interrupted = Thread.interrupted();
+        try {
+            try (var file = java.nio.channels.FileChannel.open(temp, StandardOpenOption.WRITE,
+                    StandardOpenOption.TRUNCATE_EXISTING, LinkOption.NOFOLLOW_LINKS)) {
+                var buffer = java.nio.ByteBuffer.wrap(bytes);
+                while (buffer.hasRemaining()) file.write(buffer);
+                file.force(true);
+            }
+            Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            // Some platforms cannot force a directory. A completed rename is not reported as failed.
+            try (var directory = java.nio.channels.FileChannel.open(target.getParent(), StandardOpenOption.READ)) {
+                directory.force(true);
+            } catch (IOException | UnsupportedOperationException unsupported) {
+                if (DIRECTORY_FORCE_WARNING.compareAndSet(false, true))
+                    System.getLogger(BookStore.class.getName()).log(System.Logger.Level.WARNING,
+                            "Directory fsync unavailable; power-loss durability of directory entries is platform dependent");
+            }
+        } finally {
+            try { Files.deleteIfExists(temp); }
+            finally { if (interrupted) Thread.currentThread().interrupt(); }
         }
     }
     /** 首次成功结果缺失原始快照时补留（与旧 writePage preserveOriginal 语义一致）。 */
