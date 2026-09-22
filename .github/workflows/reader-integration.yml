@@ -50,6 +50,7 @@ jobs:
           python3 -m unittest discover -s scripts/verification -p 'test_*.py'
           python3 scripts/security/scan_secrets.py --history --out test-results/integration/secret-scan.json
       - name: Browser prerequisites
+        id: browser
         run: |
           python3 -m pip install --disable-pip-version-check playwright==1.51.0
           sudo apt-get update -qq
@@ -57,9 +58,12 @@ jobs:
           if ! command -v chromium && ! command -v google-chrome; then python3 -m playwright install --with-deps chromium; fi
       - name: Actual focus UI and guarded scan fallbacks (synthetic API)
         run: |
-          python3 scripts/verification/browser_focus_reading.py
-          python3 scripts/verification/browser_scan_recovery.py
+          status=0
+          python3 scripts/verification/browser_focus_reading.py || status=1
+          python3 scripts/verification/browser_scan_recovery.py || status=1
+          exit "$status"
       - name: Real server reader and settings smoke (OCR stub, no cloud)
+        if: ${{ !cancelled() && steps.browser.outcome == 'success' }}
         run: bash scripts/verification/run_reader_browser.sh
       - name: Record exact tested tree
         if: always()
@@ -91,7 +95,7 @@ jobs:
       - name: Publish only the exact verified source tree on the integration branch
         run: |
           python3 .integration/apply.py
-          test "$(git write-tree)" = '1a1d85f6e3002b1dbd8c790f382080edfd6efba1'
+          test "$(git write-tree)" = '18e7ac2648107d0b4d8338f1ede19e6678090334'
           branch='refs/heads/integrate/reader-20260922'
           test "$(git ls-remote origin "$branch" | cut -f1)" = "$GITHUB_SHA"
           git config user.name 'github-actions[bot]'

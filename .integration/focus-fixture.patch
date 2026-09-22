@@ -1,0 +1,25 @@
+diff --git a/scripts/verification/browser_focus_reading.py b/scripts/verification/browser_focus_reading.py
+index 7666473..5bc4112 100644
+--- a/scripts/verification/browser_focus_reading.py
++++ b/scripts/verification/browser_focus_reading.py
+@@ -244,10 +244,18 @@ def main():
+             page.wait_for_selector('body:not(.focus-reading) .reader-toolbar')
+             check('visible_exit_restores_workspace', page.locator('.topbar').is_visible())
+             # Reopen a legacy saved focus preference while the saved view is original.
+-            page.evaluate(f"localStorage.setItem('paper-studio:{BOOK}:reading', JSON.stringify({{page:3, view:'original', focus:true}}))")
++            # Seed before the new document initializes. Mutating live preferences here
++            # races the previous page's legitimate debounced scroll-position save.
++            page.add_init_script(f"localStorage.setItem('paper-studio:{BOOK}:reading', JSON.stringify({{page:3, view:'original', focus:true}}))")
+             page.reload(wait_until='networkidle')
+             page.select_option('#book-select', BOOK)
+-            page.wait_for_selector('body.focus-reading #paper .reading-flow')
++            try:
++                page.wait_for_selector('body.focus-reading #paper .reading-flow')
++            except Exception:
++                state = page.evaluate("async()=>{const {state}=await import('/store.js');return {focus:state.focus,view:state.view,page:state.currentPage,status:state.page?.status,bodyClass:document.body.className,shellHidden:document.querySelector('#reader-shell').hidden,hasFlow:!!document.querySelector('#paper .reading-flow')};}")
++                (OUT/'restore-failure.json').write_text(json.dumps(state,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
++                page.screenshot(path=str(OUT/'restore-failure.png'))
++                raise
+             check('restored_focus_forces_parsed_view', page.locator('#focus-exit').is_visible())
+             page.click('#focus-exit')
+             page.select_option('#book-select', '')
