@@ -108,7 +108,7 @@ class ReadingWindowServiceTest {
         setup(20);
         CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
         List<Integer> calls = new CopyOnWriteArrayList<>();
-        when(processor.process(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
                     int n = inv.getArgument(1);
                     calls.add(n);
@@ -139,7 +139,7 @@ class ReadingWindowServiceTest {
         CountDownLatch entered1 = new CountDownLatch(1), release1 = new CountDownLatch(1);
         CountDownLatch entered4 = new CountDownLatch(1), release4 = new CountDownLatch(1);
         List<Integer> calls = new CopyOnWriteArrayList<>();
-        when(processor.process(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
                     int n = inv.getArgument(1);
                     calls.add(n);
@@ -185,7 +185,7 @@ class ReadingWindowServiceTest {
         CountDownLatch releaseAll = new CountDownLatch(1);
         CountDownLatch entered10 = new CountDownLatch(1);
         List<Integer> calls = new CopyOnWriteArrayList<>();
-        when(processor.process(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
                     int n = inv.getArgument(1);
                     calls.add(n);
@@ -357,7 +357,7 @@ class ReadingWindowServiceTest {
         CountDownLatch releaseAll = new CountDownLatch(1);
         Map<Integer, String> invokedChannels = new ConcurrentHashMap<>();
 
-        when(processor.process(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
                     int pageNum = inv.getArgument(1);
                     String prov = inv.getArgument(2);
@@ -395,7 +395,7 @@ class ReadingWindowServiceTest {
         CountDownLatch entered18 = new CountDownLatch(1);
         CountDownLatch releaseAll = new CountDownLatch(1);
 
-        when(processor.process(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
                     int pageNum = inv.getArgument(1);
                     if (pageNum == 18) {
@@ -436,7 +436,7 @@ class ReadingWindowServiceTest {
         CountDownLatch releaseAll = new CountDownLatch(1);
         Map<Integer, String> invokedChannels = new ConcurrentHashMap<>();
 
-        when(processor.process(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
                     int pageNum = inv.getArgument(1);
                     String prov = inv.getArgument(2);
@@ -488,7 +488,7 @@ class ReadingWindowServiceTest {
         windows.update(book.id(), req2);
 
         List<Integer> dispatched = new CopyOnWriteArrayList<>();
-        when(processor.process(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
                     int p = inv.getArgument(1);
                     dispatched.add(p);
@@ -508,7 +508,7 @@ class ReadingWindowServiceTest {
         setup(5);
         // Block page-1 processing so no worker overwrites the snapshot under assertion.
         CountDownLatch release1 = new CountDownLatch(1);
-        when(processor.process(eq(book.id()), eq(1), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), eq(1), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> { assertTrue(release1.await(4, TimeUnit.SECONDS)); return ready(1); });
         UUID session = UUID.randomUUID();
         ReadingWindowRequest req = new ReadingWindowRequest(session, 1L, 1, "paddle-aistudio", "auto", false, false, true, true);
@@ -533,7 +533,7 @@ class ReadingWindowServiceTest {
     @Test void retryCurrentPageKeepsReadyContentAndReprocesses() throws Exception {
         setup(5);
         CountDownLatch release1 = new CountDownLatch(1);
-        when(processor.process(eq(book.id()), eq(1), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), eq(1), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> { assertTrue(release1.await(4, TimeUnit.SECONDS)); return ready(1); });
         UUID session = UUID.randomUUID();
         ReadingWindowRequest req = new ReadingWindowRequest(session, 1L, 1, "paddle-aistudio", "auto", false, false, true, true);

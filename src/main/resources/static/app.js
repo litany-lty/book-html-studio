@@ -66,11 +66,16 @@ function renderReadingWindowStatus(snapshot = readingSnapshot) {
   $('#reading-window-refresh').hidden = !active;
   const labels = { SETTLING: '停留 1 秒后开始', PROCESSING: '正在识别', READY: '窗口处理结束', IDLE: '等待阅读', STOPPING: '正在停止', STOPPED: '已停止', STOP_REQUESTED: '已发停止请求', STOP_UNKNOWN: '停止尚未确认', EXPIRED: '会话已过期', BLOCKED: '处理被占用' };
   const failed = (snapshot?.pages || []).filter(page => page.status === 'FAILED').map(page => page.pageNumber);
+  // U4：当前页真实阶段来自后端事件（非计时推测）；未知剩余工作量不显示百分比。
+  const centerInfo = (snapshot?.pages || []).find(p => Number(p.pageNumber) === state.currentPage);
+  const proc = centerInfo?.processing || null;
+  const stageLabels = { PREPARING: '正在准备', OCR: '正在识别文字', STRUCTURE: '正在整理版面', REVIEW: '正在核对疑字', VALIDATING: '正在校验', PUBLISHING: '正在发布' };
+  const stageText = proc && proc.lifecycle === 'RUNNING' && stageLabels[proc.stage] ? stageLabels[proc.stage] : null;
   $('#reading-window-status').textContent = deferredReady && state.book && deferredReady.bookId === state.book.id && deferredReady.page === state.currentPage
     ? (deferredReady.revision == null
       ? (currentPageProtected() ? '页面状态已更新，保存后可读取' : '页面状态已更新，可读取本页')
       : (currentPageProtected() ? '识别结果已就绪，保存后更新' : '识别结果已就绪，可更新本页')) : snapshot?.status === 'READY' && failed.length
-      ? '本轮结束，部分页需手动重试' : (labels[snapshot?.status] || (active ? '随读识别' : '随读识别已停止'));
+      ? '本轮结束，部分页需手动重试' : (stageText || labels[snapshot?.status] || (active ? '随读识别' : '随读识别已停止'));
   const processingCount = snapshot?.processingPages?.length || 0;
   let processingText = '';
   if (processingCount > 2) {
@@ -82,9 +87,21 @@ function renderReadingWindowStatus(snapshot = readingSnapshot) {
   }
 
   const failedText = failed.length ? ` · ${failed.length} 页失败` : '';
+  // U4：固定局部核对计划显示任务单位数（非耗时完成率）；基线可读后增强仍工作显示可读文案。
+  let unitsText = '';
+  const units = proc?.units;
+  if (proc && proc.lifecycle === 'RUNNING' && units && units.total > 0 && units.kind !== 'PAGE') {
+    const done = (units.succeeded || 0) + (units.failed || 0) + (units.skipped || 0);
+    unitsText = ` · 已核对 ${done} / ${units.total} 组`;
+  }
+  let readableText = '';
+  if (proc && proc.lifecycle === 'RUNNING' && proc.contentAvailability === 'OCR_READABLE'
+      && (proc.stage === 'STRUCTURE' || proc.stage === 'REVIEW')) {
+    readableText = ' · 文字已可阅读，正在整理版面';
+  }
 
   $('#reading-window-pages').textContent = snapshot?.message || (snapshot?.centerPage
-    ? `第 ${snapshot.centerPage} 页优先 · 准备 ${snapshot.fromPage}–${snapshot.toPage} 页${processingText}${failedText}`
+    ? `第 ${snapshot.centerPage} 页优先 · 准备 ${snapshot.fromPage}–${snapshot.toPage} 页${processingText}${failedText}${unitsText}${readableText}`
     : '随读识别就绪');
   bar.title = '随读识别：未识别页仍显示原稿，缓存页不重复消耗额度。';
   renderJobHeading();
@@ -1369,11 +1386,14 @@ function renderJob(job) {
   const pct = job.total ? Math.round(((job.completed || 0) / job.total) * 100) : 0;
   renderJobHeading();
   $('#progress-label').textContent = active ? `正在转换 · ${pct}%` : (labels[job.status] || job.status);
+  const errors = [...(job.errors || []), ...(job.error ? [job.error] : [])];
+  // U4：100% 只代表固定集合全部结束；有失败必须显示部分完成，不能绿色“全部成功”。
   $('#progress-count').textContent = job.total
-    ? `${pct}% (${job.completed || 0} / ${job.total} 页)${job.currentPage ? ` · 当前第 ${job.currentPage} 页` : ''}`
+    ? (active
+      ? `${pct}% (${job.completed || 0} / ${job.total} 页)${job.currentPage ? ` · 当前第 ${job.currentPage} 页` : ''}`
+      : `已结束 ${job.completed || 0} / ${job.total} 页${errors.length ? ` · ${errors.length} 条需处理` : ' · 全部成功'}`)
     : '';
   $('#progress-bar').max = Math.max(1, job.total || 1); $('#progress-bar').value = job.completed || 0;
-  const errors = [...(job.errors || []), ...(job.error ? [job.error] : [])];
   $('#job-panel').classList.toggle('job-settled', job.status === 'COMPLETED' && !errors.length && !jobSyncError);
   $('#job-errors').textContent = errors.slice(-3).join('；');
   $('#job-error-details').hidden = errors.length <= 3;

@@ -103,7 +103,7 @@ class PageAttemptLifecycleTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         List<Integer> calls = new CopyOnWriteArrayList<>();
-        when(processor.process(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
                     int n = inv.getArgument(1);
                     calls.add(n);
@@ -172,7 +172,7 @@ class PageAttemptLifecycleTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         List<Integer> calls = new CopyOnWriteArrayList<>();
-        when(processor.process(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
                     int n = inv.getArgument(1);
                     calls.add(n);
@@ -212,7 +212,7 @@ class PageAttemptLifecycleTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         // 中断后继续等待释放：排列“发送—取消—仍占用—响应收尾—恢复—释放”。
-        when(processor.process(eq(book.id()), eq(3), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), eq(3), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
                     entered.countDown();
                     try {
@@ -249,7 +249,7 @@ class PageAttemptLifecycleTest {
         CountDownLatch entered5 = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         List<Integer> calls = new CopyOnWriteArrayList<>();
-        when(processor.process(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
                     int n = inv.getArgument(1);
                     calls.add(n);
@@ -282,7 +282,7 @@ class PageAttemptLifecycleTest {
         List<String> providers = new CopyOnWriteArrayList<>();
         CountDownLatch entered = new CountDownLatch(3);
         CountDownLatch release = new CountDownLatch(1);
-        when(processor.process(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
                     providers.add(inv.getArgument(2));
                     entered.countDown();
@@ -305,12 +305,14 @@ class PageAttemptLifecycleTest {
         store.writePage(book.id(), new Page(1, 600, 800, "READY", "paddle-aistudio",
                 List.of(text("b1", "旧正文")), List.of(), false, null,
                 List.of(text("b1", "旧正文"))), false);
-        when(processor.process(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> readyWith(inv.getArgument(1), "新正文"));
         // 仅最终发布提交失败（磁盘满）：开始标记与恢复路径正常。
+        // U4：发布操作现为 JOB_BASELINE（基线）/ JOB_ENHANCEMENT（增强）。
         doAnswer(inv -> {
             CommitOp op = inv.getArgument(5);
-            if (op == CommitOp.JOB_COMPLETE) throw new java.io.IOException("disk full");
+            if (op == CommitOp.JOB_COMPLETE || op == CommitOp.JOB_BASELINE
+                    || op == CommitOp.JOB_ENHANCEMENT) throw new java.io.IOException("disk full");
             return inv.callRealMethod();
         }).when(store).commitPage(eq(book.id()), any(), anyInt(), any(), any(), any());
         UUID session = UUID.randomUUID();

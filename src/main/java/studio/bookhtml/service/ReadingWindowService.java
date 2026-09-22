@@ -9,6 +9,7 @@ import studio.bookhtml.config.SettingsService;
 import studio.bookhtml.domain.Book;
 import studio.bookhtml.domain.BookLayoutProfile;
 import studio.bookhtml.domain.Page;
+import studio.bookhtml.domain.ProcessingSnapshot;
 import studio.bookhtml.store.BookStore;
 
 import java.io.IOException;
@@ -62,6 +63,14 @@ public class ReadingWindowService {
     @Autowired(required = false)
     public void setPresentation(BookPresentationService presentation) {
         this.presentation = presentation;
+    }
+
+    private ProcessingProgressService progress;
+
+    /** U4：阶段事件聚合（测试可注入；缺省关闭，正式保存不受影响）。 */
+    @Autowired(required = false)
+    public void setProgress(ProcessingProgressService progress) {
+        this.progress = progress;
     }
 
     public synchronized ReadingWindowResponse update(String bookId, ReadingWindowRequest request) {
@@ -466,11 +475,14 @@ public class ReadingWindowService {
         BookLayoutProfile profile = presentation == null ? null : presentation.buildProfile(s.bookId);
         for (int n = s.fromPage; n <= s.toPage; n++) {
             Page page = store.readPage(s.bookId, n);
+            // U4：当前页处理快照来自真实阶段事件；无事件时为 null，前端不伪造进度。
+            ProcessingSnapshot processing =
+                    progress == null ? null : progress.latest(s.bookId, n);
             pages.add(new ReadingWindowResponse.PageState(n, page == null ? "MISSING" : page.status(),
                     page == null ? null : page.revision(), page == null ? "页面数据缺失" : page.error(),
                     page == null ? null : BookService.summary(page),
                     page == null ? List.of() : snapshotOutline(s.bookId, page, profile),
-                    profile == null ? 0 : profile.profileRevision()));
+                    profile == null ? 0 : profile.profileRevision(), processing));
         }
         List<Integer> procList = new ArrayList<>(s.processingPages);
         procList.sort((a, b) -> {
