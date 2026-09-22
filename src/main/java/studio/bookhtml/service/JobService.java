@@ -24,6 +24,11 @@ public class JobService {
     private final ExecutorService worker=Executors.newFixedThreadPool(8,r->{Thread t=new Thread(r,"book-html-worker");t.setDaemon(true);return t;});
     private Running active;
     private final Map<Integer, Running> activeReserved = new ConcurrentHashMap<>();
+    // U2：页面级 attempt 登记（调度用；最终写入权限仍以 BookStore 锁内校验为准）。
+    private final Map<String, PageAttempt> pageAttempts = new ConcurrentHashMap<>();
+    // U2：重处理操作幂等（reservation:operationId → 请求指纹），同 ID 同参数返回同一任务。
+    private final Map<String, String> operationFingerprints = new ConcurrentHashMap<>();
+    private final Map<String, Job> operationJobs = new ConcurrentHashMap<>();
     private UUID readingReservation;
     private String readingReservationBookId;
     private SettingsService settings;
@@ -64,10 +69,11 @@ public class JobService {
         if (!Objects.equals(readingReservation, reservation)) return;
         Running running = activeReserved.get(pageNumber);
         if (running != null) {
+            // U2：只标记取消并中断，不提前从登记表删除。物理槽与登记在 worker
+            // 收尾（finally）时释放；取消后仍可恢复旧可读版本（mayRestore）。
             running.cancelled = true;
             if (running.future != null) running.future.cancel(true);
             if (running.thread != null) running.thread.interrupt();
-            activeReserved.remove(pageNumber);
         }
     }
     private synchronized void cancelAllReserved() {
@@ -106,6 +112,11 @@ public class JobService {
         String expectedJobId="reading:"+reservation+":"+(pages.isEmpty()?"0":pages.get(0));
         Running running=new Running(bookId,fingerprint,lease);
         for(int p:pages){activeReserved.put(p,running);}
+        // U2：为每页登记 attempt（调度用；最终写入仍以 BookStore 锁内校验为准）。
+        for(int p:pages){
+            Page pg=null;try{pg=store.readPage(bookId,p);}catch(RuntimeException ignored){}
+            registerAttempt(bookId,p,BookStore.revisionOrZero(pg),List.of("JOB_START","JOB_COMPLETE","JOB_RESTORE"));
+        }
         Job queued=new Job(expectedJobId,"RUNNING",0,pages.size(),pages.isEmpty()?null:pages.get(0),
                 null,List.of(),Instant.now(),List.copyOf(pages),provider,layout,
                 request.splitSpreads(),request.force(),request.assistEnabled(),fingerprint);
@@ -118,6 +129,127 @@ public class JobService {
             throw e;
         }
         return queued;
+    }
+
+    /**
+     * U2：安全重新处理准入。保持当前可读 Page 不变（不在此处写 PENDING），
+     * 经版本/人工保护/活动 attempt/授权校验后创建独立 attempt。
+     */
+    public synchronized Job requestReprocess(UUID reservation, String bookId, int pageNumber,
+                                             studio.bookhtml.api.PageReprocessRequest request,
+                                             String provider, String layout,
+                                             boolean splitSpreads, boolean assist) {
+        if (readingReservation == null || !readingReservation.equals(reservation))
+            throw new ApiException(HttpStatus.CONFLICT, "阅读窗口预约已失效");
+        Book book = store.readBook(bookId);
+        if (book.archived()) throw new ApiException(HttpStatus.CONFLICT, "本书已归档，请先恢复后再识别");
+        if (pageNumber < 1 || pageNumber > book.totalPages())
+            throw new ApiException(HttpStatus.BAD_REQUEST, "页码超出书籍范围");
+        if (request == null || request.clientOperationId() == null || request.clientOperationId().isBlank())
+            throw new ApiException(HttpStatus.BAD_REQUEST, "缺少 clientOperationId");
+        Page current = store.readPage(bookId, pageNumber);
+        if (current == null) throw new ApiException(HttpStatus.NOT_FOUND, "页面不存在");
+        // U2：先判人工保护（授权问题），再判版本新鲜度。MANUAL/已校对页默认不覆盖；
+        // 明确覆盖确认须绑定当前 revision。
+        boolean manual = current.reviewed() || "manual".equals(current.provider());
+        if (manual && !request.explicitOverwriteAuthorization())
+            throw new ApiException(HttpStatus.CONFLICT, "本页含人工校对内容，默认不覆盖；确认覆盖需绑定当前版本");
+        int currentRev = BookStore.revisionOrZero(current);
+        if (request.expectedRevision() != null && request.expectedRevision() != currentRev)
+            throw new ApiException(HttpStatus.CONFLICT, "页面已被他处更新，请刷新后重试；旧确认不覆盖新版本");
+        String operationKey = reservation + ":" + request.clientOperationId();
+        String fingerprint = bookId + "|" + pageNumber + "|" + provider + "|" + layout
+                + "|" + splitSpreads + "|true|" + assist;
+        String known = operationFingerprints.get(operationKey);
+        if (known != null) {
+            if (!known.equals(fingerprint))
+                throw new ApiException(HttpStatus.CONFLICT, "相同操作 ID 但参数不一致，已拒绝");
+            Job existing = operationJobs.get(operationKey);
+            if (existing != null) return existing;
+        }
+        Running existing = activeReserved.get(pageNumber);
+        if (existing != null && !existing.cancelled) {
+            // 同页已有活动 attempt：不重复派发，返回当前任务。
+            try {
+                Job current2 = store.readJob(bookId);
+                if (current2 != null) {
+                    operationFingerprints.put(operationKey, fingerprint);
+                    operationJobs.put(operationKey, current2);
+                    return current2;
+                }
+            } catch (RuntimeException ignored) {}
+            throw new ApiException(HttpStatus.CONFLICT, "本页已有识别任务正在运行");
+        }
+        String channel = provider == null ? "paddle-aistudio" : provider;
+        JobRequest jobRequest = new JobRequest(String.valueOf(pageNumber), channel, layout,
+                splitSpreads, true, assist);
+        Job queued = submitReserved(reservation, bookId, jobRequest);
+        operationFingerprints.put(operationKey, fingerprint);
+        operationJobs.put(operationKey, queued);
+        registerAttempt(bookId, pageNumber, currentRev, List.of("JOB_START", "JOB_COMPLETE", "JOB_RESTORE"));
+        return queued;
+    }
+
+    private void registerAttempt(String bookId, int pageNumber, int expectedRevision, List<String> allowedOps) {
+        String key = bookId + ":" + pageNumber;
+        PageAttempt prev = pageAttempts.get(key);
+        String sourceHash = null;
+        try {
+            Page page = store.readPage(bookId, pageNumber);
+            if (page != null && page.sourceRecords() != null && !page.sourceRecords().isEmpty()
+                    && page.sourceRecords().get(0) != null)
+                sourceHash = page.sourceRecords().get(0).id();
+        } catch (RuntimeException ignored) {}
+        if (prev != null && prev.bookId().equals(bookId) && prev.pageNumber() == pageNumber) {
+            pageAttempts.put(key, prev.nextGeneration());
+        } else {
+            pageAttempts.put(key, PageAttempt.register(bookId, pageNumber, expectedRevision, sourceHash, allowedOps));
+        }
+    }
+
+    /** U2：测试可见的 attempt 登记快照（调度用，不代表最终写入权限）。 */
+    Map<String, PageAttempt> attemptSnapshot() {
+        return Map.copyOf(pageAttempts);
+    }
+
+    /** U2：本书本页的登记是否仍归属该 attempt（不判断取消，供恢复路径使用）。 */
+    private boolean ownsAttempt(Running running, UUID reservation) {
+        if (!Objects.equals(readingReservation, reservation)) return false;
+        for (Running candidate : activeReserved.values()) {
+            if (candidate == running) return true;
+        }
+        return false;
+    }
+
+    /** U2：是否允许派发/继续执行（拥有 attempt 且未停止）。 */
+    private boolean mayDispatch(Running running, UUID reservation) {
+        return ownsAttempt(running, reservation) && !running.cancelled;
+    }
+
+    /** U2：是否允许发布新内容（拥有 attempt、未停止、任务身份一致）。 */
+    private boolean mayPublish(Running running, UUID reservation, String expectedJobId) {
+        if (!mayDispatch(running, reservation)) return false;
+        return reservedJobMatches(running, reservation);
+    }
+
+    /** U2：是否允许恢复旧可读版本（拥有 attempt、任务身份一致；取消后仍可恢复）。 */
+    private boolean mayRestore(Running running, UUID reservation, String expectedJobId) {
+        if (!ownsAttempt(running, reservation)) return false;
+        return reservedJobMatches(running, reservation);
+    }
+
+    /**
+     * U2：随读预约的持久任务身份是 {@code "reading:"+reservation}（见 reserveReading）；
+     * submitReserved 的 {@code expectedJobId} 另带首派发页后缀，仅用于区分同预约内的
+     * 多次派发，不作为归属判断。归属只认预约身份 + 登记表同一性。
+     */
+    private boolean reservedJobMatches(Running running, UUID reservation) {
+        try {
+            Job cur = store.readJob(running.bookId);
+            return cur != null && ("reading:" + reservation).equals(cur.id());
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
     public synchronized Job submit(String bookId,JobRequest request){
         if(readingReservation!=null)throw new ApiException(HttpStatus.CONFLICT,"阅读窗口正在运行，请先停止随读处理");
@@ -239,7 +371,7 @@ public class JobService {
         try{
             for(int pageNumber:pages){
                 if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
-                if(!stillCurrentReserved(running,reservation))return;
+                if(!mayRestore(running,reservation,expectedJobId))return;
                 Page old=store.readPage(running.bookId,pageNumber);
                 if(old==null)continue;
                 int baselineRev=BookStore.revisionOrZero(old);
@@ -255,7 +387,8 @@ public class JobService {
                     ProcessingResult result=processor.process(running.bookId,pageNumber,provider,layout,split,assist,()->running.cancelled||Thread.currentThread().isInterrupted());
                     Page page=mergeUnresolvedIssues(old,result.page());
                     if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
-                    if(!stillCurrentReserved(running,reservation))return;
+                    // U2：新内容发布要求未停止且身份一致；取消后只允许恢复旧版本。
+                    if(!mayPublish(running,reservation,expectedJobId))return;
                     boolean confirmedNoText=result.category()==ProcessingResult.Category.BLANK_CONFIRMED
                             ||result.category()==ProcessingResult.Category.VISUAL_ONLY;
                     if(isSignificantRegression(baseline,page)||(!confirmedNoText&&isEmptyResult(page))){
@@ -277,18 +410,27 @@ public class JobService {
                             store.commitPage(running.bookId,page,baselineRev+1,CommitActor.JOB,expectedJobId,CommitOp.JOB_COMPLETE);
                             try{store.preserveOriginal(running.bookId,page);}catch(IOException ignored){}
                         } catch (PageConflictException | IOException conflict) {
-                            try{store.writeCandidate(running.bookId,page);}catch(IOException ignored){}
+                            // U2：提交失败必须留下可诊断结果，不吞掉异常显示成功。
+                            // 随读路径无批量 errors 通道，将诊断记入候选页的 warnings。
+                            List<String> note = new ArrayList<>(page.warnings() == null ? List.of() : page.warnings());
+                            note.add("第 " + pageNumber + " 页识别完成但写入失败，已保留旧版本");
+                            Page diagnosed = new Page(page.pageNumber(), page.width(), page.height(), page.status(),
+                                    page.provider(), page.blocks(), List.copyOf(note), page.reviewed(),
+                                    page.error(), page.sourceRecords(), page.revision());
+                            try{store.writeCandidate(running.bookId,diagnosed);}catch(IOException ignored){}
                         }
                     }
                 }
                 catch(CancelledException e){
-                    if(!stillCurrentReserved(running,reservation))return;
+                    // U2：取消后仍可恢复旧可读版本（mayRestore 不因 cancelled 返回 false）。
+                    if(!mayRestore(running,reservation,expectedJobId))return;
                     try {
                         store.commitPage(running.bookId,new Page(old.pageNumber(),old.width(),old.height(),old.status(),old.provider(),old.blocks(),old.warnings(),old.reviewed(),old.error(),old.sourceRecords(),null),baselineRev+1,CommitActor.JOB,expectedJobId,CommitOp.JOB_RESTORE);
                     } catch (PageConflictException | IOException ignored) { }
                     throw e;}
                 catch(Exception e){
-                    if(!stillCurrentReserved(running,reservation))return;
+                    // U2：失败回退保留旧可读版本；归属校验通过即恢复，不因取消而跳过。
+                    if(!mayRestore(running,reservation,expectedJobId))return;
                     String detail=safeDetail(e);String message="第 "+pageNumber+" 页处理失败"+(detail==null?"":"："+detail);
                     Page failed;
                     if("READY".equals(old.status())){
@@ -304,10 +446,8 @@ public class JobService {
             }
         }catch(CancelledException|CancellationException ignored){}
         finally{synchronized(this){for(int p:pages){if(activeReserved.get(p)==running)activeReserved.remove(p);}if(running.lease!=null)running.lease.close();}}}
-    private boolean stillCurrentReserved(Running running,UUID reservation){
-        synchronized(this){if(!Objects.equals(readingReservation,reservation)||running.cancelled)return false;}
-        try{Job cur=store.readJob(running.bookId);return cur!=null&&("reading:"+reservation).equals(cur.id());}catch(Exception e){return false;}
-    }
+    // U2：取消与归属已拆分为 ownsAttempt/mayDispatch/mayPublish/mayRestore；
+    // 不再使用“是否当前”与“是否取消”混用的单一判断。
     private void write(String id,Job job){try{store.writeJob(id,job);}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"任务状态保存失败");}}
     // 阶段1：job 代次保护——仅当内存 active 仍是本 worker 且持久化 jobId 一致时才写入
     private boolean stillCurrent(Running running,String expectedJobId){synchronized(this){if(active!=running)return false;}try{Job cur=store.readJob(running.bookId);return cur!=null&&expectedJobId.equals(cur.id());}catch(Exception e){return false;}}

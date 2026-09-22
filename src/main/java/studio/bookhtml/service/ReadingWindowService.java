@@ -35,7 +35,9 @@ public class ReadingWindowService {
     private Session current;
 
     @Autowired public ReadingWindowService(BookStore store, JobService jobs, SettingsService settings) {
-        this(store, jobs, settings, Clock.systemUTC(), Duration.ofMillis(300));
+        // U2：停留阈值统一为 1000ms（见 9.7）；前端只读缓存窗口（前后 5）与云派发窗口
+        // （前 3/后 5）命名区分，不互相冒充。构造注入的 settle seam 保留供测试。
+        this(store, jobs, settings, Clock.systemUTC(), Duration.ofMillis(1000));
     }
 
     // Package-local clock/settle seam keeps race and expiry tests deterministic.
@@ -120,21 +122,29 @@ public class ReadingWindowService {
     }
 
     private void retryPage(Session session, int pageNumber, Instant now) {
+        // U2：安全重新处理。保持当前可读 Page 不变（不在此处写 PENDING），经统一准入
+        // 校验版本/人工保护/活动 attempt 后创建独立 attempt；后台候选经 CAS 通过才替换。
+        // 幂等键绑定本次会话序号：同序号重复提交走 update() 的同序号快照路径，不重复派发。
         Page page = store.readPage(session.bookId, pageNumber);
-        if (page != null) {
-            try {
-                store.writePage(session.bookId, Page.pending(page.pageNumber(), page.width(), page.height()), false);
-            } catch (IOException e) {
-                throw new RuntimeException("重置页面状态失败", e);
-            }
-            session.dispatched.remove(pageNumber);
-            session.processingPages.remove(pageNumber);
-            session.processingChannels.remove(pageNumber);
-            session.queued.remove(pageNumber);
-            session.queued.addFirst(pageNumber);
-            session.notBefore = now;
-            tick();
+        if (page == null) return;
+        String operationId = "window:" + session.sessionId + ":" + session.sequence + ":" + pageNumber;
+        PageReprocessRequest request = new PageReprocessRequest(
+                BookStore.revisionOrZero(page), operationId, false, session.provider, session.assist);
+        try {
+            jobs.requestReprocess(session.reservation, session.bookId, pageNumber, request,
+                    session.provider, session.layout, session.splitSpreads, session.assist);
+        } catch (ApiException conflict) {
+            // 已有活动 attempt 或人工保护：不清空、不重派发，仅把该页排到队首等待自然收尾。
+            session.message = conflict.getMessage();
         }
+        session.dispatched.remove(pageNumber);
+        session.queued.remove(Integer.valueOf(pageNumber));
+        session.queued.addFirst(pageNumber);
+        // U2：显式重试页进入重试集；tick 以 force=true 派发（绕过 PENDING 门），
+        // 仍受容量与本次授权约束，不清空当前可读内容。
+        session.retryPages.add(pageNumber);
+        session.notBefore = now;
+        tick();
     }
 
     public synchronized ReadingWindowResponse get(String bookId, UUID sessionId) {
@@ -204,14 +214,14 @@ public class ReadingWindowService {
     }
 
     List<String> getEnabledChannels(Session s) {
+        // U2：按本次任务授权派发。默认 allowedProviders=[primary]，仅主通道；
+        // “已配置”不等于“本次允许并行外发”。回退/并行/全书范围分别控制（见 U4/U5）。
         SettingsService.State state = settings.state();
+        List<String> allowed = s.allowedProviders == null || s.allowedProviders.isEmpty()
+                ? List.of(s.provider) : s.allowedProviders;
         List<String> channels = new ArrayList<>();
-        if (isConfigured(s.provider, state)) {
-            channels.add(s.provider);
-        }
-        String secondary = "paddle-aistudio".equals(s.provider) ? "ppocr" : "paddle-aistudio";
-        if (isConfigured(secondary, state)) {
-            channels.add(secondary);
+        for (String provider : allowed) {
+            if (isConfigured(provider, state) && !channels.contains(provider)) channels.add(provider);
         }
         if (channels.isEmpty()) {
             channels.add(s.provider);
@@ -249,22 +259,47 @@ public class ReadingWindowService {
         int center = s.centerPage;
         boolean centerEligible = eligible(store.readPage(s.bookId, center));
 
-        // 1. Guarantee centerPage is Priority #1
+        // U2：先派发显式重试页（force=true，绕过 PENDING 门；容量/授权仍约束）。
+        // 已有活动 attempt（CONFLICT）则移出重试集，等待在途结果，不反复重发。
+        if (!s.retryPages.isEmpty()) {
+            for (int retry : new ArrayList<>(s.retryPages)) {
+                if (s.processingPages.contains(retry)) { s.retryPages.remove(retry); continue; }
+                if (s.processingPages.size() >= totalCapacity) break;
+                String retryChannel = null;
+                for (String ch : channels) {
+                    if (channelCount(s, ch) < CHANNEL_CONCURRENCY) { retryChannel = ch; break; }
+                }
+                if (retryChannel == null) break;
+                try {
+                    jobs.submitReserved(s.reservation, s.bookId, new JobRequest(String.valueOf(retry),
+                            retryChannel, s.layout, s.splitSpreads, true, s.assist));
+                    s.retryPages.remove(Integer.valueOf(retry));
+                    s.dispatched.add(retry);
+                    s.processingPages.add(retry);
+                    s.processingChannels.put(retry, retryChannel);
+                } catch (ApiException busy) {
+                    s.retryPages.remove(Integer.valueOf(retry));
+                    if (!s.queued.contains(retry)) s.queued.addLast(retry);
+                } catch (RuntimeException error) {
+                    s.retryPages.remove(Integer.valueOf(retry));
+                    s.dispatched.remove(retry);
+                    s.processingChannels.remove(retry);
+                    disable(s, "BLOCKED", "随读处理无法提交重试任务：" + safeMessage(error));
+                    finish(s);
+                    return;
+                }
+            }
+        }
+
+        // 1. Guarantee centerPage is Priority #1.
+        // U2：容量满时等待自然收尾，不强杀最远页的已发出云请求。当前页保持队首，
+        // 有空闲槽即优先派发；已发出的请求允许完成并缓存到对应书页（DRAIN 语义）。
         if (centerEligible && !s.processingPages.contains(center)) {
             if (s.processingPages.size() >= totalCapacity) {
-                int furthest = s.processingPages.stream()
-                        .filter(p -> p != center)
-                        .max(Comparator.comparingInt(p -> Math.abs(p - center)))
-                        .orElse(-1);
-                if (furthest != -1) {
-                    jobs.cancelReadingPage(s.reservation, furthest);
-                    s.processingPages.remove(furthest);
-                    s.processingChannels.remove(furthest);
-                    s.dispatched.remove(furthest);
-                    if (!s.queued.contains(furthest)) {
-                        s.queued.addLast(furthest);
-                    }
-                }
+                s.queued.remove(Integer.valueOf(center));
+                s.queued.addFirst(center);
+                s.status = "PROCESSING";
+                return;
             }
             String centerChannel = null;
             for (String ch : channels) {
@@ -501,9 +536,16 @@ public class ReadingWindowService {
         final UUID sessionId, reservation;
         final String provider, layout;
         final boolean splitSpreads, assist;
+        // U2：本次任务授权快照。默认仅主通道；失败回退、并行分发、全书范围默认关闭，
+        // 配置了密钥不代表已获授权（见 9.6）。新任务读取新快照，在途任务不受配置修改影响。
+        final List<String> allowedProviders;
+        final boolean fallbackAllowed;
+        final boolean parallelProvidersAllowed;
         final SettingsService.Lease lease;
         final ArrayDeque<Integer> queued = new ArrayDeque<>();
         final Set<Integer> dispatched = new HashSet<>();
+        // U2：用户显式重试页。绕过 PENDING 资格门（force=true），仍受容量/授权约束。
+        final Set<Integer> retryPages = ConcurrentHashMap.newKeySet();
         final Set<Integer> processingPages = ConcurrentHashMap.newKeySet();
         final Map<Integer, String> processingChannels = new ConcurrentHashMap<>();
         long sequence;
@@ -522,6 +564,9 @@ public class ReadingWindowService {
             this.layout = request.layout();
             this.splitSpreads = request.splitSpreads();
             this.assist = Boolean.TRUE.equals(request.assist());
+            this.allowedProviders = List.of(request.provider());
+            this.fallbackAllowed = false;
+            this.parallelProvidersAllowed = false;
             this.autoProcessAll = Boolean.TRUE.equals(request.autoProcessAll());
             this.lease = lease;
             this.sequence = request.sequence();

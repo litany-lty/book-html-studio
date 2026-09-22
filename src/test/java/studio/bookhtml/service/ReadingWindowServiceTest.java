@@ -177,16 +177,18 @@ class ReadingWindowServiceTest {
         assertTrue(calls.containsAll(List.of(1, 4)));
     }
 
-    @Test void fullConcurrencyPreemptsFurthestBackgroundPageToStartCenterImmediately() throws Exception {
+    @Test void fullConcurrencyWaitsForNaturalFinishInsteadOfPreempting() throws Exception {
         setup(20);
         // Page 1 is already ready, so tick dispatches background prefetch pages 2, 3, 4
         store.writePage(book.id(), new Page(1, 600, 800, "READY", "paddle", List.of(), List.of(), false, null), false);
         CountDownLatch entered2 = new CountDownLatch(1), entered3 = new CountDownLatch(1), entered4 = new CountDownLatch(1);
         CountDownLatch releaseAll = new CountDownLatch(1);
         CountDownLatch entered10 = new CountDownLatch(1);
+        List<Integer> calls = new CopyOnWriteArrayList<>();
         when(processor.process(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
                     int n = inv.getArgument(1);
+                    calls.add(n);
                     if (n == 2) { entered2.countDown(); releaseAll.await(3, TimeUnit.SECONDS); }
                     if (n == 3) { entered3.countDown(); releaseAll.await(3, TimeUnit.SECONDS); }
                     if (n == 4) { entered4.countDown(); releaseAll.await(3, TimeUnit.SECONDS); }
@@ -201,19 +203,24 @@ class ReadingWindowServiceTest {
         assertTrue(entered4.await(2, TimeUnit.SECONDS));
 
         // 3 background pages are now running (2, 3, 4). Concurrency is full (3/3).
-        // User navigates to Page 10.
+        // User navigates to Page 10. U2: no preemptive kill of in-flight cloud requests;
+        // page 10 waits queued-first while 2/3/4 finish naturally.
         windows.update(book.id(), request(session, 2, 10));
         advanceAndTick(Duration.ofSeconds(1));
 
-        // Page 10 must start immediately by preempting page 2 (furthest from 10)
-        assertTrue(entered10.await(2, TimeUnit.SECONDS));
+        assertFalse(entered10.await(300, TimeUnit.MILLISECONDS), "center must wait, not preempt in-flight requests");
         ReadingWindowResponse res = windows.get(book.id(), session);
-        assertEquals(10, res.processingPage());
-        assertEquals(10, res.processingPages().get(0));
-        assertFalse(res.processingPages().contains(2)); // page 2 was preempted
-        assertTrue(res.processingPages().contains(10));
+        assertTrue(res.processingPages().contains(2), "in-flight page 2 must not be killed");
+        assertEquals(10, res.queuedPages().get(0), "center stays queued-first");
 
         releaseAll.countDown();
+        await(() -> "READY".equals(store.readPage(book.id(), 2).status()));
+        await(() -> "READY".equals(store.readPage(book.id(), 3).status()));
+        await(() -> "READY".equals(store.readPage(book.id(), 4).status()));
+        windows.tick();
+        advanceAndTick(Duration.ofSeconds(1));
+        assertTrue(entered10.await(2, TimeUnit.SECONDS), "center dispatches after natural finish");
+        assertEquals(1, calls.stream().filter(n -> n == 2).count(), "no kill-and-resubmit loop for page 2");
     }
 
     @Test void protectsReadyReviewedManualAndFailedAndDoesNotRetryOnNewSequence() throws Exception {
@@ -336,15 +343,17 @@ class ReadingWindowServiceTest {
         await(() -> "READY".equals(store.readPage(book.id(), 1).status()));
     }
 
-    @Test void bothConfiguredOcrChannelsAreEnabledWithThreeConcurrentEach() throws Exception {
+    @Test void bothConfiguredDefaultsToPrimaryChannelOnly() throws Exception {
         setup(20);
-        // Configure ppocr so both paddle-aistudio and ppocr are active
+        // Configure ppocr so both paddle-aistudio and ppocr are configured.
+        // U2: "configured" no longer implies "authorized for parallel dispatch".
+        // Default session authorization is primary-only.
         settings.update(json.readTree("{\"revision\":0,\"ocr\":{\"ppocr\":{\"apiKey\":\"pp-key\",\"secretKey\":\"pp-secret\"}}}"));
 
         // Page 8 is already ready, so background prefetch will trigger for window around 8 (5..13)
         store.writePage(book.id(), new Page(8, 600, 800, "READY", "paddle", List.of(), List.of(), false, null), false);
 
-        CountDownLatch entered6 = new CountDownLatch(6);
+        CountDownLatch entered3 = new CountDownLatch(3);
         CountDownLatch releaseAll = new CountDownLatch(1);
         Map<Integer, String> invokedChannels = new ConcurrentHashMap<>();
 
@@ -353,7 +362,7 @@ class ReadingWindowServiceTest {
                     int pageNum = inv.getArgument(1);
                     String prov = inv.getArgument(2);
                     invokedChannels.put(pageNum, prov);
-                    entered6.countDown();
+                    entered3.countDown();
                     releaseAll.await(3, TimeUnit.SECONDS);
                     return ready(pageNum);
                 });
@@ -362,26 +371,27 @@ class ReadingWindowServiceTest {
         windows.update(book.id(), request(session, 1, 8));
         advanceAndTick(Duration.ofSeconds(1));
 
-        assertTrue(entered6.await(2, TimeUnit.SECONDS), "6 concurrent tasks must be started (3 each)");
+        assertTrue(entered3.await(2, TimeUnit.SECONDS), "3 concurrent tasks must be started on the primary channel");
         ReadingWindowResponse res = windows.get(book.id(), session);
-        assertEquals(6, res.processingPages().size());
+        assertEquals(3, res.processingPages().size());
 
         long paddleCount = invokedChannels.values().stream().filter("paddle-aistudio"::equals).count();
         long ppocrCount = invokedChannels.values().stream().filter("ppocr"::equals).count();
-        assertEquals(3, paddleCount, "paddle-aistudio must have 3 concurrent tasks");
-        assertEquals(3, ppocrCount, "ppocr must have 3 concurrent tasks");
+        assertEquals(3, paddleCount, "primary channel carries the session load");
+        assertEquals(0, ppocrCount, "secondary channel must see 0 requests without explicit parallel authorization");
 
         releaseAll.countDown();
         await(() -> "READY".equals(store.readPage(book.id(), 9).status()));
         await(() -> "READY".equals(store.readPage(book.id(), 7).status()));
     }
 
-    @Test void bothChannelsPreemptFurthestWhenAllSixSlotsOccupied() throws Exception {
+    @Test void fullSecondaryCapacityStillWaitsInsteadOfPreempting() throws Exception {
         setup(20);
         settings.update(json.readTree("{\"revision\":0,\"ocr\":{\"ppocr\":{\"apiKey\":\"pp-key\",\"secretKey\":\"pp-secret\"}}}"));
         store.writePage(book.id(), new Page(8, 600, 800, "READY", "paddle", List.of(), List.of(), false, null), false);
 
-        CountDownLatch entered6 = new CountDownLatch(6);
+        // U2 default is primary-only: 3 slots. Fill them with blocking background pages.
+        CountDownLatch entered3 = new CountDownLatch(3);
         CountDownLatch entered18 = new CountDownLatch(1);
         CountDownLatch releaseAll = new CountDownLatch(1);
 
@@ -391,7 +401,7 @@ class ReadingWindowServiceTest {
                     if (pageNum == 18) {
                         entered18.countDown();
                     } else {
-                        entered6.countDown();
+                        entered3.countDown();
                     }
                     releaseAll.await(3, TimeUnit.SECONDS);
                     return ready(pageNum);
@@ -400,17 +410,17 @@ class ReadingWindowServiceTest {
         UUID session = UUID.randomUUID();
         windows.update(book.id(), request(session, 1, 8));
         advanceAndTick(Duration.ofSeconds(1));
-        assertTrue(entered6.await(2, TimeUnit.SECONDS));
+        assertTrue(entered3.await(2, TimeUnit.SECONDS));
 
-        // 6 pages are running (9, 10, 11, 12, 13, 7). Now navigate to page 18.
+        // 3 pages are running. Now navigate to page 18: it must wait queued-first,
+        // in-flight pages are never killed to free a slot.
         windows.update(book.id(), request(session, 2, 18));
         advanceAndTick(Duration.ofSeconds(1));
 
-        assertTrue(entered18.await(2, TimeUnit.SECONDS));
+        assertFalse(entered18.await(300, TimeUnit.MILLISECONDS));
         ReadingWindowResponse res = windows.get(book.id(), session);
-        assertEquals(18, res.processingPage());
-        assertTrue(res.processingPages().contains(18));
-        assertFalse(res.processingPages().contains(7)); // furthest page 7 was preempted
+        assertEquals(18, res.queuedPages().get(0));
+        assertEquals(3, res.processingPages().size());
 
         releaseAll.countDown();
         await(() -> "READY".equals(store.readPage(book.id(), 18).status()));
@@ -494,8 +504,12 @@ class ReadingWindowServiceTest {
         assertTrue(dispatched.contains(9));
     }
 
-    @Test void retryCurrentPageResetsFailedPageAndRequeuesImmediately() throws Exception {
+    @Test void retryCurrentPageKeepsFailedSnapshotAndRequeuesForReprocess() throws Exception {
         setup(5);
+        // Block page-1 processing so no worker overwrites the snapshot under assertion.
+        CountDownLatch release1 = new CountDownLatch(1);
+        when(processor.process(eq(book.id()), eq(1), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+                .thenAnswer(inv -> { assertTrue(release1.await(4, TimeUnit.SECONDS)); return ready(1); });
         UUID session = UUID.randomUUID();
         ReadingWindowRequest req = new ReadingWindowRequest(session, 1L, 1, "paddle-aistudio", "auto", false, false, true, true);
         windows.update(book.id(), req);
@@ -504,17 +518,23 @@ class ReadingWindowServiceTest {
         store.writePage(book.id(), new Page(1, 600, 800, "FAILED", "paddle-aistudio", List.of(), List.of(), false, "OCR failed"), false);
         assertEquals("FAILED", store.readPage(book.id(), 1).status());
 
-        // Send retry request
+        // Send retry request. U2: the readable snapshot (error + evidence) is kept,
+        // never wiped to empty PENDING; the page is queued/dispatched for reprocess.
         ReadingWindowRequest retryReq = new ReadingWindowRequest(session, 2L, 1, "paddle-aistudio", "auto", false, false, true, false, false, true);
         ReadingWindowResponse res = windows.update(book.id(), retryReq);
 
-        // Page 1 is reset to PENDING and queued/dispatched immediately
-        assertEquals("PENDING", store.readPage(book.id(), 1).status());
+        assertEquals("FAILED", store.readPage(book.id(), 1).status(), "retry must not wipe the current snapshot");
+        assertEquals("OCR failed", store.readPage(book.id(), 1).error(), "failure evidence must be kept");
         assertTrue(res.processingPages().contains(1) || res.queuedPages().contains(1));
+        release1.countDown();
+        await(() -> "READY".equals(store.readPage(book.id(), 1).status()));
     }
 
-    @Test void retryCurrentPageResetsReadyPageAndReprocesses() throws Exception {
+    @Test void retryCurrentPageKeepsReadyContentAndReprocesses() throws Exception {
         setup(5);
+        CountDownLatch release1 = new CountDownLatch(1);
+        when(processor.process(eq(book.id()), eq(1), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+                .thenAnswer(inv -> { assertTrue(release1.await(4, TimeUnit.SECONDS)); return ready(1); });
         UUID session = UUID.randomUUID();
         ReadingWindowRequest req = new ReadingWindowRequest(session, 1L, 1, "paddle-aistudio", "auto", false, false, true, true);
         windows.update(book.id(), req);
@@ -523,13 +543,15 @@ class ReadingWindowServiceTest {
         store.writePage(book.id(), new Page(1, 600, 800, "READY", "paddle-aistudio", List.of(), List.of(), false, null), false);
         assertEquals("READY", store.readPage(book.id(), 1).status());
 
-        // Send retry request on READY page
+        // Send retry request on READY page. U2: content stays until the new
+        // attempt passes all gates and CAS-replaces it.
         ReadingWindowRequest retryReq = new ReadingWindowRequest(session, 2L, 1, "paddle-aistudio", "auto", false, false, true, false, false, true);
         ReadingWindowResponse res = windows.update(book.id(), retryReq);
 
-        // Page 1 is reset to PENDING and requeued / dispatched for secondary processing
-        assertEquals("PENDING", store.readPage(book.id(), 1).status());
+        assertEquals("READY", store.readPage(book.id(), 1).status(), "retry must not wipe readable content");
         assertTrue(res.processingPages().contains(1) || res.queuedPages().contains(1));
+        release1.countDown();
+        await(() -> "READY".equals(store.readPage(book.id(), 1).status()));
     }
 
     private static final class MutableClock extends Clock {

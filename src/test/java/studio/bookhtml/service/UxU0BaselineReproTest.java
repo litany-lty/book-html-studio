@@ -61,8 +61,9 @@ class UxU0BaselineReproTest {
 
     @Test
     void u0f09_readyRetryPendingWipesReadableBlocks() {
-        // 复现 ReadingWindowService.retryPage 当前行为：
-        // store.writePage(bookId, Page.pending(...)) 会丢弃当前可读 blocks。
+        // Page.pending() 构造语义：空块 PENDING。U2 之后服务层重试不再经此路径清空
+        // 当前可读页（见 PageAttemptLifecycleTest.safe01 与更新后的重试测试）；
+        // 本项保留构造语义断言，防止未来误用 pending 重置覆盖可读内容。
         Block body = heading("body-1", 0, 2, "可读正文", "可读正文", "paddle", List.of());
         Page ready = new Page(24, 600, 800, "READY", "test", List.of(body), List.of(), false, null);
         assertEquals(1, ready.blocks().size(), "前置：READY 页有 1 个可读块");
@@ -71,32 +72,8 @@ class UxU0BaselineReproTest {
         assertTrue(reset.blocks().isEmpty(), "U0 证据：重试先清空当前页可读块（期待 U2 改为保留基线 + 独立 attempt）");
     }
 
-    @Test
-    void u0f17_readySeenMarkedBeforeGetSuccess() throws Exception {
-        // 复现 reading-window.js inspectReady 在 GET 成功前写 seenReady。
-        String js = readStatic("src/main/resources/static/reading-window.js");
-        int fnIdx = js.indexOf("function inspectReady");
-        assertTrue(fnIdx >= 0, "U0 证据：inspectReady 存在");
-        String fn = js.substring(fnIdx, Math.min(js.length(), fnIdx + 2500));
-        int setIdx = fn.indexOf("seenReady.set(pageNumber, key)");
-        int pushIdx = fn.indexOf("readyQueue.push");
-        assertTrue(setIdx >= 0 && pushIdx > setIdx, "U0 证据：先记 seenReady 再入队（失败后同 revision 不再 GET）");
-        assertTrue(fn.contains("seenReady.get(pageNumber) === key"),
-                "U0 证据：同 key 直接跳过，失败分支未清除标记");
-        // runReadyWorkers 的 catch 只 onError，不清理 seenReady：同 revision 不会重 GET。
-        int runIdx = js.indexOf("function runReadyWorkers");
-        String run = js.substring(runIdx, Math.min(js.length(), runIdx + 2000));
-        assertTrue(run.contains("onPageReady(item.pageNumber, page)"), "U0 证据：真正的成功展示在 GET 后");
-        assertFalse(run.contains("seenReady.delete"), "U0 证据：GET 失败路径未清除成功标记");
-    }
-
-    @Test
-    void u0f11_secondaryChannelAutoEnabledWhenConfigured() throws Exception {
-        // 复现 getEnabledChannels：已配置的次通道自动加入派发集合。
-        String src = readStatic("src/main/java/studio/bookhtml/service/ReadingWindowService.java");
-        assertTrue(src.contains("String secondary ="), "U0 证据：次通道变量仍存在");
-        assertTrue(src.contains("channels.add(secondary)"), "U0 证据：已配置次通道自动加入（期待 U2 改为按本次授权过滤）");
-    }
+    // U0-F11 已由 U2 消除（见 PageAttemptLifecycleTest.safe1011 与更新后的通道测试），
+    // U0-F17 的“入队前预写成功标记”已由 U2 改为在途/成功分离（见 safe16）。两项退役，不再断言旧行为。
 
     @Test
     void u0controllableDouble_countsRequestsWithoutNetwork(@TempDir Path tmp) throws Exception {

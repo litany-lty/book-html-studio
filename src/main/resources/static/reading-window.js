@@ -1,8 +1,9 @@
 // The reading window is deliberately ephemeral: no consent or session is persisted.
+// U2：只读缓存窗口（前后各 5 页）与云派发窗口（服务端前 3/后 5）是两个不同的窗口，
+// 不互相冒充。缓存窗口只做只读 GET 预取，从不触发付费 POST。
 export function nearbyPages(center, total) {
   const pages = [];
-  // Keep the already displayed center out of the local cache queue; prepare
-  // the same five pages on either side as the server-side reading window.
+  // cacheWindow：本地只读缓存范围；processingWindow（云派发）由服务端快照决定。
   for (let offset = 1; offset <= 5; offset++) {
     if (center - offset >= 1) pages.push(center - offset);
     if (center + offset <= total) pages.push(center + offset);
@@ -23,6 +24,10 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
   let readyControllers = [];
   let readyQueue = [];
   const seenReady = new Map();
+  // U2：在途集合与成功标记分离。seenReady 只在 GET 成功且版本/会话有效、
+  // 成功进入缓存或待展示队列后写入；失败/取消清理在途标记，同 revision 可重 GET。
+  // 重试的是只读 GET，从不因此重新提交付费 POST。
+  const readyInFlight = new Map();
 
   const active = () => Boolean(session && state.book?.id === session.bookId);
   const clearTimers = () => {
@@ -41,6 +46,7 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
     readyControllers.forEach(controller => controller.abort());
     readyControllers = [];
     readyQueue = [];
+    readyInFlight.clear();
   };
   const valid = (bookId, sequenceAtStart, epochAtStart) =>
     active() && session.bookId === bookId && sequence === sequenceAtStart && epoch === epochAtStart;
@@ -86,9 +92,17 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
       const controller = new AbortController();
       readyControllers.push(controller);
       api.page(item.bookId, item.pageNumber, controller.signal).then(page => {
-        if (!valid(item.bookId, item.sequence, item.epoch) || cacheIsNewer(state.pageCache.get(item.pageNumber), page)) return;
+        if (!valid(item.bookId, item.sequence, item.epoch) || cacheIsNewer(state.pageCache.get(item.pageNumber), page)) {
+          readyInFlight.delete(item.pageNumber);
+          return;
+        }
+        // U2：GET 成功且会话有效才记成功标记；缓存与展示仍由 onPageReady 按既有保护处理。
+        seenReady.set(item.pageNumber, `${item.pageNumber}:${page.revision}`);
+        readyInFlight.delete(item.pageNumber);
         onPageReady(item.pageNumber, page);
       }).catch(error => {
+        // U2：失败/取消清理在途标记，同 revision 仍可重 GET；不重发付费 POST。
+        readyInFlight.delete(item.pageNumber);
         if (valid(item.bookId, item.sequence, item.epoch) && error?.name !== 'StaleRequest') {
           onError(error);
         }
@@ -116,9 +130,11 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
       const pageNumber = Number(info.pageNumber);
       const key = `${pageNumber}:${info.revision}`;
       if (seenReady.get(pageNumber) === key) continue;
+      // U2：在途页不重复入队；成功标记只在 GET 成功后写，失败清理在途后可重 GET。
+      if (readyInFlight.get(pageNumber) === key) continue;
       const cached = state.pageCache.get(pageNumber);
       if (cached?.revision === info.revision && cached?.status === 'READY') { seenReady.set(pageNumber, key); continue; }
-      seenReady.set(pageNumber, key);
+      readyInFlight.set(pageNumber, key);
       readyQueue.push({ bookId: session.bookId, sequence: sequenceAtStart, epoch: epochAtStart, pageNumber });
     }
     runReadyWorkers();
@@ -192,6 +208,7 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
 
   function navigated() {
     seenReady.clear();
+    readyInFlight.clear();
     schedulePrefetch();
     if (active()) void postNavigation();
   }
@@ -211,6 +228,7 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
     sequence = 0;
     fixedOptions = { ...options };
     seenReady.clear();
+    readyInFlight.clear();
     schedulePrefetch();
     await postNavigation();
     if (active()) scheduleHeartbeat();
@@ -223,6 +241,7 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
     session = null;
     fixedOptions = null;
     seenReady.clear();
+    readyInFlight.clear();
     cancelReads(); clearTimers();
     const stopEpoch = epoch;
     const currentStop = () => !silent && !session && epoch === stopEpoch && state.book?.id === previous.bookId;
@@ -248,6 +267,7 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
   async function retryCurrentPage() {
     if (!active()) return;
     seenReady.delete(state.currentPage);
+    readyInFlight.delete(state.currentPage);
     const bookId = session.bookId, seq = ++sequence, requestEpoch = epoch;
     onStatus({ sessionId: session.id, sequence: seq, enabled: true, status: 'PROCESSING', centerPage: state.currentPage,
       fromPage: Math.max(1, state.currentPage - 3), toPage: Math.min(state.book.totalPages, state.currentPage + 5), pages: [] });
