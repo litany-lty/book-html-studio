@@ -217,8 +217,16 @@ public class PageProcessor {
             return null;
         }
         regionImages.put("__overview__", overview);
-        QwenAssistCoordinator.CoordinateResult result = coordinator.coordinate(bookId, pageNumber,
-                blocks, parentTexts, plan, regionImages, null, layout, true, cancelled);
+        QwenAssistCoordinator.CoordinateResult result;
+        try {
+            result = coordinator.coordinate(bookId, pageNumber,
+                    blocks, parentTexts, plan, regionImages, null, layout, true, cancelled);
+        } catch (CancelledException e) {
+            throw e;
+        } catch (Exception e) {
+            // 可控回滚：分组失败走旧整页路径，不抛错中断增强。
+            return null;
+        }
         List<String> warnings = new ArrayList<>(result.warnings());
         if (result.failedChunks() > 0) {
             warnings.add(result.failedChunks() + " 组核对失败，已保留原文");
