@@ -67,9 +67,11 @@ class ScanRecoveryPipelineTest {
         var paddle=mock(PaddleOcrPipeline.class);when(paddle.recognize(any(),anyString(),anyBoolean(),anyString(),any()))
                 .thenAnswer(inv->inv.getArgument(0)==image?List.of(ScanRecoveryTest.figure()):List.of(ScanRecoveryTest.text("b","部分转录")));
         var jobs=new JobService(store,books,processor(store,pdf,paddle));
+        var progress=new ProcessingProgressService();jobs.setProgress(progress);
         try {
             jobs.submit(id,new JobRequest("1","paddle-aistudio","vertical",false,false,false));awaitJob(store,id);
-            assertEquals("COMPLETED_WITH_ERRORS",store.readJob(id).status());assertEquals("READY",store.readPage(id,1).status());
+            assertEquals("COMPLETED_WITH_ERRORS",store.readJob(id).status());
+            assertEquals("PARTIAL",progress.latest(id,1).lifecycle());assertTrue(progress.latest(id,1).canRead());assertEquals("READY",store.readPage(id,1).status());
             assertTrue(store.readPage(id,1).warnings().stream().anyMatch(w->w.startsWith(OcrTextRecovery.PARTIAL)));
             var old=store.readPage(id,1);
             reset(paddle);when(paddle.recognize(any(),anyString(),anyBoolean(),anyString(),any())).thenReturn(List.of(ScanRecoveryTest.figure()));

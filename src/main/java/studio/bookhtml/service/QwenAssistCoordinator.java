@@ -146,10 +146,8 @@ public class QwenAssistCoordinator {
             List<CompletableFuture<IndexedOutcome>> futures = new ArrayList<>();
             for (QwenTaskPlanner.ChunkTask chunk : plan.chunks()) {
                 CompletableFuture<IndexedOutcome> future;
-                java.util.concurrent.atomic.AtomicBoolean started = new java.util.concurrent.atomic.AtomicBoolean();
                 try {
                     future = CompletableFuture.supplyAsync(() -> {
-                        started.set(true);
                         if (attemptId != null) progress.inFlight(bookId, pageNumber, attemptId, 1);
                         try { return runChunk(bookId, pageNumber, chunk, parentTexts, regionImages.get(chunk.chunkId()),
                                 overviewImage, foreground, budget, cancelled); }
@@ -160,8 +158,8 @@ public class QwenAssistCoordinator {
                             null, "局部核对队列已满，保留原文"));
                 }
                 futures.add(future.whenComplete((outcome, error) -> {
-                    if (attemptId != null) progress.unitDone(bookId, pageNumber, attemptId,
-                            error == null && outcome != null && outcome.result() != null, started.get());
+                    if (attemptId != null) progress.unitDone(bookId, pageNumber, attemptId, chunk.chunkId(),
+                            error == null && outcome != null && outcome.result() != null ? "SUCCEEDED" : "FAILED");
                 }));
             }
             for (int i = 0; i < futures.size(); i++) {

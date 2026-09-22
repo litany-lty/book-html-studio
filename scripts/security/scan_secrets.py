@@ -30,7 +30,11 @@ ENV_ASSIGNMENT = re.compile(
     rb"(?im)^[ \t]*[A-Za-z0-9_.-]*(?:api[_-]?key|secret[_-]?key|access[_-]?token|client[_-]?secret|password)"
     rb"[ \t]*[:=][ \t]*([A-Za-z0-9+/_=.!~:-]{20,})[ \t]*$"
 )
-PLACEHOLDER = re.compile(rb"(?i)^(?:test[-_]|fake[-_]|mock[-_]|dummy[-_]|example[-_]|your[-_]|replace[-_]|<|\$\{)")
+# Reviewed fixture literals only. Neither a test path nor a "test-"/"your-"
+# prefix exempts a possible real credential from inspection.
+REVIEWED_SENTINELS = frozenset({b"your-placeholder-value-not-a-real-secret",
+    b"your-api-key-replace-with-secret", b"test-credential-placeholder-only"})
+
 MAX_BLOB = 64 * 1024 * 1024
 
 
@@ -47,7 +51,7 @@ def findings(data: bytes, location: str) -> list[dict]:
             output.append({"location": location, "line": data.count(b"\n", 0, match.start()) + 1, "rule": rule})
     for match in list(ASSIGNMENT.finditer(data)) + list(ENV_ASSIGNMENT.finditer(data)):
         value = match.group(1)
-        if not PLACEHOLDER.match(value) and entropy(value) >= 3.6:
+        if value not in REVIEWED_SENTINELS and entropy(value) >= 3.6:
             output.append({"location": location, "line": data.count(b"\n", 0, match.start()) + 1,
                            "rule": "high-entropy-credential-assignment"})
     return output
@@ -81,6 +85,8 @@ def tracked_scan() -> tuple[list[dict], int, int]:
 
 
 def history_scan() -> tuple[list[dict], int, int]:
+    if git("rev-parse", "--is-shallow-repository").strip() != b"false":
+        raise ValueError("History scan requires a complete fetched history")
     # Scan every unique reachable blob, even if it was deleted from the current tree.
     ids = list(dict.fromkeys(line.split(b" ", 1)[0] for line in git("rev-list", "--objects", "--all").splitlines()))
     output, count, binary = [], 0, 0

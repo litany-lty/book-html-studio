@@ -44,7 +44,11 @@ public final class OcrTextRecovery {
         List<Region> regions=regions(image,layout);
         for(int index=0;index<regions.size();index++) {
             check(cancelled);
-            if(System.nanoTime()>=deadline)throw new OcrException("局部分区重识别已达总时限，保留原稿供核对");
+            if(System.nanoTime()>=deadline) {
+                if(found==0)throw new OcrException("局部分区重识别已达总时限，保留原稿供核对");
+                unresolved += retainMissing(recovered, regions, index);
+                break;
+            }
             Region r=regions.get(index);
             BufferedImage crop=image.getSubimage(r.x,r.y,r.w,r.h);
             try {
@@ -83,6 +87,15 @@ public final class OcrTextRecovery {
                     recovered.add(new Block(id,"figure",recovered.size(),r.core.clone(),"horizontal-tb","","",null,true,false,null,
                             "ocr-region-unresolved",List.of(id),MISSING,null));
                 }
+            } catch (CancelledException cancelledCall) {
+                throw cancelledCall;
+            } catch (Exception failedRegion) {
+                check(cancelled);
+                if(found==0)throw failedRegion;
+                // Stop on transport, quota, deadline or malformed output. Do not discard
+                // validated earlier regions and do not send more paid requests.
+                unresolved += retainMissing(recovered, regions, index);
+                break;
             } finally { crop.flush(); }
         }
         check(cancelled);
@@ -92,6 +105,14 @@ public final class OcrTextRecovery {
         // overprint. Always retain partial status until a human has checked the source.
         return new Result(List.copyOf(recovered),PARTIAL+" "+RECOVERED+" 已恢复部分局部转录，原图和原始区域保留；"+
                 (unresolved>0?unresolved+" 个区域未获得可用文字；":"")+"防盗印、水印、手写或网格干扰可能仍有漏字，需对照原稿核对");
+    }
+    private static int retainMissing(List<Block> out, List<Region> regions, int from) {
+        for(int i=from;i<regions.size();i++) {
+            String id="region-unresolved-"+(i+1);
+            out.add(new Block(id,"figure",out.size(),regions.get(i).core.clone(),"horizontal-tb","","",null,true,false,null,
+                    "ocr-region-unresolved",List.of(id),MISSING+"；该区域因请求失败或时限未完成",null));
+        }
+        return regions.size()-from;
     }
     static Block missingHalf(String prefix,int x,int width,int fullWidth,int height,int order) {
         String id="unresolved-half-"+prefix;

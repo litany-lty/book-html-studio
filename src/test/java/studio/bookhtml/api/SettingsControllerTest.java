@@ -178,4 +178,43 @@ class SettingsControllerTest {
         ApiException error = assertThrows(ApiException.class, action::run); assertEquals(expected,error.status());
     }
     @FunctionalInterface interface Throwing { void run() throws Exception; }
+    @Test
+    void writeOnlyUpdatesDoNotReturnAnyProviderSecret() throws Exception {
+        SettingsService settings = service();
+        Map<String, String> values = Map.of(
+                "paddleAccessToken", "CANARY_PADDLE_NOT_A_CREDENTIAL",
+                "ppocrApiKey", "CANARY_PPOCR_KEY_NOT_A_CREDENTIAL",
+                "ppocrSecretKey", "CANARY_PPOCR_SECRET_NOT_A_CREDENTIAL",
+                "qwenApiKey", "CANARY_QWEN_NOT_A_CREDENTIAL",
+                "jevApiKey", "CANARY_JEV_NOT_A_CREDENTIAL");
+        var body = json.createObjectNode().put("revision", 0);
+        var updates = body.putObject("secretUpdates");
+        values.forEach((name, value) -> updates.putObject(name).put("value", value));
+        String output = json.writeValueAsString(settings.update(body))
+                + json.writeValueAsString(settings.view()) + settings.state();
+        for (String value : values.values()) {
+            assertFalse(output.contains(value));
+            assertFalse(output.contains(java.util.Base64.getEncoder().encodeToString(value.getBytes(StandardCharsets.UTF_8))));
+        }
+        assertEquals(values.get("qwenApiKey"), settings.state().qwenApiKey());
+        settings.update(json.readTree("{\"revision\":1}"));
+        assertEquals(values.get("qwenApiKey"), settings.state().qwenApiKey(), "omission keeps the stored secret");
+        settings.update(json.readTree("{\"revision\":2,\"secretUpdates\":{\"qwenApiKey\":{\"clearSecret\":true}}}"));
+        assertEquals("", settings.state().qwenApiKey());
+        assertEquals(values.get("jevApiKey"), settings.state().jevApiKey());
+    }
+
+    @Test
+    void masksAndAmbiguousSecretUpdatesAreRejectedWithoutMutation() throws Exception {
+        SettingsService settings = service();
+        for (String update : java.util.List.of(
+                "{\"revision\":0,\"secretUpdates\":{\"qwenApiKey\":{\"value\":\"****\"}}}",
+                "{\"revision\":0,\"secretUpdates\":{\"qwenApiKey\":{\"value\":\"new-canary\",\"clearSecret\":true}}}",
+                "{\"revision\":0,\"qwen\":{\"apiKey\":\"old-canary\"},\"secretUpdates\":{\"qwenApiKey\":{\"value\":\"new-canary\"}}}",
+                "{\"revision\":0,\"secretUpdates\":{\"qwenApiKey\":{\"value\":123}}}")) {
+            assertStatus(HttpStatus.BAD_REQUEST, () -> settings.update(json.readTree(update)));
+            assertEquals(0, settings.state().revision());
+        }
+    }
+
 }

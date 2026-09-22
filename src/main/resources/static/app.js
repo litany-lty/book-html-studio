@@ -1831,7 +1831,8 @@ $('#reload-page-header')?.addEventListener('click', reloadCurrentPage);
 $('#reader-reload-page')?.addEventListener('click', reloadCurrentPage);
 const storedOption = (key, fallback) => { try { const value = localStorage.getItem(key); return value == null ? fallback : value === 'true'; } catch (_) { return fallback; } };
 const isAutoProcessAll = () => storedOption('book_html_auto_process_all_v2', false);
-const isAutoReadEnabled = () => storedOption('book_html_auto_read', true);
+// Configured credentials are not consent to start paid recognition on book open.
+const isAutoReadEnabled = () => storedOption('book_html_auto_read', false);
 const autoReadCheckbox = $('#reading-window-auto-start');
 if (autoReadCheckbox) {
   autoReadCheckbox.checked = isAutoReadEnabled();

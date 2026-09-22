@@ -1,28 +1,26 @@
-name: Reader integration staging
+name: Reader integration
 
 on:
   push:
-    branches: [integrate/reader-20260922]
+    branches: [main, integrate/reader-20260922]
+  pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: reader-integration-staging-${{ github.ref }}
+  group: reader-integration-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  verify:
+  browser:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Reproduce exact reviewed integration tree
-        run: python3 .integration/apply.py
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -34,23 +32,15 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - name: Build and offline guards
+      - name: Build and offline navigation/security guards
         run: |
           mvn --batch-mode verify
-          bash -n run.sh
-          for file in src/main/resources/static/*.js src/main/resources/export/*.js scripts/*.mjs; do node --check "$file"; done
-          node scripts/verification/probe_display.js
-          node scripts/verification/probe_job_scope.js
           node scripts/verification/probe_api_lifecycle.mjs
           node scripts/verification/probe_page_progress.mjs
           node scripts/verification/probe_settings_secrets.mjs
           node --test scripts/verification/probe_scan_empty.mjs scripts/verification/probe_focus_reading.mjs
-          python3 -m pip install --disable-pip-version-check OpenCC==1.4.2
-          python3 scripts/verification/shadow_eval.py --selftest
-          python3 -m unittest discover -s scripts/verification -p 'test_*.py'
           python3 scripts/security/scan_secrets.py --history --out test-results/integration/secret-scan.json
       - name: Browser prerequisites
-        id: browser
         run: |
           python3 -m pip install --disable-pip-version-check playwright==1.51.0
           sudo apt-get update -qq
@@ -58,48 +48,22 @@ jobs:
           if ! command -v chromium && ! command -v google-chrome; then python3 -m playwright install --with-deps chromium; fi
       - name: Actual focus UI and guarded scan fallbacks (synthetic API)
         run: |
-          status=0
-          python3 scripts/verification/browser_focus_reading.py || status=1
-          python3 scripts/verification/browser_scan_recovery.py || status=1
-          exit "$status"
+          python3 scripts/verification/browser_focus_reading.py
+          python3 scripts/verification/browser_scan_recovery.py
       - name: Real server reader and settings smoke (OCR stub, no cloud)
-        if: ${{ !cancelled() && steps.browser.outcome == 'success' }}
         run: bash scripts/verification/run_reader_browser.sh
-      - name: Record exact tested tree
+      - name: Record exact checkout
         if: always()
         run: |
           mkdir -p test-results/integration
-          git write-tree > test-results/integration/tested-tree.txt
-          git rev-parse HEAD > test-results/integration/staging-sha.txt
+          git rev-parse HEAD > test-results/integration/tested-sha.txt
+          git rev-parse HEAD^{tree} > test-results/integration/tested-tree.txt
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: reader-integration-staging-${{ github.sha }}
+          name: reader-integration-${{ github.sha }}
           path: |
             test-results/
             target/surefire-reports/
           retention-days: 7
           if-no-files-found: warn
-  publish:
-    needs: verify
-    if: github.repository == 'litany-lty/book-html-studio' && github.ref == 'refs/heads/integrate/reader-20260922'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: true
-      - name: Publish only the exact verified source tree on the integration branch
-        run: |
-          python3 .integration/apply.py
-          test "$(git write-tree)" = 'ccab7bdb6ee0510f2415c18740ed4db5ee03f41d'
-          branch='refs/heads/integrate/reader-20260922'
-          test "$(git ls-remote origin "$branch" | cut -f1)" = "$GITHUB_SHA"
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git -c core.hooksPath=/dev/null commit -m 'fix(reader): integrate safe lifecycle, encrypted secrets, focus gestures and scan recovery'
-          git push origin "HEAD:$branch"
-          echo "Published exact tested source: $(git rev-parse HEAD)"

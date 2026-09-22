@@ -105,6 +105,40 @@ class ReadingWindowServiceTest {
                 new ReadingWindowRequest(session, 4L, 14, "ppocr", "auto", false, false, true, false)));
     }
 
+    @Test void currentAdmissionPrecedesNeighborWithoutWaitingForCurrentCompletion() throws Exception {
+        setup(14);
+        jobs = spy(jobs);
+        windows = new ReadingWindowService(store, jobs, settings, clock, Duration.ofSeconds(1));
+        List<Integer> admitted = new ArrayList<>();
+        doAnswer(invocation -> {
+            Job result = (Job) invocation.callRealMethod();
+            admitted.add(result.currentPage());
+            return result;
+        }).when(jobs).submitReserved(any(UUID.class), eq(book.id()), any(JobRequest.class));
+        CountDownLatch neighborEntered = new CountDownLatch(1), bothEntered = new CountDownLatch(2), release = new CountDownLatch(1);
+        List<Integer> observedWorkers = new CopyOnWriteArrayList<>();
+        when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
+                .thenAnswer(invocation -> {
+                    int n = invocation.getArgument(1);
+                    // Deliberately reverse observable worker records. This must not
+                    // change the dispatch priority or serialize the whole OCR call.
+                    if (n == 8) assertTrue(neighborEntered.await(3, TimeUnit.SECONDS));
+                    observedWorkers.add(n);
+                    if (n == 9) neighborEntered.countDown();
+                    bothEntered.countDown();
+                    assertTrue(release.await(3, TimeUnit.SECONDS));
+                    return ready(n);
+                });
+        try {
+            windows.update(book.id(), request(UUID.randomUUID(), 1, 8));
+            advanceAndTick(Duration.ofSeconds(1));
+            assertTrue(bothEntered.await(3, TimeUnit.SECONDS));
+            assertEquals(List.of(8, 9), admitted, "current page must be admitted first");
+            assertEquals(List.of(9, 8), observedWorkers, "worker arrival order is not admission order");
+            assertEquals("PENDING", store.readPage(book.id(), 8).status());
+        } finally { release.countDown(); }
+    }
+
     @Test void quickJumpDropsPendingButLetsInFlightFinishThenStartsLatestCenter() throws Exception {
         setup(20);
         CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);

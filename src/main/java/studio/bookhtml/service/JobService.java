@@ -450,8 +450,18 @@ public class JobService {
             int baselineRev=BookStore.revisionOrZero(old);
             Page baseline=force?strongestBaseline(old,store.readOriginalPage(running.bookId,pageNumber)):old;
             if("READY".equals(old.status())&&!force){completed++;writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",completed,pages.size(),pageNumber,null,List.copyOf(errors)));continue;}
-            // Published page content and revision remain unchanged during background processing.
+            // One durable attempt identity also owns batch telemetry; never infer a revision.
+            UUID attemptId = null;
+            boolean pagePublished = false;
             try{
+                PageAttempt admitted = registerAttempt(running.bookId, pageNumber, baselineRev,
+                        List.of("JOB_COMPLETE", "JOB_RESTORE"));
+                running.attempts.put(pageNumber, admitted);
+                if (progress != null) {
+                    attemptId = progress.begin(admitted, baselineRev, "READY".equals(old.status()));
+                    progress.plan(running.bookId, pageNumber, attemptId, "PAGE", 1);
+                    progress.stage(running.bookId, pageNumber, attemptId, "OCR");
+                }
                 ProcessingResult result=processor.process(running.bookId,pageNumber,provider,layout,split,assist,()->running.cancelled||Thread.currentThread().isInterrupted());
                 Page page=mergeUnresolvedIssues(old,result.page());
                 if(result.category()==ProcessingResult.Category.TEXT_PARTIAL)errors.add("第 "+pageNumber+" 页仅恢复部分转录，需对照原稿核对");
@@ -481,8 +491,18 @@ public class JobService {
                 }else{
                     // A1-04：先提交成功结果，通过后再补原始快照；被拒绝的结果不写快照
                     try {
-                        store.commitPage(running.bookId,page,baselineRev,CommitActor.JOB,initial.id(),CommitOp.JOB_COMPLETE);
-                        try{store.preserveOriginal(running.bookId,page);}catch(IOException ignored){}
+                        if (attemptId != null) progress.stage(running.bookId,pageNumber,attemptId,"PUBLISHING");
+                        Page committed = store.commitPage(running.bookId,page,baselineRev,CommitActor.JOB,initial.id(),CommitOp.JOB_COMPLETE);
+                        pagePublished = true;
+                        boolean partial = result.category() == ProcessingResult.Category.TEXT_PARTIAL;
+                        if (attemptId != null) {
+                            progress.baselinePublished(running.bookId,pageNumber,attemptId,committed.revision(),false);
+                            completePageUnit(running.bookId,pageNumber,attemptId);
+                            progress.finish(running.bookId,pageNumber,attemptId,partial ? "PARTIAL" : "SUCCEEDED",
+                                    partial ? "OCR_RECOVERY_PARTIAL" : "PAGE_PUBLISHED",partial);
+                        }
+                        completeIntent(running,pageNumber,partial ? "PARTIAL" : "SUCCEEDED");
+                        try{store.preserveOriginal(running.bookId,committed);}catch(IOException ignored){}
                     } catch (PageConflictException conflict) {
                         String message="第 "+pageNumber+" 页在识别期间已被手工保存，已保留手工版本，识别候选另存备查";
                         errors.add(message);
@@ -508,6 +528,17 @@ public class JobService {
                 try {
                     store.commitPage(running.bookId,failed,baselineRev,CommitActor.JOB,initial.id(),CommitOp.JOB_RESTORE);
                 } catch (PageConflictException ignored) { }
+            }
+            finally {
+                String outcome = running.cancelled || Thread.currentThread().isInterrupted() ? "CANCELLED"
+                        : pagePublished ? "PARTIAL" : "FAILED";
+                if (attemptId != null) {
+                    ProcessingSnapshot end = progress.snapshot(running.bookId,pageNumber,attemptId);
+                    if (end != null && !List.of("RUNNING","QUEUED","DRAINING").contains(end.lifecycle())) outcome = end.lifecycle();
+                    progress.finish(running.bookId,pageNumber,attemptId,outcome,"BATCH_ATTEMPT_SETTLED",!"SUCCEEDED".equals(outcome));
+                }
+                completeIntent(running,pageNumber,outcome);
+                running.attempts.remove(pageNumber);
             }
             completed++;writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",completed,pages.size(),pageNumber,null,List.copyOf(errors)));
         }
@@ -570,7 +601,7 @@ public class JobService {
                         if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"FAILED","BASELINE_REJECTED",true);
                     }else{
                         try {
-                            if(attemptId!=null)progress.stage(running.bookId,pageNumber,attemptId,"PUBLISHING");
+                            if(attemptId!=null)progress.stage(running.bookId,pageNumber,attemptId,"BASELINE_PUBLISHING");
                             Page committed=store.commitPage(running.bookId,baselinePage,baselineRev,CommitActor.JOB,expectedJobId,CommitOp.JOB_BASELINE);
                             try{store.preserveOriginal(running.bookId,committed);}catch(IOException ignored){}
                             baselinePublishedThisPage = true;
@@ -618,8 +649,14 @@ public class JobService {
                                 try {
                                     if(attemptId!=null)progress.stage(running.bookId,pageNumber,attemptId,"PUBLISHING");
                                     Page committed = store.commitPage(running.bookId,enrichedPage,publishedRev,CommitActor.JOB,expectedJobId,CommitOp.JOB_ENHANCEMENT);
-                                    completeIntent(running, pageNumber, "SUCCEEDED");
-                                    if(attemptId!=null){progress.baselinePublished(running.bookId,pageNumber,attemptId,committed.revision(),true);progress.finish(running.bookId,pageNumber,attemptId,"SUCCEEDED","ENHANCED",false);}
+                                    if(attemptId!=null){
+                                        progress.baselinePublished(running.bookId,pageNumber,attemptId,committed.revision(),enriched.complete());
+                                        completePageUnit(running.bookId,pageNumber,attemptId);
+                                        progress.finish(running.bookId,pageNumber,attemptId,enriched.complete()?"SUCCEEDED":"PARTIAL",
+                                                enriched.complete()?"ENHANCED":"ENHANCEMENT_PARTIAL",!enriched.complete());
+                                    }
+                                    completeIntent(running, pageNumber, attemptId == null ? (enriched.complete()?"SUCCEEDED":"PARTIAL")
+                                            : progress.snapshot(running.bookId,pageNumber,attemptId).lifecycle());
                                 } catch (PageConflictException manualKept) {
                                     // U4：人工在此期间保存，人工版本优先；增强保留为过期候选。
                                     try{store.writeCandidate(running.bookId,enrichedPage);}catch(IOException ignored){}
@@ -640,7 +677,10 @@ public class JobService {
                         }
                     } else if (baselinePublishedThisPage) {
                         completeIntent(running, pageNumber, "SUCCEEDED");
-                        if (attemptId != null) progress.finish(running.bookId, pageNumber, attemptId, "SUCCEEDED", "BASELINE_ONLY", false);
+                        if (attemptId != null) {
+                            completePageUnit(running.bookId,pageNumber,attemptId);
+                            progress.finish(running.bookId, pageNumber, attemptId, "SUCCEEDED", "BASELINE_ONLY", false);
+                        }
                     }
 
                 }
@@ -681,6 +721,12 @@ public class JobService {
             }
         }catch(CancelledException|CancellationException ignored){}
         finally { releaseReserved(running, running.cancelled ? "CANCELLED" : "INTERRUPTED"); }
+    }
+    private void completePageUnit(String bookId, int page, UUID attemptId) {
+        ProcessingSnapshot snapshot = progress.snapshot(bookId,page,attemptId);
+        if (snapshot != null && "PAGE".equals(snapshot.units().kind()) && snapshot.units().total() == 1
+                && snapshot.units().succeeded()+snapshot.units().failed()+snapshot.units().cancelled()+snapshot.units().skipped() == 0)
+            progress.unitDone(bookId,page,attemptId,"page-published","SUCCEEDED");
     }
     // U2：取消与归属已拆分为 ownsAttempt/mayDispatch/mayPublish/mayRestore；
     // 不再使用“是否当前”与“是否取消”混用的单一判断。

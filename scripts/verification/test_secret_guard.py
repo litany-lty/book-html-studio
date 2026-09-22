@@ -27,6 +27,18 @@ class SecretGuardTest(unittest.TestCase):
         self.assertFalse(guard.findings(b'api_key="test-credential-placeholder-only"', "fixture"))
         self.assertFalse(guard.findings(b'apiKey = state.qwenApiKey()', "fixture"))
 
+    def test_fixture_prefix_does_not_exempt_real_shaped_values(self):
+        for prefix in (b'test-', b'your-', b'fake-', b'example-'):
+            value = prefix + b'P9j4T7x2R6b1M8w3N5y0D4q9'
+            self.assertTrue(guard.findings(b'api_key="' + value + b'"','test.py'))
+        for value in guard.REVIEWED_SENTINELS:
+            self.assertFalse(guard.findings(b'api_key="' + value + b'"','fixture'))
+
+    def test_shallow_history_is_incomplete_not_pass(self):
+        from unittest.mock import patch
+        with patch.object(guard, 'git', return_value=b'true\n'):
+            self.assertRaises(ValueError,guard.history_scan)
+
     def test_empty_env_cannot_capture_the_next_setting(self):
         self.assertFalse(guard.findings(b'API_KEY=\nQWEN_MODEL=some-long-non-secret-model-name\n', 'fixture.env'))
 

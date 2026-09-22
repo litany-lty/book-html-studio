@@ -50,15 +50,17 @@ def main():
             base = '/api/books/' + BOOK
             if path == '/api/config':
                 value = {'defaultProvider': 'paddle-aistudio', 'maxUploadMb': 300, 'fallbackEnabled': False,
-                         'providers': [{'id': 'paddle-aistudio', 'label': '未启用', 'available': False}], 'ocrChannels': [],
+                         'providers': [{'id': 'paddle-aistudio', 'label': '合成已配置通道（未授权）', 'available': True}], 'ocrChannels': [],
                          'qwenAssist': {'configured': False, 'assistEnabled': False}, 'capabilities': {'schemaVersion': 2}}
             elif path == '/api/books': value = [META]
-            elif path == base or path == base + '/metadata': value = META
+            elif path in (base, base + '/metadata', base + '/reader'): value = META
             elif path == base + '/pages':
                 value = [{'pageNumber': n, 'status': page_data(n)['status'], 'blockCount': 14, 'uncertainCount': 0, 'reviewed': False} for n in range(1, TOTAL+1)]
             elif path == base + '/outline': value = []
             elif path == base + '/job': value = {'status': 'IDLE', 'completed': 0, 'total': 0, 'errors': []}
-            elif match := re.fullmatch(re.escape(base) + r'/pages/(\d+)', path): value = page_data(int(match[1]))
+            elif path.startswith(base + '/reader/pages/') and path.endswith('/progress'):
+                n = int(path.split('/')[-2]); value = {'pageNumber':n, 'status':page_data(n)['status'], 'revision':1, 'processing':None}
+            elif match := re.fullmatch(re.escape(base) + r'/(?:reader/)?pages/(\d+)', path): value = page_data(int(match[1]))
             elif '/image' in path or '/figures/' in path:
                 route.fulfill(content_type='image/svg+xml', body='<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800"><text x="50" y="60">Source fixture</text></svg>'); return
             else: value = {}
@@ -242,10 +244,18 @@ def main():
             page.wait_for_selector('body:not(.focus-reading) .reader-toolbar')
             check('visible_exit_restores_workspace', page.locator('.topbar').is_visible())
             # Reopen a legacy saved focus preference while the saved view is original.
-            page.evaluate(f"localStorage.setItem('paper-studio:{BOOK}:reading', JSON.stringify({{page:3, view:'original', focus:true}}))")
+            # Seed before the new document initializes. Mutating live preferences here
+            # races the previous page's legitimate debounced scroll-position save.
+            page.add_init_script(f"localStorage.setItem('paper-studio:{BOOK}:reading', JSON.stringify({{page:3, view:'original', focus:true}}))")
             page.reload(wait_until='networkidle')
             page.select_option('#book-select', BOOK)
-            page.wait_for_selector('body.focus-reading #paper .reading-flow')
+            try:
+                page.wait_for_selector('body.focus-reading #paper .reading-flow')
+            except Exception:
+                state = page.evaluate("async()=>{const {state}=await import('/store.js');return {focus:state.focus,view:state.view,page:state.currentPage,status:state.page?.status,bodyClass:document.body.className,shellHidden:document.querySelector('#reader-shell').hidden,hasFlow:!!document.querySelector('#paper .reading-flow')};}")
+                (OUT/'restore-failure.json').write_text(json.dumps(state,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+                page.screenshot(path=str(OUT/'restore-failure.png'))
+                raise
             check('restored_focus_forces_parsed_view', page.locator('#focus-exit').is_visible())
             page.click('#focus-exit')
             page.select_option('#book-select', '')

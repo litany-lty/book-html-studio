@@ -55,7 +55,7 @@ function appendIssueAwareText(element, block, page, script, onIssueSelect, pageI
       resolved.className = 'content-issue resolved';
       readingLayout.appendText(resolved, readingLayout.displayIssueText(issue, sourceText, script), block);
       element.append(resolved);
-    } else if (candidate && (assisted || (script !== 'original' && issue.inferredText))) {
+    } else if (candidate && assisted) {
       // 辅助阅读：优先显示上下文更准确的候选词（如 Qwen 纠正的词语），带未确认标记；resolved 仍为 false，点击可核对原稿/采纳
       readingLayout.appendAssistedIssueText(element, {
         page, block, issue, sourceText, script, pageImageSrc,

@@ -236,7 +236,7 @@ public class SettingsService {
         if (clear && !value.isEmpty()) bad();
         if (clear) return "";
         if (value.isEmpty()) return fallback;
-        if (!validSecret(value) || value.isBlank() || value.matches("[*•●]{3,}") || value.equalsIgnoreCase("REDACTED")) bad();
+        if (!validSecret(value) || value.isBlank() || value.matches("[＊*•●]+") || value.equalsIgnoreCase("REDACTED")) bad();
         return value;
     }
     private static Long budget(JsonNode n, Long fallback) {

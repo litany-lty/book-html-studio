@@ -68,6 +68,8 @@ with sync_playwright() as p:
     page=browser.new_page(viewport={'width':1440,'height':1000},reduced_motion='reduce')
     errors=[]; page.on('pageerror',lambda e: errors.append(str(e)))
     page.add_init_script(f"localStorage.setItem('paper-studio:{book}:reading', JSON.stringify({{page:8, view:'reading'}}));")
+    # This fixture explicitly opts in; a fresh browser must not implicitly authorize OCR.
+    page.add_init_script("localStorage.setItem('book_html_auto_read', 'true');")
     page.goto(base,wait_until='domcontentloaded')
     page.wait_for_function("document.querySelector('#book-select').options.length > 1")
     settings_result=check_environment_settings(page)
@@ -77,9 +79,19 @@ with sync_playwright() as p:
     result={'errors':errors,'progress':page.locator('#page-processing-progress').inner_text(),'settings':settings_result}
     result['positions']=page.evaluate("""() => { const r=id=>{const x=document.querySelector(id).getBoundingClientRect();return {x:x.x,y:x.y,width:x.width,height:x.height}};return {save:r('#page-save-status'), progress:r('#page-processing-progress'), reader:r('#reader'), paper:r('#paper')}; }""")
     assert result['positions']['progress']['x'] >= result['positions']['save']['x']+result['positions']['save']['width']-1
-    calls=page.request.get(base+'/__qa/reading-calls').json()['calls'];result['initial_calls']=calls
-    assert calls[0]['pageNumber']==8, calls
-    assert len(calls)<=2,calls
+    deadline=time.monotonic()+10
+    while True:
+        trace=page.request.get(base+'/__qa/reading-calls').json()
+        calls=trace['calls']; admissions=trace['admissions']
+        if len(calls)>=2 and len(admissions)>=2: break
+        assert time.monotonic()<deadline, trace
+        time.sleep(.05)
+    result['initial_calls']=calls;result['admissions']=admissions
+    # Assert the real synchronous admission boundary, not the independently
+    # scheduled workers' wall-clock arrival order. Neither call has finished.
+    assert [entry['pageNumber'] for entry in admissions]==[8,9], admissions
+    assert {call['pageNumber'] for call in calls}=={8,9} and len(calls)==2,calls
+    assert all(not call['completed'] for call in calls),calls
     settings=page.request.get(base+'/api/settings').json()
     assert 'qa-mock-not-a-credential' not in json.dumps(settings)
     result['saved_credentials_not_returned']=True

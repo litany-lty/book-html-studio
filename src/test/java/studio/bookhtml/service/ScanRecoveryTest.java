@@ -113,4 +113,22 @@ class ScanRecoveryTest {
         var result=OcrTextRecovery.recover(manuscript(true,false),List.of(),"horizontal",()->false,(i,l,c)->List.of(text("id","同文")));
         assertEquals(4,result.blocks().stream().filter(b->"同文".equals(b.original())).count());
     }
+
+    @Test void laterTransportOrInvalidRegionKeepsEarlierValidatedTextAndStops() throws Exception {
+        for (boolean invalid : List.of(false,true)) {
+            var count = new AtomicInteger();
+            var result = OcrTextRecovery.recover(manuscript(true,true), List.of(), "auto", ()->false, (i,l,c)-> {
+                if(count.incrementAndGet()==1)return List.of(text("b","已恢复的可信来源片段"));
+                if(invalid)return List.of(new Block("bad","text",0,new double[]{.9,0,.8,1},"horizontal-tb",
+                        "非法坐标内容","非法坐标内容",null,true,false,null,"ocr",List.of("bad"),null,null));
+                throw new OcrException("provider transport failed");
+            });
+            assertEquals(2,count.get(),"never send remaining regions after a provider failure");
+            assertTrue(result.warning().startsWith(OcrTextRecovery.PARTIAL));
+            assertTrue(result.blocks().stream().anyMatch(b->"已恢复的可信来源片段".equals(b.original())));
+            assertFalse(result.blocks().stream().anyMatch(b->"非法坐标内容".equals(b.original())));
+            assertEquals(3,result.blocks().stream().filter(b->"ocr-region-unresolved".equals(b.source())).count());
+            BlockValidator.validate(result.blocks());
+        }
+    }
 }

@@ -30,10 +30,21 @@ export function createPageProgress({ api, onPublished }) {
   }
   function update(next) {
     if (!current || !next || next.bookId !== current.id || Number(next.pageNumber) !== current.n) return;
-    // Same-attempt event order matters; a different attempt is compared by its start time.
-    if (snapshot?.attemptId && next.attemptId !== snapshot.attemptId &&
-        Date.parse(next.startedAt) < Date.parse(snapshot.startedAt)) return;
-    if (next.attemptId === lastAttempt && next.snapshotVersion < lastVersion) return;
+    if (snapshot?.attemptId) {
+      if (next.attemptId === snapshot.attemptId) {
+        if (next.snapshotVersion < lastVersion) return;
+        if (['SUCCEEDED','PARTIAL','FAILED','CANCELLED','INTERRUPTED','UNKNOWN'].includes(snapshot.lifecycle)
+            && next.lifecycle !== snapshot.lifecycle) return;
+      } else {
+        const before = Number(snapshot.attemptSeq), after = Number(next.attemptSeq);
+        if (Number.isSafeInteger(before) && before > 0) {
+          if (!Number.isSafeInteger(after) || after <= before) return;
+        } else {
+          const time = Date.parse(next.startedAt), previousTime = Date.parse(snapshot.startedAt);
+          if (!Number.isFinite(time) || (Number.isFinite(previousTime) && time <= previousTime)) return;
+        }
+      }
+    }
     lastAttempt = next.attemptId; lastVersion = next.snapshotVersion;
     snapshot = next; render();
   }

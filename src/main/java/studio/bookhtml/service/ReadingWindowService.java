@@ -151,7 +151,7 @@ public class ReadingWindowService {
                 BookStore.revisionOrZero(page), operationId, false, session.provider, session.assist);
         // Queue an immutable intent; admission (including manual/CAS protection) happens exactly once,
         // only after a capacity slot is available. Never bypass rejection through submitReserved(force).
-        session.retryRequests.put(pageNumber, request);
+        session.retryRequests.putIfAbsent(pageNumber, request);
         session.dispatched.remove(pageNumber);
         session.queued.remove(Integer.valueOf(pageNumber));
         session.queued.addFirst(pageNumber);
@@ -282,7 +282,7 @@ public class ReadingWindowService {
                 if (s.processingPages.size() >= totalCapacity) break;
                 String retryChannel = null;
                 for (String ch : channels) {
-                    if (channelCount(s, ch) < CHANNEL_CONCURRENCY) { retryChannel = ch; break; }
+                    if (ch.equals(s.provider) && channelCount(s, ch) < CHANNEL_CONCURRENCY) { retryChannel = ch; break; }
                 }
                 if (retryChannel == null) break;
                 try {

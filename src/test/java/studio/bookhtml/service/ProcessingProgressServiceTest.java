@@ -49,4 +49,15 @@ class ProcessingProgressServiceTest {
         assertEquals(current, service.latest("b", 599).attemptId());
         assertNull(service.latest("a", 1));
     }
+
+    @Test void successCannotHideUnfinishedFrozenWork() {
+        var service=new ProcessingProgressService();var id=service.begin("book",1,0);
+        service.plan("book",1,id,"TEXT_GROUPS",4);
+        service.unitDone("book",1,id,"first","SUCCEEDED");
+        service.baselinePublished("book",1,id,2,false);
+        service.finish("book",1,id,"SUCCEEDED","DONE",false);
+        var value=service.latest("book",1);
+        assertEquals("PARTIAL",value.lifecycle());assertTrue(value.canRead());assertTrue(value.canRetry());
+        assertEquals("WORK_PLAN_INCOMPLETE",value.messageCode());assertTrue(value.percent()<100);
+    }
 }

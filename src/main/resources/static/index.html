@@ -47,7 +47,7 @@
   <section id="job-panel" class="job-panel" aria-labelledby="job-heading">
     <div class="job-title"><div><h1 id="job-heading">开始转换</h1><p id="book-summary">先导入一本 PDF，原稿会始终保留。</p></div><div class="job-title-actions"><button id="reload-page-header" class="button quiet reload-button" type="button" title="重新识别并排版当前页（二次处理）" hidden>重新处理本页</button><button id="retry-page-header" class="button primary retry-button" type="button" hidden>重新转换本页</button><button id="cancel-job" class="button danger" type="button" hidden>取消任务</button><button id="job-toggle" class="button quiet" type="button" aria-expanded="false">处理设置</button></div></div>
     <form id="job-form" class="job-form" hidden>
-      <label class="field"><span>页码范围</span><input id="page-range" name="pages" value="1-20" placeholder="例如 1-20 或 1,3,25" required><small>默认范围为前 20 页，点击“开始处理”后才会识别；必须主动选择才会处理全书。</small></label>
+      <label class="field"><span>页码范围</span><input id="page-range" name="pages" value="1-20" placeholder="例如 1-20 或 1,3,25" required><small>默认前 20 页，点击后才会识别；全书需主动选择。疑似漏识文字时默认至多补识 4 个同通道区域，可能增加费用，可由服务端关闭。</small></label>
       <label class="check full-book"><input id="all-pages" type="checkbox"><span>处理全部页面</span></label>
       <label id="auto-process-all-label" class="check"><input id="auto-process-all" type="checkbox"><span>随读就绪后自动处理全书其他页<small>开启随读时，即时准备当前阅读窗口后，在后台继续处理本书其余未转换页面（仅限当前书籍）。</small></span></label>
       <fieldset><legend>识别通道</legend><div id="provider-options" class="provider-options"></div><p id="provider-note" class="field-note">正在读取服务端识别配置…</p></fieldset>

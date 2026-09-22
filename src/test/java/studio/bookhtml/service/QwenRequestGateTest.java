@@ -168,4 +168,24 @@ class QwenRequestGateTest {
         }
     }
 
+    @Test void refreshKeepsPhysicalOccupancyAndNegativeBudgetCannotMintCalls() throws Exception {
+        QwenAssistProperties properties = config(3, 2, 24);
+        QwenRequestGate gate = new QwenRequestGate(properties);
+        var first = gate.acquire(true, Duration.ofSeconds(1));
+        var second = gate.acquire(true, Duration.ofSeconds(1));
+        var third = gate.acquire(true, Duration.ofSeconds(1));
+        properties.setMaxConcurrentRequests(1); gate.refresh();
+        assertEquals(3, gate.inFlight());
+        assertNull(gate.acquire(true, Duration.ofMillis(20)));
+        first.close(); second.close();
+        assertNull(gate.acquire(true, Duration.ofMillis(20)));
+        third.close();
+        try (var next = gate.acquire(true, Duration.ofSeconds(1))) { assertNotNull(next); }
+        var budget = gate.newBudget();
+        assertThrows(IllegalArgumentException.class, () -> budget.reserve(-1));
+        assertThrows(IllegalArgumentException.class, () -> budget.release(-1));
+        assertThrows(IllegalStateException.class, () -> budget.release(Integer.MAX_VALUE));
+        assertEquals(8, budget.remaining());
+    }
+
 }
