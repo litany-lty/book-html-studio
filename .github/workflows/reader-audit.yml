@@ -1,0 +1,67 @@
+name: Reader audit verification
+
+on:
+  push:
+    branches: [audit/reader-stream-context-security-20260922]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reader-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare private audit snapshot
+        run: |
+          mkdir -p audit-evidence
+          git rev-parse HEAD > audit-evidence/tested-sha.txt
+          git archive --format=zip --output=audit-evidence/tracked-source.zip HEAD
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reader-audit-source-${{ github.sha }}
+          path: audit-evidence/
+          retention-days: 1
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Offline script checks
+        shell: bash
+        run: |
+          bash -n run.sh
+          for file in src/main/resources/static/*.js src/main/resources/export/*.js scripts/*.mjs; do
+            node --check "$file"
+          done
+          node scripts/verification/probe_display.js
+          node scripts/verification/probe_job_scope.js
+          python3 -m pip install --disable-pip-version-check OpenCC==1.4.2
+          python3 -m py_compile scripts/verification/*.py
+          python3 scripts/verification/shadow_eval.py --selftest
+          python3 -m unittest discover -s scripts/verification -p 'test_*.py'
+      - name: Java regression tests
+        run: mvn --batch-mode verify
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reader-audit-tests-${{ github.sha }}
+          path: |
+            target/surefire-reports/
+            test-results/
+            audit-evidence/tested-sha.txt
+          retention-days: 7
