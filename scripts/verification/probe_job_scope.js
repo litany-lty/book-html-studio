@@ -55,6 +55,7 @@ function fixture() {
   const context = vm.createContext({
     state: { book: { id: 'A', totalPages: 3 }, pollTimer: null },
     activeJobs: new Set(['RUNNING', 'QUEUED']),
+    readingWindow: { active: () => false },
     api: {},
     window: {
       setTimeout(callback) { context.timer = callback; return 1; },

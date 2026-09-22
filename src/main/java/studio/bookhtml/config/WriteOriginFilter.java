@@ -17,6 +17,11 @@ public class WriteOriginFilter implements Filter {
     private static final Set<String> SAFE = Set.of("GET", "HEAD", "OPTIONS");
     @Override public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain) throws IOException, ServletException {
         HttpServletRequest req = (HttpServletRequest) request;
+        if ("/api/config".equals(req.getRequestURI()) || "/api/settings".equals(req.getRequestURI())) {
+            HttpServletResponse res = (HttpServletResponse) response;
+            res.setHeader("Cache-Control", "no-store");
+            res.setHeader("Pragma", "no-cache");
+        }
         if (!SAFE.contains(req.getMethod())) {
             String origin = req.getHeader("Origin");
             if (origin != null && !isLocal(origin)) {

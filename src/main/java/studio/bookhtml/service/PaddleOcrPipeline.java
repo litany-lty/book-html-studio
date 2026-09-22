@@ -9,11 +9,11 @@ import java.util.function.BooleanSupplier;
 
 @Service
 public class PaddleOcrPipeline {
-    private static final List<String> CHANNEL_ORDER = List.of("paddle", "paddle-aistudio", "ppocr");
+    private static final List<String> CHANNEL_ORDER = List.of("paddle-aistudio", "ppocr");
     private final PaddleOcrClient paddle;private final PaddleAiStudioClient aiStudio;private final BaiduPpOcrClient ppocr;private final CloudOcrPipeline encoder;
     public PaddleOcrPipeline(PaddleOcrClient paddle,PaddleAiStudioClient aiStudio,BaiduPpOcrClient ppocr,CloudOcrPipeline encoder){this.paddle=paddle;this.aiStudio=aiStudio;this.ppocr=ppocr;this.encoder=encoder;}
     public List<Block>recognize(BufferedImage full,String layout,boolean splitSpreads,BooleanSupplier cancelled)throws Exception{
-        return recognize(full,layout,splitSpreads,"paddle",cancelled);
+        return recognize(full,layout,splitSpreads,"paddle-aistudio",cancelled);
     }
     public List<Block>recognize(BufferedImage full,String layout,boolean splitSpreads,String provider,BooleanSupplier cancelled)throws Exception{
         if(!isPaddle(provider))throw new OcrException("未知 PaddleOCR 通道");
@@ -30,7 +30,7 @@ public class PaddleOcrPipeline {
             default -> false;
         };
     }
-    /** 降级顺序：固定按 paddle → paddle-aistudio → ppocr，跳过用户已选的主通道。 */
+    /** Only the other publicly configured OCR channel can be an explicit fallback. */
     public static List<String> fallbackOrder(String provider){
         List<String> order = new ArrayList<>(CHANNEL_ORDER);
         order.remove(provider);

@@ -5,7 +5,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import studio.bookhtml.config.AppProperties;
 import studio.bookhtml.config.PpOcrProperties;
+import studio.bookhtml.config.PaddleAiStudioProperties;
+import studio.bookhtml.config.QwenAssistProperties;
+import studio.bookhtml.config.DecisionProperties;
+import studio.bookhtml.config.SettingsService;
 import studio.bookhtml.domain.Block;
+import studio.bookhtml.store.BookStore;
 
 import java.net.http.HttpRequest;
 import java.nio.file.*;
@@ -75,6 +80,48 @@ class BaiduPpOcrClientTest {
         List<Block> blocks = client.recognize(png(), 1000, 800, "auto", () -> false);
         assertEquals(1, blocks.size());
         assertEquals(4, transport.requests.size());
+    }
+
+    @Test void ledgerCountsTokenRetryAndHttp429ButNeverOAuth() throws Exception {
+        String bookId = UUID.randomUUID().toString();
+        AppProperties app = config(temp);
+        BookStore books = new BookStore(app, json.findAndRegisterModules());
+        try {
+            books.createBookDirectory(bookId);
+            SettingsService settings = new SettingsService(app,
+                    new PaddleAiStudioProperties("", null, null, 60, 180, 5),
+                    new QwenAssistProperties(), new DecisionProperties(), json);
+            UsageLedger ledger = new UsageLedger(books, settings, json);
+            ScriptedTransport retry = new ScriptedTransport(List.of(
+                    response(200, "{\"access_token\":\"old\",\"expires_in\":3600}"),
+                    response(200, "{\"error_code\":110}"),
+                    response(200, "{\"access_token\":\"new\",\"expires_in\":3600}"),
+                    response(200, "{\"page_result\":[{\"lines\":[\"甲\"],\"rec_boxes\":[[10,20,100,60]]}]}")));
+            BaiduPpOcrClient client = new BaiduPpOcrClient(app, ppocr(), json, new BaiduPpOcrParser(), retry);
+            client.setUsageLedger(ledger);
+            try (UsageContext.Scope ignored = UsageContext.open(bookId, 1, "OCR_PAGE")) {
+                assertEquals(1, client.recognize(png(), 1000, 800, "auto", () -> false).size());
+            }
+            assertEquals(4, retry.requests.size());
+            Map<?, ?> totals = (Map<?, ?>) ledger.view(bookId, 0, 50).get("totals");
+            assertEquals(2L, totals.get("requests"));
+            assertEquals(1L, totals.get("failed"));
+            assertEquals(1L, totals.get("success"));
+
+            ScriptedTransport limited = new ScriptedTransport(List.of(
+                    response(200, "{\"access_token\":\"t\",\"expires_in\":3600}"),
+                    response(429, "throttled")));
+            BaiduPpOcrClient other = new BaiduPpOcrClient(app, ppocr(), json, new BaiduPpOcrParser(), limited);
+            other.setUsageLedger(ledger);
+            try (UsageContext.Scope ignored = UsageContext.open(bookId, 2, "OCR_PAGE")) {
+                assertThrows(QuotaExceededException.class,
+                        () -> other.recognize(new byte[]{1, 2, 3, 4}, 1000, 800, "auto", () -> false));
+            }
+            assertEquals(2, limited.requests.size());
+            totals = (Map<?, ?>) ledger.view(bookId, 0, 50).get("totals");
+            assertEquals(3L, totals.get("requests"));
+            assertEquals(2L, totals.get("failed"));
+        } finally { books.close(); }
     }
 
     private AppProperties config(Path data) {

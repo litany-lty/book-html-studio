@@ -20,6 +20,7 @@ import java.security.MessageDigest;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 
 @Repository
@@ -78,6 +79,16 @@ public class BookStore {
 
     public void writeBook(Book book) throws IOException { synchronized (dirLock) { checkInjected("book"); atomic(bookDir(book.id()).resolve("book.json"), book); } }
     public Book readBook(String id) { return read(bookDir(id).resolve("book.json"), Book.class, "未找到该书籍"); }
+    /** Read-modify-write under the directory lease lock, so page-stat touches cannot undo a library edit. */
+    public Book updateBook(String id, UnaryOperator<Book> change) throws IOException {
+        synchronized (dirLock) {
+            Path path = bookDir(id).resolve("book.json");
+            Book updated = change.apply(read(path, Book.class, "未找到该书籍"));
+            checkInjected("book");
+            atomic(path, updated);
+            return updated;
+        }
+    }
     public List<Book> listBooks() {
         if (!Files.isDirectory(booksRoot)) return List.of();
         try (Stream<Path> paths = Files.list(booksRoot)) {
@@ -156,12 +167,26 @@ public class BookStore {
     private Job requireCurrentJob(String id, int currentRev, String expectedJobId, int pageNumber) {
         if (expectedJobId == null) throw new ApiException(HttpStatus.BAD_REQUEST, "任务提交缺少任务标识");
         Job job = readJob(id);
-        if (job == null || !expectedJobId.equals(job.id()))
+        if (job == null)
+            throw new PageConflictException(currentRev, "任务已被取代，本页不再写入");
+        if (expectedJobId.startsWith("reading:") && job.id() != null && job.id().startsWith("reading:")) {
+            String[] expParts = expectedJobId.split(":");
+            String[] actParts = job.id().split(":");
+            if (expParts.length > 1 && actParts.length > 1 && !expParts[1].equals(actParts[1]))
+                throw new PageConflictException(currentRev, "任务已被取代，本页不再写入");
+            return job;
+        }
+        if (!expectedJobId.equals(job.id()))
             throw new PageConflictException(currentRev, "任务已被取代，本页不再写入");
         return job;
     }
 
     private static void requirePageInJob(Job job, Page current, int currentRev) {
+        if (job.id() != null && job.id().startsWith("reading:")) {
+            if (job.pages() != null && !job.pages().isEmpty() && !job.pages().contains(current.pageNumber()))
+                throw new PageConflictException(currentRev, "本页不属于当前任务，不再写入");
+            return;
+        }
         if (job.pages() == null || !job.pages().contains(current.pageNumber()))
             throw new PageConflictException(currentRev, "本页不属于当前任务，不再写入");
     }

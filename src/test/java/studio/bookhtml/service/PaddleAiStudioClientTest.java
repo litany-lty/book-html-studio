@@ -5,7 +5,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import studio.bookhtml.config.AppProperties;
 import studio.bookhtml.config.PaddleAiStudioProperties;
+import studio.bookhtml.config.QwenAssistProperties;
+import studio.bookhtml.config.DecisionProperties;
+import studio.bookhtml.config.SettingsService;
 import studio.bookhtml.domain.Block;
+import studio.bookhtml.store.BookStore;
 
 import java.net.URI;
 import java.net.http.HttpRequest;
@@ -17,6 +21,8 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Flow;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -83,15 +89,108 @@ class PaddleAiStudioClientTest {
         ScriptedTransport resumedTransport=new ScriptedTransport(List.of(
                 response(200,"{\"code\":0,\"data\":{\"state\":\"done\",\"resultUrl\":{\"jsonUrl\":\"https://bucket.bcebos.com/result.jsonl\"}}}"),
                 response(200,jsonLine())));
-        List<Block> blocks=client(properties("token-two",5,5,1),resumedTransport,(seconds,cancelled)->{})
+        List<Block> blocks=client(properties("token-one",5,5,1),resumedTransport,(seconds,cancelled)->{})
                 .recognize(png(),1000,800,"auto",()->false);
 
         assertEquals(2,blocks.size());
         assertEquals(2,resumedTransport.requests.size());
         assertTrue(resumedTransport.requests.stream().noneMatch(request->"POST".equals(request.method())),
                 "已有jobId恢复时不得再次提交计费任务");
-        assertEquals("Bearer token-two",resumedTransport.requests.get(0).headers().firstValue("Authorization").orElseThrow());
+        assertEquals("Bearer token-one",resumedTransport.requests.get(0).headers().firstValue("Authorization").orElseThrow());
         assertTrue(resumedTransport.requests.get(1).headers().firstValue("Authorization").isEmpty());
+    }
+
+    @Test
+    void ledgerCountsOneSubmissionAcrossPollResumeAndCacheAndKeepsCompletedParseCost() throws Exception {
+        String bookId = UUID.randomUUID().toString();
+        AppProperties app = TestConfigs.config(temp, "", "");
+        ObjectMapper mapper = json.findAndRegisterModules();
+        BookStore books = new BookStore(app, mapper);
+        try {
+            books.createBookDirectory(bookId);
+            SettingsService settings = new SettingsService(app, properties("", 5, 5, 1),
+                    new QwenAssistProperties(), new DecisionProperties(), mapper);
+            settings.update(mapper.readTree("""
+                {"revision":0,"billing":{"rates":[
+                  {"provider":"paddle-aistudio","model":"PaddleOCR-VL-1.6","currency":"CNY","perRequest":"0.2","inputPerMillion":"","outputPerMillion":""},
+                  {"provider":"ppocr","model":"PP-OCRv6","currency":"CNY","perRequest":"","inputPerMillion":"","outputPerMillion":""},
+                  {"provider":"qwen","model":"qwen3.8-max","currency":"CNY","perRequest":"","inputPerMillion":"","outputPerMillion":""},
+                  {"provider":"jev","model":"","currency":"USD","perRequest":"","inputPerMillion":"","outputPerMillion":""}
+                ]}}
+                """));
+            UsageLedger ledger = new UsageLedger(books, settings, mapper);
+            AtomicInteger waits = new AtomicInteger();
+            ScriptedTransport initialTransport = new ScriptedTransport(List.of(
+                    response(200, "{\"code\":0,\"data\":{\"jobId\":\"job-ledger\"}}"),
+                    response(200, "{\"code\":0,\"data\":{\"state\":\"running\"}}")));
+            PaddleAiStudioClient initial = client(properties("account-one", 5, 5, 1), initialTransport,
+                    (seconds, cancelled) -> { if (waits.incrementAndGet() > 1) throw new CancelledException(); });
+            initial.setUsageLedger(ledger);
+            try (UsageContext.Scope ignored = UsageContext.open(bookId, 1, "OCR_PAGE")) {
+                assertThrows(CancelledException.class, () -> initial.recognize(png(), 1000, 800, "auto", () -> false));
+            }
+            assertEquals(2, initialTransport.requests.size());
+            Map<?, ?> totals = (Map<?, ?>) ledger.view(bookId, 0, 50).get("totals");
+            assertEquals(1L, totals.get("requests"));
+            assertEquals(1L, totals.get("pending"));
+
+            ScriptedTransport resumedTransport = new ScriptedTransport(List.of(
+                    response(200, "{\"code\":0,\"data\":{\"state\":\"done\",\"resultUrl\":{\"jsonUrl\":\"https://bucket.bcebos.com/result.jsonl\"}}}"),
+                    response(200, jsonLine())));
+            PaddleAiStudioClient resumed = client(properties("account-one", 5, 5, 1), resumedTransport,
+                    (seconds, cancelled) -> {});
+            resumed.setUsageLedger(ledger);
+            try (UsageContext.Scope ignored = UsageContext.open(bookId, 1, "OCR_PAGE")) {
+                assertEquals(2, resumed.recognize(png(), 1000, 800, "auto", () -> false).size());
+            }
+            assertEquals(2, resumedTransport.requests.size());
+            assertTrue(resumedTransport.requests.stream().noneMatch(r -> "POST".equals(r.method())));
+            totals = (Map<?, ?>) ledger.view(bookId, 0, 50).get("totals");
+            assertEquals(1L, totals.get("requests"));
+            assertEquals(1L, totals.get("success"));
+
+            ScriptedTransport cachedTransport = new ScriptedTransport(List.of());
+            PaddleAiStudioClient cached = client(properties("account-two", 5, 5, 1), cachedTransport,
+                    (seconds, cancelled) -> {});
+            cached.setUsageLedger(ledger);
+            try (UsageContext.Scope ignored = UsageContext.open(bookId, 1, "OCR_PAGE")) {
+                assertEquals(2, cached.recognize(png(), 1000, 800, "auto", () -> false).size());
+            }
+            assertTrue(cachedTransport.requests.isEmpty());
+
+            ScriptedTransport badResult = new ScriptedTransport(List.of(
+                    response(200, "{\"code\":0,\"data\":{\"jobId\":\"job-bad-result\"}}"),
+                    response(200, "{\"code\":0,\"data\":{\"state\":\"done\",\"resultUrl\":{\"jsonUrl\":\"https://bucket.bcebos.com/bad.jsonl\"}}}"),
+                    response(200, "not-jsonl")));
+            PaddleAiStudioClient failedParser = client(properties("account-one", 5, 5, 1), badResult,
+                    (seconds, cancelled) -> {});
+            failedParser.setUsageLedger(ledger);
+            try (UsageContext.Scope ignored = UsageContext.open(bookId, 2, "OCR_PAGE")) {
+                assertThrows(OcrException.class,
+                        () -> failedParser.recognize(new byte[]{1, 2, 3, 4}, 1000, 800, "auto", () -> false));
+            }
+            totals = (Map<?, ?>) ledger.view(bookId, 0, 50).get("totals");
+            assertEquals(2L, totals.get("requests"));
+            assertEquals(2L, totals.get("success")); // remote done, even if local JSONL is unusable
+            assertEquals(1L, totals.get("cacheHits"));
+            assertEquals(List.of(Map.of("currency", "CNY", "amount", "0.4")), totals.get("estimatedAmounts"));
+        } finally { books.close(); }
+    }
+
+    @Test
+    void unfinishedTaskCannotResumeWithDifferentAccount() throws Exception {
+        ScriptedTransport initialTransport=new ScriptedTransport(List.of(
+                response(200,"{\"code\":0,\"data\":{\"jobId\":\"job-old-account\"}}"),
+                response(200,"{\"code\":0,\"data\":{\"state\":\"running\"}}")));
+        PaddleAiStudioClient initial=client(properties("account-one",5,5,1),initialTransport,(seconds,cancelled)->{
+            throw new CancelledException();
+        });
+        assertThrows(CancelledException.class,()->initial.recognize(png(),1000,800,"auto",()->false));
+        ScriptedTransport changed=new ScriptedTransport(List.of());
+        OcrException error=assertThrows(OcrException.class,()->client(properties("account-two",5,5,1),changed,(s,c)->{})
+                .recognize(png(),1000,800,"auto",()->false));
+        assertTrue(error.getMessage().contains("另一凭据"));
+        assertTrue(changed.requests.isEmpty());
     }
 
     @Test

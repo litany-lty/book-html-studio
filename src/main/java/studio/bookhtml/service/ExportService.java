@@ -164,6 +164,9 @@ public class ExportService {
     public void writeZip(String bookId, OutputStream output, String pageRange) throws IOException {
         Book book = books.get(bookId);
         Path sourcePdf = store.pdf(bookId);
+        String fontManifest = new ClassPathResource("static/fonts/manifest.json").getContentAsString(StandardCharsets.UTF_8);
+        com.fasterxml.jackson.databind.JsonNode fontAssets = json.readTree(fontManifest).path("assets");
+        if (!fontAssets.isArray()) throw new IOException("阅读字体清单无效");
         List<Integer> selected = PageRanges.parse(pageRange == null ? "all" : pageRange, book.totalPages());
         // 阶段2：先写临时文件，失败不向客户端发送残缺 ZIP；同时做磁盘空间预检
         // R05：导出暂存使用自有子目录，不与渲染清理器共享
@@ -173,6 +176,7 @@ public class ExportService {
         Files.createDirectories(tmpDir);
         long need = 10L * 1024 * 1024;
         try { need += Files.size(sourcePdf); } catch (IOException ignored) { }
+        for (com.fasterxml.jackson.databind.JsonNode asset : fontAssets) need += Math.max(0, asset.path("bytes").asLong());
         long usable;
         try { usable = Files.getFileStore(tmpDir).getUsableSpace(); }
         catch (IOException e) { usable = Long.MAX_VALUE; }
@@ -191,6 +195,7 @@ public class ExportService {
                 put(zip, "assets/issue-review.js", new ClassPathResource("export/issue-review.js").getContentAsString(StandardCharsets.UTF_8));
                 put(zip, "assets/offline-edit-store.js", new ClassPathResource("export/offline-edit-store.js").getContentAsString(StandardCharsets.UTF_8));
                 put(zip, "assets/issue-review.css", new ClassPathResource("export/issue-review.css").getContentAsString(StandardCharsets.UTF_8));
+                copyReaderFonts(zip, fontManifest, fontAssets);
                 copy(zip, "source.pdf", sourcePdf);
                 // 阶段4：逐页流式导出——同一时刻只保留一页 Page+一位图，内存有界；失败不发残缺 ZIP
                 writePagedPayload(zip, bookId, book, sourcePdf, selected);
@@ -600,6 +605,25 @@ public class ExportService {
         zip.closeEntry();
     }
 
+    private void copyReaderFonts(ZipOutputStream zip, String manifestText,
+                                 com.fasterxml.jackson.databind.JsonNode assets) throws IOException {
+        put(zip, "assets/fonts/manifest.json", manifestText);
+        put(zip, "assets/fonts/reader-fonts.css", new ClassPathResource("static/fonts/reader-fonts.css").getContentAsString(StandardCharsets.UTF_8));
+        put(zip, "assets/reader-fonts.js", new ClassPathResource("static/reader-fonts.js").getContentAsString(StandardCharsets.UTF_8));
+        Set<String> names = new java.util.HashSet<>();
+        for (com.fasterxml.jackson.databind.JsonNode asset : assets) {
+            String file = asset.path("file").asText("");
+            if (!file.matches("[A-Za-z0-9][A-Za-z0-9._-]*") || !names.add(file)
+                    || "manifest.json".equals(file) || "reader-fonts.css".equals(file)) {
+                throw new IOException("阅读字体清单包含无效文件名");
+            }
+            ClassPathResource resource = new ClassPathResource("static/fonts/" + file);
+            zip.putNextEntry(entry("assets/fonts/" + file));
+            try (InputStream input = resource.getInputStream()) { input.transferTo(zip); }
+            zip.closeEntry();
+        }
+    }
+
     private static ZipEntry entry(String name) {
         ZipEntry entry = new ZipEntry(name);
         entry.setTime(0);
@@ -628,6 +652,7 @@ public class ExportService {
               <title>%s</title>
               <link rel="stylesheet" href="assets/style.css">
               <link rel="stylesheet" href="assets/issue-review.css">
+              <link rel="stylesheet" href="assets/fonts/reader-fonts.css">
             </head>
             <body>
               <a class="skip-link" href="#paper">跳到正文</a>
@@ -637,11 +662,17 @@ public class ExportService {
                 <div class="toolbar" aria-label="阅读工具">
                   <div class="view-switch" role="group" aria-label="显示方式"><button class="view-button active" data-view="original" type="button">原稿</button><button class="view-button" data-view="facsimile" type="button">原貌 HTML</button><button class="view-button" data-view="reading" type="button">舒适阅读</button></div>
                   <button class="button" data-focus type="button" aria-pressed="false">专注阅读</button>
+                  <button class="button reading-options-open" data-reading-options-open type="button" aria-haspopup="dialog" aria-controls="reading-options">阅读设置</button>
+                  <div class="reading-controls" data-reading-controls>
                   <button class="button" data-script type="button">显示：简体</button>
+                  <label>字体 <select data-reader-font aria-describedby="reader-font-note"></select></label>
                   <label>字号 <input data-size type="range" min="15" max="30" value="20"><output data-size-output>20</output></label>
                   <label>行距 <input data-leading type="range" min="1.4" max="2.2" step="0.1" value="1.8"><output data-leading-output>1.8</output></label>
+                  <span id="reader-font-note" class="reader-font-note" aria-live="polite"></span>
+                  </div>
                 </div>
               </header>
+              <dialog id="reading-options" class="reading-options-dialog" aria-labelledby="reading-options-title"><div class="reading-options-head"><h2 id="reading-options-title">阅读设置</h2><button class="button" data-reading-options-close type="button">关闭</button></div><p>只改变舒适阅读正文；原稿图与坐标原貌不受影响。</p><div data-reading-options-controls></div></dialog>
               <aside class="sidebar" data-sidebar aria-label="目录和搜索">
                 <div class="sidebar-head"><strong>目录</strong><button class="close-drawer" data-close-drawer type="button" aria-label="关闭目录">×</button></div>
                 <form class="search" data-search-form><label for="book-search">搜索繁体与简体</label><div><input id="book-search" data-search type="search"><button class="button" type="submit">搜索</button></div></form>
@@ -656,7 +687,7 @@ public class ExportService {
                 <article id="paper" class="paper" data-paper tabindex="-1"></article>
                 <nav class="pagination" aria-label="翻页"><button class="button" data-prev type="button">上一页</button><div class="page-progress"><input data-progress type="range" min="1" step="1" value="1" aria-label="阅读进度"><output data-progress-label></output></div><form data-jump-form><label for="page-jump">第</label><input id="page-jump" data-jump type="number" min="1"><span data-total></span></form><button class="button" data-next type="button">下一页</button></nav>
               </main>
-              <script src="assets/book.js"></script><script src="assets/decisions.js"></script><script src="assets/reading-layout.js"></script><script src="assets/offline-edit-store.js"></script><script src="assets/issue-review.js"></script><script src="assets/reader-navigation.js"></script><script src="assets/app.js"></script>
+              <script src="assets/book.js"></script><script src="assets/decisions.js"></script><script src="assets/reading-layout.js"></script><script src="assets/offline-edit-store.js"></script><script src="assets/issue-review.js"></script><script src="assets/reader-navigation.js"></script><script src="assets/reader-fonts.js"></script><script src="assets/app.js"></script>
             </body>
             </html>
             """.formatted(escape(book.title()), escape(book.title()));
@@ -672,6 +703,10 @@ public class ExportService {
             @media(max-width:900px){.topbar{flex-wrap:wrap;gap:8px}.drawer-button{display:inline-flex}.identity{min-width:0;flex:1}.toolbar{flex-basis:100%;justify-content:flex-start;overflow-x:auto}.toolbar>*{flex:0 0 auto;white-space:nowrap}.view-switch{flex:0 0 auto}.view-button{flex:0 0 auto;white-space:nowrap}.toolbar label{flex:none}.sidebar{z-index:20;top:0;width:min(88vw,360px);transform:translateX(-105%);transition:transform .16s ease-out;box-shadow:0 0 30px rgb(24 38 50/.18)}.sidebar.open{transform:translateX(0)}.close-drawer{display:block;border:0;background:transparent;font-size:26px}main{margin-left:0;padding:10px}.page-meta{align-items:flex-start}.page-meta>div:last-child{flex-direction:column;align-items:flex-end}.paper{width:100%}}
             @media(max-width:560px){.identity span{display:none}.toolbar{gap:4px}.view-button,.button{padding-inline:7px;font-size:12px}.toolbar>[data-script]{margin-left:auto}.page-meta [data-quality]{display:none}.reading-flow{padding:34px 23px}.placeholder{padding:24px}.source-link{font-size:11px}.pagination{gap:7px;flex-wrap:wrap}.page-progress{order:-1;flex-basis:100%}.page-progress output{min-width:126px;font-size:11px}}
             .filtered-ads{margin-top:2.5em;border-top:1px solid var(--line);padding-top:.7em;color:var(--muted);font:12px/1.6 var(--sans)}.filtered-ads summary{width:fit-content;cursor:pointer;color:var(--blue)}.filtered-ads-note{margin:.7em 0!important;text-align:left!important}.filtered-ads ol{max-height:260px;overflow:auto;margin:.5em 0 0;padding-left:1.6em}.filtered-ads li{border-bottom:1px solid var(--line);padding:.5em 0}.filtered-ads li p{margin:0 0 .4em;white-space:pre-wrap;text-align:left;font:15px/1.6 var(--serif)}.filtered-ads .button{min-height:32px;padding:4px 8px;font-size:12px}.ad-source-highlight{position:absolute;border:2px dashed #a56912;background:rgb(165 105 18/.12);pointer-events:none}
+            .reading-controls{display:flex;align-items:center;gap:9px}.reading-controls select{max-width:120px;border:1px solid var(--line);background:#fff;padding:5px}.reading-controls .reader-font-note{max-width:145px;margin:0;font-size:10px;line-height:1.35}.reading-options-open,.reading-options-dialog{display:none}.reading-options-dialog::backdrop{background:rgb(24 38 50/.5)}.reading-options-head{display:flex;align-items:center;justify-content:space-between;gap:10px}.reading-options-head h2{margin:0;font-size:18px}
+            @media(max-width:560px){.toolbar{overflow:visible}.toolbar .reading-controls{display:none}.reading-options-open{display:inline-flex;align-items:center;min-height:44px}.reading-options-dialog{display:block;width:100vw;max-width:none;max-height:80dvh;overflow:auto;margin:auto 0 0;border:1px solid var(--line);border-radius:10px 10px 0 0;background:#fff;padding:18px 18px calc(18px + env(safe-area-inset-bottom))}.reading-options-dialog .reading-controls{display:grid;gap:10px}.reading-options-dialog .reading-controls>button,.reading-options-dialog .reading-controls>label{min-height:44px;justify-content:flex-start}.reading-options-dialog .reading-controls select{min-height:44px;max-width:220px}.reading-options-dialog .reading-controls .reader-font-note{max-width:100%;font-size:12px}.view-button{min-height:44px}}
+            .toolbar>.button{white-space:nowrap}.reading-options-open{display:inline-flex;align-items:center}.reading-options-dialog{width:min(430px,calc(100vw - 30px));max-width:none;max-height:min(80dvh,600px);overflow:auto;border:1px solid var(--line);border-radius:8px;background:#fff;padding:20px;box-shadow:0 24px 80px rgb(20 34 45/.28)}.reading-options-dialog[open]{display:block}.reading-options-dialog:not([open]){display:none}.reading-options-dialog .reading-controls{display:grid;gap:12px;margin-top:14px}.reading-options-dialog .reading-controls>button,.reading-options-dialog .reading-controls>label{min-height:44px;justify-content:flex-start}.reading-options-dialog .reading-controls select{min-height:44px;max-width:220px}.reading-options-dialog .reading-controls .reader-font-note{max-width:100%;font-size:12px}
+            @media(max-width:560px){.toolbar{flex-wrap:wrap}.toolbar .view-switch{flex:1 1 100%}.toolbar .view-button{flex:1}.toolbar>.button{min-height:44px}.reading-options-dialog{display:block;width:100vw;max-height:80dvh;margin:auto 0 0;border-radius:10px 10px 0 0;padding:18px 18px calc(18px + env(safe-area-inset-bottom))}}
             @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition-duration:.01ms!important}}
             """;
     }
@@ -734,6 +769,13 @@ public class ExportService {
               function renderBookmarkButton(){const a=bookmarks.includes(state.page);$('[data-bookmark]').textContent=a?'已加入书签':'加入书签';$('[data-bookmark]').setAttribute('aria-pressed',String(a))}function renderBookmarks(){const box=$('[data-bookmarks]');box.replaceChildren();if(!bookmarks.length){box.append(node('p','empty-note','还没有书签。'));return}for(const p of [...bookmarks].sort((a,b)=>a-b)){const button=node('button','bookmark-entry',`第 ${p} 页`);button.type='button';button.addEventListener('click',()=>go(p));box.append(button)}}
               function search(query){const q=query.trim().toLocaleLowerCase(),results=$('[data-search-results]');results.replaceChildren();if(!q){$('[data-search-status]').textContent='';return}const hits=[];if(pagedMode&&searchIndex.length){for(const entry of searchIndex){const text=String(entry.text||'');if(text.toLocaleLowerCase().includes(q))hits.push({page:entry.page,text});if(hits.length>=500)break;}}else{for(const p of pages){const full=pageCache.get(p.pageNumber)||(globalThis.__BOOK_PAGES__||{})[p.pageNumber]||p;for(const b of full.blocks||[]){if(b.type==='advertisement')continue;const original=String(b.original||''),simple=String(b.simplified||'');if(original.toLocaleLowerCase().includes(q)||simple.toLocaleLowerCase().includes(q))hits.push({page:full.pageNumber,text:simple||original});if(hits.length>=500)break}if(hits.length>=500)break}}$('[data-search-status]').textContent=hits.length?`${hits.length} 处命中${hits.length===500?'（最多显示 500 处）':''}`:'没有找到';for(const hit of hits){const li=node('li'),button=node('button','search-result');button.type='button';button.append(node('strong','',`第 ${hit.page} 页`),node('span','',hit.text));button.addEventListener('click',()=>go(hit.page));li.append(button);results.append(li)}}
               function openDrawer(){$('[data-sidebar]').classList.add('open');$('[data-scrim]').hidden=false;$('[data-drawer]').setAttribute('aria-expanded','true')}function closeDrawer(){$('[data-sidebar]').classList.remove('open');$('[data-scrim]').hidden=true;$('[data-drawer]').setAttribute('aria-expanded','false')}
+              globalThis.BookReaderFonts?.init?.('select[data-reader-font]',{noteElement:'#reader-font-note'});
+              const readingOptions=$('#reading-options');
+              $('[data-reading-options-controls]').append($('[data-reading-controls]'));
+              $('[data-reading-options-open]').addEventListener('click',()=>readingOptions.showModal());
+              $('[data-reading-options-close]').addEventListener('click',()=>readingOptions.close());
+              readingOptions.addEventListener('close',()=>$('[data-reading-options-open]').focus({preventScroll:true}));
+              $('[data-focus]').addEventListener('click',()=>{if(readingOptions.open)readingOptions.close()});
               $('[data-book-title]').textContent=book.title;document.title=book.title;$('[data-stats]').textContent=`${book.partial?'节选 ':''}${book.totalPages} 页${book.partial?`（原书 ${book.sourceTotalPages} 页）`:''} · 已处理 ${book.processedPages} 页 · 已校对 ${book.reviewedPages} 页${payload.searchIndexComplete===false?` · 搜索索引不完整（仅 ${payload.searchIndexCount}/${payload.searchIndexTotal} 条），请以分页正文核对`:''}`;$$('[data-view]').forEach(b=>b.addEventListener('click',()=>{state.view=b.dataset.view;renderPage({keepScroll:true})}));$('[data-focus]').addEventListener('click',()=>{state.focus=!state.focus;closeDrawer();renderPage({keepScroll:true})});$('[data-script]').addEventListener('click',()=>{state.script=state.script==='simplified'?'original':'simplified';renderPage({keepScroll:true})});$('[data-size]').addEventListener('input',e=>{state.size=Number(e.target.value);renderPage({keepScroll:true})});$('[data-leading]').addEventListener('input',e=>{state.leading=Number(e.target.value);renderPage({keepScroll:true})});$('[data-prev]').addEventListener('click',()=>go(state.page-1));$('[data-next]').addEventListener('click',()=>go(state.page+1));$('[data-jump-form]').addEventListener('submit',e=>{e.preventDefault();go($('[data-jump]').value)});$('[data-jump]').addEventListener('change',e=>go(e.target.value));$('[data-progress]').addEventListener('input',e=>{const value=navigation.progress(e.target.value,Math.max(1,pages.length)),label=progressText(value);e.target.setAttribute('aria-valuetext',label);$('[data-progress-label]').value=label});$('[data-progress]').addEventListener('change',e=>go(e.target.value));$('[data-bookmark]').addEventListener('click',()=>{bookmarks=bookmarks.includes(state.page)?bookmarks.filter(p=>p!==state.page):[...bookmarks,state.page];writeStorage('bookmarks',bookmarks);renderBookmarkButton();renderBookmarks()});$('[data-search-form]').addEventListener('submit',e=>{e.preventDefault();search($('[data-search]').value)});$('[data-drawer]').addEventListener('click',openDrawer);$('[data-close-drawer]').addEventListener('click',closeDrawer);$('[data-scrim]').addEventListener('click',closeDrawer);window.addEventListener('scroll',savePosition,{passive:true});window.addEventListener('beforeunload',savePosition);document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer();if(!e.target.matches('input')&&e.key==='ArrowLeft')go(state.page-1);if(!e.target.matches('input')&&e.key==='ArrowRight')go(state.page+1)});renderBookmarks();renderPage({keepScroll:true});requestAnimationFrame(()=>window.scrollTo(0,Number(preferences.scrollY||0)));
             })();
             """;

@@ -2,6 +2,7 @@ package studio.bookhtml.service;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import studio.bookhtml.config.SettingsService;
 import studio.bookhtml.domain.Block;
 import studio.bookhtml.domain.Page;
 import studio.bookhtml.store.BookStore;
@@ -61,17 +62,22 @@ class PaddleFallbackTest {
         PdfService pdf = mock(PdfService.class);
         NativeTextExtractor nativeText = mock(NativeTextExtractor.class);
         PaddleOcrPipeline paddle = mock(PaddleOcrPipeline.class);
-        when(paddle.configured("paddle")).thenReturn(true);
-        when(paddle.configured("paddle-aistudio")).thenReturn(false);
+        when(paddle.configured("paddle-aistudio")).thenReturn(true);
         when(paddle.configured("ppocr")).thenReturn(true);
         BufferedImage image = inky(600, 800);
-        when(paddle.recognize(eq(image), eq("auto"), eq(false), eq("paddle"), any()))
+        when(paddle.recognize(eq(image), eq("auto"), eq(false), eq("paddle-aistudio"), any()))
                 .thenThrow(new QuotaExceededException("PaddleOCR-VL 额度不足"));
         when(paddle.recognize(eq(image), eq("auto"), eq(false), eq("ppocr"), any()))
                 .thenReturn(List.of(textBlock("ppocr-line-1", "ppocr")));
         stubPage(store, pdf, nativeText, image);
         try {
-            Page page = processor(store, pdf, nativeText, paddle).process("book", 1, "paddle", "auto", false, false, () -> false).page();
+            PageProcessor processor = processor(store, pdf, nativeText, paddle);
+            SettingsService settings = mock(SettingsService.class);
+            SettingsService.State state = mock(SettingsService.State.class);
+            when(settings.state()).thenReturn(state);
+            when(state.fallbackEnabled()).thenReturn(true);
+            processor.setSettings(settings);
+            Page page = processor.process("book", 1, "paddle-aistudio", "auto", false, false, () -> false).page();
             assertEquals("READY", page.status());
             assertEquals("ppocr", page.provider());
             assertTrue(page.blocks().stream().anyMatch(b -> b.id().equals("ppocr-line-1")));

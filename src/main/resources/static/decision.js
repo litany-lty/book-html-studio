@@ -26,6 +26,7 @@ export const REASON_LABELS = {
 };
 
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED', 'INTERRUPTED']);
+const INTERACTIVE_MODES = new Set(['SHADOW', 'ASSIST']);
 
 const STAGE_LABELS = {
   LOCATING: '定位原图中',
@@ -90,11 +91,12 @@ export function createDecisionPanel(deps) {
 
   /** 草稿门禁轻量同步：只切换需干净态按钮的禁用与提示，不重绘面板（保轮询与焦点）。 */
   function syncDraftGuard(dirty) {
-    const titles = { compare: '零新增视觉调用', vision: '将使用实际能力及预算条件（默认最多一次）', accept: '' };
+    const titles = { compare: '仅比较已有候选，不补做视觉识别', accept: '' };
     document.querySelectorAll('[data-decision-panel] [data-needs-clean]').forEach(button => {
       const action = button.dataset.action;
-      if (action !== 'compare' && action !== 'vision' && action !== 'accept') return;
-      button.disabled = Boolean(dirty) || (action === 'accept' && acceptInFlight);
+      if (action !== 'compare' && action !== 'accept') return;
+      button.disabled = Boolean(dirty) || !INTERACTIVE_MODES.has(current?.mode)
+        || (action === 'accept' && (acceptInFlight || button.dataset.canAdmit !== 'true'));
       button.title = dirty ? '有未保存草稿，请先保存' : (titles[action] || '');
     });
   }
@@ -117,11 +119,12 @@ export function createDecisionPanel(deps) {
     const data = await api.decisions(scope.bookId, scope.page, scope.issueId, fetchController.signal);
     if (!sameScope(scope)) throw Object.assign(new Error('已切换疑点或页面'), { name: 'StaleRequest' });
     return { basis: data.basis, current: data.current, history: data.history || [],
-      decisionMode: data.decisionMode || null };
+      decisionMode: data.decisionMode || null, configuredModel: data.configuredModel || null };
   }
 
-  async function createJob(allowFreshVision) {
+  async function createJob() {
     if (!current) return;
+    if (!INTERACTIVE_MODES.has(current.mode)) return;
     if (hasDirty()) {
       showError(new Error('有未保存草稿，请先保存后再评估；评估只针对已保存内容。'));
       return;
@@ -137,7 +140,7 @@ export function createDecisionPanel(deps) {
         blockId: scope.blockId,
         expectedPageRevision: scope.revision,
         issueBasisHash: scope.basis,
-        allowFreshVision,
+        allowFreshVision: false,
       }, signal);
       if (!sameScope(scope)) return;
       pollJob(job.jobId, scope);
@@ -248,7 +251,16 @@ export function createDecisionPanel(deps) {
 
   function renderStatus(text) {
     const status = document.querySelector('[data-decision-status]');
-    if (status) { status.hidden = false; status.textContent = text; }
+    if (status) {
+      status.hidden = false;
+      status.classList.add('decision-pending');
+      status.setAttribute('role', 'status');
+      status.setAttribute('aria-live', 'polite');
+      status.textContent = text;
+      const skeleton = el('span', 'decision-loading-lines');
+      skeleton.setAttribute('aria-hidden', 'true');
+      status.append(skeleton);
+    }
     const error = document.querySelector('[data-decision-error]');
     if (error) error.hidden = true;
   }
@@ -257,7 +269,7 @@ export function createDecisionPanel(deps) {
     const node = document.querySelector('[data-decision-error]');
     if (node) { node.hidden = false; node.textContent = error?.message || '请求失败'; }
     const status = document.querySelector('[data-decision-status]');
-    if (status) status.hidden = true;
+    if (status) { status.hidden = true; status.classList.remove('decision-pending'); status.replaceChildren(); }
   }
 
   function candidateLabel(candidate) {
@@ -271,17 +283,18 @@ export function createDecisionPanel(deps) {
     if (!host || !current) return;
     const scope = { ...current };
     try {
-      const { basis, current: decision, history, decisionMode } = await loadBasis(scope);
+      const { basis, current: decision, history, decisionMode, configuredModel } = await loadBasis(scope);
       if (!sameScope(scope)) return;
       current.basis = basis.issueBasisHash;
       current.revision = basis.pageRevision;
       current.candidateSetHash = decision?.candidateSetHash || null;
-      renderPanel(host, { basis, decision, history, decisionMode }, scope);
+      current.mode = decisionMode || null;
+      renderPanel(host, { basis, decision, history, decisionMode, configuredModel }, scope);
       // JR-08-T06：仅正式推荐（admittedRecommendationId + RECOMMEND/KEEP_CURRENT）才触发推荐；
       // 模型偏好（modelPreferred）绝不当正式推荐。
       const admittedId = decision?.admittedRecommendationId || null;
       const verdict = decision?.verdict || null;
-      if (admittedId && (verdict === 'RECOMMEND' || verdict === 'KEEP_CURRENT') && decision?.candidates) {
+      if (decisionMode === 'ASSIST' && admittedId && (verdict === 'RECOMMEND' || verdict === 'KEEP_CURRENT') && decision?.candidates) {
         const hit = decision.candidates.find(c => c.candidateId === admittedId);
         if (hit && sameScope(scope)) {
           onRecommendation(scope.issueId, {
@@ -299,18 +312,39 @@ export function createDecisionPanel(deps) {
     }
   }
 
-  function renderPanel(host, { basis, decision, history, decisionMode }, scope) {
+  function renderPanel(host, { basis, decision, history, decisionMode, configuredModel }, scope) {
     if (!scope || !sameScope(scope)) return;
     host.replaceChildren();
+    host.classList.toggle('decision-inactive', !INTERACTIVE_MODES.has(decisionMode));
     const title = el('h3', 'decision-title', '候选比较（辅助阅读）');
     host.append(title);
-    const status = el('p', 'decision-status'); status.dataset.decisionStatus = ''; status.hidden = true;
+    const status = el('p', 'decision-status'); status.dataset.decisionStatus = ''; status.hidden = true; status.setAttribute('aria-live', 'polite');
     const error = el('p', 'decision-error'); error.dataset.decisionError = ''; error.hidden = true;
     host.append(status, error);
-    const meta = el('p', 'decision-meta', `基线版本 ${basis.pageRevision} · 映射 ${basis.mappingVersion}`);
+    const modelName = decision?.model || configuredModel || '';
+    const metaText = `基线版本 ${basis.pageRevision} · 映射 ${basis.mappingVersion}${modelName ? ` · 模型: ${modelName}` : ''}`;
+    const meta = el('p', 'decision-meta', metaText);
     host.append(meta);
     if (!decision) {
-      const empty = el('p', 'decision-empty', '暂无建议。先比较现有候选（零新增视觉调用），或补充一次原图复识别。');
+      const empty = el('div', 'decision-empty');
+      if (!INTERACTIVE_MODES.has(decisionMode)) {
+        empty.append(
+          el('p', 'decision-empty-text', '候选比较已关闭。可继续对照原图手工校对；既有历史建议仍可查看。'),
+          (() => {
+            const btn = el('button', 'button primary decision-open-settings', '⚙️ 前往工具配置开启 JEV');
+            btn.type = 'button';
+            btn.addEventListener('click', () => {
+              document.querySelector('#settings-open')?.click();
+              setTimeout(() => {
+                document.querySelector('#settings-jev-heading')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }, 120);
+            });
+            return btn;
+          })()
+        );
+      } else {
+        empty.append(el('p', 'decision-empty-text', '暂无建议。可主动比较已有候选；没有足够证据时请对照原图人工校对。'));
+      }
       host.append(empty);
     } else {
       const verdict = el('p', 'decision-verdict',
@@ -338,7 +372,7 @@ export function createDecisionPanel(deps) {
         `限制：${(decision.reasonCodes || []).map(reasonLabel).join('；') || '无'}`);
       host.append(reasons);
       // JR-08-T01：SHADOW/OFF 不开放 JEV 接受入口；仅 ASSIST + 正式推荐才可确认
-      const canAdmit = (decisionMode === 'ASSIST' || decisionMode == null)
+      const canAdmit = decisionMode === 'ASSIST'
         && (decision.verdict === 'RECOMMEND' || decision.verdict === 'KEEP_CURRENT')
         && Boolean(decision.admittedRecommendationId);
       if (!canAdmit) {
@@ -352,10 +386,11 @@ export function createDecisionPanel(deps) {
       const check = document.createElement('input');
       check.type = 'checkbox';
       checkRow.append(check, document.createTextNode('我已对照原图，确认此处文字'));
-      host.append(checkRow);
+      if (canAdmit) host.append(checkRow);
       const acceptRow = el('div', 'decision-actions');
       const acceptButton = el('button', 'button primary decision-action', '对照原图并确认');
       acceptButton.dataset.needsClean = '1'; acceptButton.dataset.action = 'accept';
+      acceptButton.dataset.canAdmit = String(canAdmit);
       acceptButton.disabled = !canAdmit;
       acceptButton.title = canAdmit ? '' : '未形成正式推荐或非 ASSIST 模式，不能一键确认';
       acceptButton.addEventListener('click', () => {
@@ -369,34 +404,34 @@ export function createDecisionPanel(deps) {
         const note = el('p', 'decision-note', '已保留待核对：这不是失败，待核对计数不变。');
         host.append(note);
       });
-      acceptRow.append(acceptButton, keepButton);
+      if (canAdmit) acceptRow.append(acceptButton);
+      acceptRow.append(keepButton);
       host.append(acceptRow);
     }
     const actions = el('div', 'decision-actions');
-    const compareButton = el('button', 'button decision-action', '比较现有候选');
+    const compareButton = el('button', 'button primary decision-action', '比较现有候选');
     compareButton.dataset.needsClean = '1'; compareButton.dataset.action = 'compare';
     compareButton.disabled = hasDirty();
-    compareButton.title = hasDirty() ? '有未保存草稿，请先保存' : '零新增视觉调用';
-    compareButton.addEventListener('click', () => createJob(false));
-    const visionButton = el('button', 'button decision-action', '补充一次原图复识别');
-    visionButton.dataset.needsClean = '1'; visionButton.dataset.action = 'vision';
-    visionButton.disabled = hasDirty();
-    visionButton.title = hasDirty() ? '有未保存草稿，请先保存' : '将使用实际能力及预算条件（默认最多一次）';
-    visionButton.addEventListener('click', () => createJob(true));
-    actions.append(compareButton, visionButton);
+    compareButton.title = hasDirty() ? '有未保存草稿，请先保存' : '仅比较已有候选，不补做视觉识别';
+    compareButton.addEventListener('click', () => createJob());
+    if (INTERACTIVE_MODES.has(decisionMode)) {
+      actions.append(compareButton);
+      host.append(el('p', 'decision-gate-note', '点击上方“比较现有候选”开启模型评估；校准、预算与外发许可等门槛都通过后执行评估。'));
+    }
     if (decision?.jobId && !['SUCCEEDED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(decision.jobState)) {
       const cancelButton = el('button', 'button quiet decision-action', '取消本次评估');
       cancelButton.addEventListener('click', () => cancelJob(decision.jobId, decision.jobStateVersion ?? 0, scope));
       actions.append(cancelButton);
     }
-    host.append(actions);
+    if (actions.children.length) host.append(actions);
     if (history?.length) {
       const details = el('details', 'decision-history');
       const summary = el('summary', '', `历史建议（${history.length}）`);
       details.append(summary);
       history.forEach(item => {
+        const itemModel = item.model ? `模型: ${item.model} · ` : '';
         const row = el('p', 'decision-history-row',
-          `${item.verdict || item.jobState} · 适用性 ${item.applicability || '未知'} · ${(item.reasonCodes || []).map(reasonLabel).join('；')}`);
+          `${itemModel}${item.verdict || item.jobState} · 适用性 ${item.applicability || '未知'} · ${(item.reasonCodes || []).map(reasonLabel).join('；')}`);
         details.append(row);
       });
       host.append(details);
@@ -405,6 +440,7 @@ export function createDecisionPanel(deps) {
 
   function render(host, block, issue) {
     abortFlight();
+    disposed = false;
     panelEpoch++;
     inFlightOperationId = null;
     acceptInFlight = false;
@@ -419,10 +455,16 @@ export function createDecisionPanel(deps) {
       basis: null,
       revision: null,
       candidateSetHash: null,
+      mode: null,
     };
     host.replaceChildren();
     host.dataset.decisionPanel = '';
-    const loading = el('p', 'decision-status', '正在读取建议基线…');
+    const loading = el('p', 'decision-status decision-loading', '正在读取建议基线…');
+    loading.setAttribute('role', 'status');
+    loading.setAttribute('aria-live', 'polite');
+    const skeleton = el('span', 'decision-loading-lines');
+    skeleton.setAttribute('aria-hidden', 'true');
+    loading.append(skeleton);
     host.append(loading);
     refresh();
   }

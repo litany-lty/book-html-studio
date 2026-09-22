@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 import studio.bookhtml.api.ApiException;
 import studio.bookhtml.config.AppProperties;
 import studio.bookhtml.config.PaddleAiStudioProperties;
+import studio.bookhtml.config.SettingsService;
 import studio.bookhtml.domain.Block;
 
 import java.io.ByteArrayOutputStream;
@@ -33,6 +34,7 @@ import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -58,6 +60,8 @@ public class PaddleAiStudioClient {
     private final PaddleOcrParser parser;
     private final Transport transport;
     private final Waiter waiter;
+    private SettingsService settings;
+    private UsageLedger usage;
     private final Object[] locks = new Object[LOCK_STRIPES];
 
     @Autowired
@@ -77,8 +81,13 @@ public class PaddleAiStudioClient {
         for (int i = 0; i < locks.length; i++) locks[i] = new Object();
     }
 
+    @Autowired public void setSettings(SettingsService settings) { this.settings = settings; }
+    @Autowired public void setUsageLedger(UsageLedger usage) { this.usage = usage; }
+    private String accessToken() { return settings == null ? properties.accessToken() : settings.state().paddleAccessToken(); }
+    private String model() { return settings == null ? properties.model() : "PaddleOCR-VL-1.6"; }
+
     public boolean configured() {
-        return properties.accessToken() != null && !properties.accessToken().isBlank();
+        return accessToken() != null && !accessToken().isBlank();
     }
 
     public List<Block> recognize(byte[] png, int width, int height, String layout,
@@ -98,33 +107,53 @@ public class PaddleAiStudioClient {
     private List<Block> recognizeLocked(String fingerprint, byte[] png, int width, int height,
                                         String layout, BooleanSupplier cancelled) throws OcrException {
         CacheEntry cache = readCache(fingerprint);
-        if (cache != null && cache.result() != null && !cache.result().isNull())
-            return channel(parser.parse(cache.result(), width, height, layout));
+        if (cache != null && cache.result() != null && !cache.result().isNull()) {
+            List<Block> result = channel(parser.parse(cache.result(), width, height, layout));
+            if (usage != null) try { usage.cacheReused("paddle-aistudio", model()); }
+            catch (java.io.IOException e) { throw new OcrException("用量账本不可用，缓存命中未交付", e); }
+            return result;
+        }
+        if (cache != null && !"rejected".equals(cache.state())
+                && !Objects.equals(cache.credentialHash(), credentialHash()))
+            throw new OcrException("AI Studio 未完成任务属于另一凭据；为避免跨账号续传或重复计费，需人工核对任务缓存");
+        if (usage != null && cache != null && !"rejected".equals(cache.state())
+                && (!Objects.equals(cache.ownerBookId(), UsageContext.current() == null ? null : UsageContext.current().bookId())
+                || cache.usageAttemptId() == null))
+            throw new OcrException("AI Studio 旧任务缺少本书用量归属；为避免跨书或跨账号续传，需人工核对任务缓存");
         if (cache != null && "failed".equals(cache.state()))
             throw new OcrException("PaddleOCR AI Studio 远端任务已失败；为避免重复计费未自动重提");
 
         long deadline = System.nanoTime() + Duration.ofSeconds(properties.totalTimeoutSeconds()).toNanos();
         String taskId = cache == null ? null : cache.taskId();
+        String ownerBookId = cache == null ? null : cache.ownerBookId();
+        String usageAttemptId = cache == null ? null : cache.usageAttemptId();
         if (taskId == null || taskId.isBlank()) {
             if (cache != null && !"rejected".equals(cache.state()))
                 throw new OcrException("PaddleOCR AI Studio 提交结果不确定；为避免重复计费未自动重提");
             checkCancelled(cancelled);
             HttpRequest submission = submissionRequest(png, deadline);
-            writeCache(fingerprint, new CacheEntry(fingerprint, null, "submitting", null));
+            if (usage != null) try {
+                usageAttemptId = usage.start("paddle-aistudio", model());
+                ownerBookId = UsageContext.current().bookId();
+            } catch (java.io.IOException e) { throw new OcrException("用量账本不可用，禁止提交 AI Studio 任务", e); }
+            writeCache(fingerprint, cacheEntry(fingerprint, null, "submitting", null, ownerBookId, usageAttemptId));
             try {
-                taskId = submit(submission, cancelled);
-                writeCache(fingerprint, new CacheEntry(fingerprint, taskId, "submitted", null));
+                taskId = submit(submission, cancelled, usageAttemptId);
+                writeCache(fingerprint, cacheEntry(fingerprint, taskId, "submitted", null, ownerBookId, usageAttemptId));
+                if (usage != null) usage.pending(usageAttemptId);
             } catch (SubmitRejectedException e) {
-                writeCache(fingerprint, new CacheEntry(fingerprint, null, "rejected", null));
+                if (usage != null) try { usage.failed(usageAttemptId); } catch (java.io.IOException ignored) { }
+                writeCache(fingerprint, cacheEntry(fingerprint, null, "rejected", null, ownerBookId, usageAttemptId));
                 throw e;
             } catch (QuotaExceededException e) {
-                writeCache(fingerprint, new CacheEntry(fingerprint, null, "rejected", null));
+                if (usage != null) try { usage.failed(usageAttemptId); } catch (java.io.IOException ignored) { }
+                writeCache(fingerprint, cacheEntry(fingerprint, null, "rejected", null, ownerBookId, usageAttemptId));
                 throw e;
             } catch (CancelledException e) {
-                writeCache(fingerprint, new CacheEntry(fingerprint, null, "submit-unknown", null));
+                writeCache(fingerprint, cacheEntry(fingerprint, null, "submit-unknown", null, ownerBookId, usageAttemptId));
                 throw e;
             } catch (Exception e) {
-                writeCache(fingerprint, new CacheEntry(fingerprint, null, "submit-unknown", null));
+                writeCache(fingerprint, cacheEntry(fingerprint, null, "submit-unknown", null, ownerBookId, usageAttemptId));
                 throw new OcrException("PaddleOCR AI Studio 提交结果不确定；为避免重复计费未自动重提");
             }
         }
@@ -136,22 +165,29 @@ public class PaddleAiStudioClient {
             checkCancelled(cancelled);
             JsonNode response = sendJson(pollRequest(taskId, deadline), cancelled, MAX_API_BYTES,
                     "PaddleOCR AI Studio 任务查询失败");
+            if (usage != null) try { usage.captureUsage(usageAttemptId, response); }
+            catch (java.io.IOException e) { throw new OcrException("用量账本更新失败", e); }
             JsonNode data = successData(response, "PaddleOCR AI Studio 任务查询失败");
             state = data.path("state").asText("").toLowerCase(Locale.ROOT);
-            writeCache(fingerprint, new CacheEntry(fingerprint, taskId, state, null));
+            writeCache(fingerprint, cacheEntry(fingerprint, taskId, state, null, ownerBookId, usageAttemptId));
             if (Set.of("pending", "running").contains(state)) continue;
-            if ("failed".equals(state))
+            if ("failed".equals(state)) {
+                if (usage != null) try { usage.failed(usageAttemptId); } catch (java.io.IOException e) { throw new OcrException("用量账本更新失败", e); }
                 throw new OcrException("PaddleOCR AI Studio 远端任务失败；为避免重复计费未自动重提");
+            }
             if (!"done".equals(state)) throw new OcrException("PaddleOCR AI Studio 返回未知任务状态");
+            // Remote completion is the billing-relevant confirmation; local JSONL parsing may still fail.
+            if (usage != null) try { usage.succeeded(usageAttemptId); }
+            catch (java.io.IOException e) { throw new OcrException("用量账本更新失败", e); }
             URI resultUri = validateResultUri(data.path("resultUrl").path("jsonUrl").asText(""));
             String jsonl = send(downloadRequest(resultUri, deadline), cancelled, MAX_RESULT_BYTES,
                     "PaddleOCR AI Studio 结果下载失败").body();
             JsonNode normalized = normalizeJsonLines(jsonl, width, height);
             List<Block> blocks = channel(parser.parse(normalized, width, height, layout));
-            writeCache(fingerprint, new CacheEntry(fingerprint, taskId, "done", normalized));
+            writeCache(fingerprint, cacheEntry(fingerprint, taskId, "done", normalized, ownerBookId, usageAttemptId));
             return blocks;
         }
-        writeCache(fingerprint, new CacheEntry(fingerprint, taskId, state, null));
+        writeCache(fingerprint, cacheEntry(fingerprint, taskId, state, null, ownerBookId, usageAttemptId));
         throw new OcrException("PaddleOCR AI Studio 任务仍在远端处理中，可稍后重试继续查询（远端任务可能仍计费）");
     }
 
@@ -168,10 +204,13 @@ public class PaddleAiStudioClient {
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body)).build();
     }
 
-    private String submit(HttpRequest request, BooleanSupplier cancelled) throws OcrException {
+    private String submit(HttpRequest request, BooleanSupplier cancelled, String usageAttemptId) throws OcrException {
         JsonNode response;
         try {
             response = sendJson(request, cancelled, MAX_API_BYTES, "PaddleOCR AI Studio 提交失败");
+            if (usage != null) usage.captureUsage(usageAttemptId, response);
+        } catch (java.io.IOException e) {
+            throw new OcrException("用量账本更新失败", e);
         } catch (HttpFailure e) {
             if (e.status() == 429 || e.status() == 402 || e.status() == 403)
                 throw new QuotaExceededException("PaddleOCR AI Studio 额度不足或被拒绝（HTTP " + e.status() + "），可修正配置后重试");
@@ -340,7 +379,7 @@ public class PaddleAiStudioClient {
     }
 
     private byte[] multipart(String boundary, byte[] png) throws OcrException {
-        String model = properties.model();
+        String model = model();
         if (model == null || model.isBlank() || model.length() > 120 || model.contains("\r") || model.contains("\n"))
             throw new OcrException("PaddleOCR AI Studio 模型配置无效");
         try {
@@ -389,7 +428,7 @@ public class PaddleAiStudioClient {
     }
 
     private String authorization() throws OcrException {
-        String token = properties.accessToken();
+        String token = accessToken();
         if (token == null || token.isBlank() || token.length() > 4096 || token.contains("\r") || token.contains("\n"))
             throw new OcrException("PaddleOCR AI Studio Access Token 配置无效");
         return "Bearer " + token;
@@ -398,7 +437,7 @@ public class PaddleAiStudioClient {
     private void validateSubmissionConfiguration() throws OcrException {
         jobUri();
         authorization();
-        String model = properties.model();
+        String model = model();
         if (model == null || model.isBlank() || model.length() > 120 || model.contains("\r") || model.contains("\n"))
             throw new OcrException("PaddleOCR AI Studio 模型配置无效");
     }
@@ -443,7 +482,7 @@ public class PaddleAiStudioClient {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             digest.update(FINGERPRINT_VERSION.getBytes(StandardCharsets.UTF_8)); digest.update((byte)0);
-            digest.update(properties.model().getBytes(StandardCharsets.UTF_8)); digest.update((byte)0); digest.update(png);
+            digest.update(model().getBytes(StandardCharsets.UTF_8)); digest.update((byte)0); digest.update(png);
             return HexFormat.of().formatHex(digest.digest());
         } catch (Exception e) {
             throw new OcrException("无法计算 PaddleOCR AI Studio 送识摘要", e);
@@ -474,7 +513,21 @@ public class PaddleAiStudioClient {
         }
     }
 
-    record CacheEntry(String inputHash, String taskId, String state, JsonNode result) {}
+    private CacheEntry cacheEntry(String hash, String taskId, String state, JsonNode result,
+                                  String ownerBookId, String usageAttemptId) throws OcrException {
+        return new CacheEntry(hash, taskId, state, result, credentialHash(), ownerBookId, usageAttemptId);
+    }
+    private String credentialHash() throws OcrException {
+        try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(accessToken().getBytes(StandardCharsets.UTF_8))); }
+        catch (Exception e) { throw new OcrException("无法计算 AI Studio 凭据摘要", e); }
+    }
+    record CacheEntry(String inputHash, String taskId, String state, JsonNode result, String credentialHash,
+                      String ownerBookId, String usageAttemptId) {
+        CacheEntry(String inputHash, String taskId, String state, JsonNode result) {
+            this(inputHash, taskId, state, result, null, null, null);
+        }
+    }
     record Response(int status, String body) {}
     private record Layout(String id, String label, String content, double x1, double y1, double x2, double y2,
                           int order, int sequence) {}

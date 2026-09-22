@@ -44,8 +44,12 @@ async function request(path, options = {}, timeout = 30000) {
 
 export const api = {
   config: () => request('/config'),
+  settings: () => request('/settings'),
+  saveSettings: (body, csrfToken) => request('/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Settings-Token': csrfToken }, body: JSON.stringify(body) }),
   books: () => request('/books'),
   book: id => request(`/books/${encodeURIComponent(id)}`),
+  updateLibraryBook: (id, body) => request(`/books/${encodeURIComponent(id)}/library`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  bookUsage: (id, cursor = null, limit = 50, asOf = null, signal, offset = null) => request(`/books/${encodeURIComponent(id)}/usage?${new URLSearchParams({ limit: String(limit), ...(cursor ? { cursor } : offset != null ? { offset: String(offset) } : {}), ...(asOf ? { asOf } : {}) })}`, signal ? { signal } : {}),
   upload(file) {
     const body = new FormData();
     body.append('file', file);
@@ -60,6 +64,9 @@ export const api = {
   startJob: (id, body) => request(`/books/${encodeURIComponent(id)}/jobs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   job: id => request(`/books/${encodeURIComponent(id)}/job`),
   cancelJob: id => request(`/books/${encodeURIComponent(id)}/job/cancel`, { method: 'POST' }),
+  readingWindow: (id, body) => request(`/books/${encodeURIComponent(id)}/reading-window`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  readingWindowStatus: (id, sessionId) => request(`/books/${encodeURIComponent(id)}/reading-window?sessionId=${encodeURIComponent(sessionId)}`),
+  stopReadingWindow: (id, body) => request(`/books/${encodeURIComponent(id)}/reading-window/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   savePage: (id, n, body, timeoutMs) => request(`/books/${encodeURIComponent(id)}/pages/${n}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, timeoutMs ?? 30000),
   // J07/J08：决策作业独立作用域，不复用 saveInFlight；取消与完整响应期限。
   decisionJobsCreate: (id, n, issueId, body, signal, timeoutMs) => request(`/books/${encodeURIComponent(id)}/pages/${n}/issues/${encodeURIComponent(issueId)}/decision-jobs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), ...(signal ? { signal } : {}) }, timeoutMs ?? 30000),

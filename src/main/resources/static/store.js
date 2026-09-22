@@ -1,4 +1,4 @@
-export const PAGE_CACHE_LIMIT = 8;
+export const PAGE_CACHE_LIMIT = 16;
 
 class LruPageCache extends Map {
   constructor(limit, isProtected) {
@@ -61,6 +61,7 @@ export const state = {
   // J08：阅读依据（语言脚本与证据状态分离；默认保真阅读）与辅助推荐映射（内存态，不写 page JSON）
   evidenceMode: 'confirmed',
   assistMap: {},
+  job: null,
   // 阶段2：已读页有限 LRU（默认 8 页，可调整的暂定参数）；当前页不得淘汰
   pageCache: new LruPageCache(PAGE_CACHE_LIMIT, key => key === state.currentPage)
 };

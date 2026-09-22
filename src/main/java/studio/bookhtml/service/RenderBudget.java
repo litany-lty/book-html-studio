@@ -22,7 +22,7 @@ import studio.bookhtml.api.ApiException;
  */
 @Service
 public class RenderBudget {
-    static final int DEFAULT_MAX_CONCURRENT = 2;
+    static final int DEFAULT_MAX_CONCURRENT = 3;
     static final long DEFAULT_MAX_IN_FLIGHT_BYTES = 384L * 1024 * 1024;
     static final long DEFAULT_MAX_WAIT_MS = 30_000;
 

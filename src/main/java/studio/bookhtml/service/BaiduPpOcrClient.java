@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 import studio.bookhtml.api.ApiException;
 import studio.bookhtml.config.AppProperties;
 import studio.bookhtml.config.PpOcrProperties;
+import studio.bookhtml.config.SettingsService;
 import studio.bookhtml.domain.Block;
 
 import java.io.*;
@@ -50,6 +51,9 @@ public class BaiduPpOcrClient {
     private final Map<String, Object> locks = new ConcurrentHashMap<>();
     private String accessToken = "";
     private long tokenExpiresAt;
+    private long tokenSettingsRevision = -1;
+    private SettingsService settings;
+    private UsageLedger usage;
 
     @Autowired
     public BaiduPpOcrClient(AppProperties config, PpOcrProperties ppocr, ObjectMapper json, BaiduPpOcrParser parser) {
@@ -64,8 +68,13 @@ public class BaiduPpOcrClient {
         this.transport = transport;
     }
 
+    @Autowired public void setSettings(SettingsService settings) { this.settings = settings; }
+    @Autowired public void setUsageLedger(UsageLedger usage) { this.usage = usage; }
+    private String apiKey() { return settings == null ? config.baiduOcrApiKey() : settings.state().ppocrApiKey(); }
+    private String secretKey() { return settings == null ? config.baiduOcrSecretKey() : settings.state().ppocrSecretKey(); }
+
     public boolean configured() {
-        return !config.baiduOcrApiKey().isBlank() && !config.baiduOcrSecretKey().isBlank();
+        return !apiKey().isBlank() && !secretKey().isBlank();
     }
 
     public List<Block> recognize(byte[] png, int width, int height, String layout, BooleanSupplier cancelled) throws OcrException {
@@ -86,17 +95,27 @@ public class BaiduPpOcrClient {
 
     private List<Block> recognizeLocked(String hash, byte[] png, int width, int height, String layout, BooleanSupplier cancelled) throws OcrException {
         CacheEntry cache = readCache(hash);
-        if (cache != null && cache.result() != null && !cache.result().isNull())
-            return parser.parse(cache.result(), width, height, layout);
+        if (cache != null && cache.result() != null && !cache.result().isNull()) {
+            List<Block> blocks = parser.parse(cache.result(), width, height, layout);
+            if (usage != null) try { usage.cacheReused("ppocr", "PP-OCRv6"); }
+            catch (IOException e) { throw new OcrException("用量账本不可用，缓存命中未交付", e); }
+            return blocks;
+        }
         checkCancelled(cancelled);
-        JsonNode response = call(png, cancelled, false);
-        JsonNode normalized = normalize(response, width, height);
-        List<Block> blocks = parser.parse(normalized, width, height, layout);
-        writeCache(hash, new CacheEntry(hash, normalized));
-        return blocks;
+        OcrCall call = call(png, cancelled, false);
+        try {
+            JsonNode normalized = normalize(call.response(), width, height);
+            List<Block> blocks = parser.parse(normalized, width, height, layout);
+            writeCache(hash, new CacheEntry(hash, normalized));
+            return blocks;
+        } catch (Exception e) {
+            if (e instanceof OcrException ocr) throw ocr;
+            throw new OcrException("PP-OCRv6 用量或结果保存失败", e);
+        }
     }
 
-    private JsonNode call(byte[] png, BooleanSupplier cancelled, boolean retriedToken) throws OcrException {
+    private record OcrCall(JsonNode response, String attemptId) {}
+    private OcrCall call(byte[] png, BooleanSupplier cancelled, boolean retriedToken) throws OcrException {
         Map<String, String> form = new LinkedHashMap<>();
         form.put("image", Base64.getEncoder().encodeToString(png));
         form.put("useDocOrientationClassify", "false");
@@ -111,9 +130,17 @@ public class BaiduPpOcrClient {
                 .timeout(Duration.ofSeconds(Math.max(10, ppocr.requestTimeoutSeconds())))
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .POST(HttpRequest.BodyPublishers.ofString(body)).build();
-        JsonNode response = sendJson(request, cancelled);
+        String attemptId = null;
+        if (usage != null) try { attemptId = usage.start("ppocr", "PP-OCRv6"); }
+        catch (IOException e) { throw new OcrException("用量账本不可用，禁止发送 PP-OCRv6 请求", e); }
+        JsonNode response = sendJson(request, cancelled, attemptId);
         String code = errorCode(response);
-        if (code == null) return response;
+        if (code == null) {
+            if (usage != null) try { usage.succeeded(attemptId); }
+            catch (IOException e) { throw new OcrException("用量账本更新失败", e); }
+            return new OcrCall(response, attemptId);
+        }
+        if (usage != null) try { usage.failed(attemptId); } catch (IOException e) { throw new OcrException("用量账本更新失败", e); }
         if (TOKEN_CODES.contains(code) && !retriedToken) {
             synchronized (this) {
                 accessToken = "";
@@ -127,14 +154,13 @@ public class BaiduPpOcrClient {
     }
 
     private static String quotaMessage(String code, JsonNode response) {
-        String remote = response.path("error_msg").asText("").strip();
         String hint = switch (code) {
             case "17", "19", "216604" -> "PP-OCRv6 额度已用完，可在百度控制台购买次数包或开通按量后付费";
             case "18", "4" -> "PP-OCRv6 请求限流（QPS/集群），可稍后重试";
             case "6" -> "当前应用未勾选 PP-OCRv6 接口权限，需在百度控制台为应用勾选后重试";
             default -> "PP-OCRv6 配额不足";
         };
-        return remote.isEmpty() ? hint : hint + "（远端：" + remote + "）";
+        return hint;
     }
 
     JsonNode normalize(JsonNode response, int width, int height) throws OcrException {
@@ -182,15 +208,17 @@ public class BaiduPpOcrClient {
     }
 
     private synchronized String token(BooleanSupplier cancelled) throws OcrException {
+        long revision = settings == null ? -1 : settings.state().revision();
+        if (revision != tokenSettingsRevision) { accessToken = ""; tokenExpiresAt = 0; tokenSettingsRevision = revision; }
         long now = System.currentTimeMillis();
         if (!accessToken.isBlank() && now < tokenExpiresAt) return accessToken;
         Map<String, String> query = new LinkedHashMap<>();
         query.put("grant_type", "client_credentials");
-        query.put("client_id", config.baiduOcrApiKey());
-        query.put("client_secret", config.baiduOcrSecretKey());
+        query.put("client_id", apiKey());
+        query.put("client_secret", secretKey());
         HttpRequest request = HttpRequest.newBuilder(URI.create(AUTH_URI + "?" + form(query)))
                 .timeout(Duration.ofSeconds(30)).POST(HttpRequest.BodyPublishers.noBody()).build();
-        JsonNode response = sendJson(request, cancelled);
+        JsonNode response = sendJson(request, cancelled, null);
         String code = errorCode(response);
         if (code != null) throw new OcrException("百度 OCR 认证失败（错误码 " + code + "）");
         String token = response.path("access_token").asText("");
@@ -201,14 +229,17 @@ public class BaiduPpOcrClient {
         return accessToken;
     }
 
-    private JsonNode sendJson(HttpRequest request, BooleanSupplier cancelled) throws OcrException {
+    private JsonNode sendJson(HttpRequest request, BooleanSupplier cancelled, String attemptId) throws OcrException {
         try {
             checkCancelled(cancelled);
             Response response = transport.send(request, cancelled, MAX_API_BYTES);
+            if (usage != null && attemptId != null && (response.status() < 200 || response.status() >= 300)) usage.failed(attemptId);
             if (response.status() == 429) throw new QuotaExceededException("PP-OCRv6 请求限流（HTTP 429），可稍后重试");
             if (response.status() >= 300 && response.status() < 400) throw new OcrException("PP-OCRv6 请求失败（已拒绝重定向）");
             if (response.status() < 200 || response.status() >= 300) throw new OcrException("PP-OCRv6 请求失败（HTTP " + response.status() + "）");
-            return json.readTree(response.body());
+            JsonNode root = json.readTree(response.body());
+            if (usage != null && attemptId != null) usage.captureUsage(attemptId, root);
+            return root;
         } catch (CancelledException | OcrException | ApiException e) {
             throw e;
         } catch (Exception e) {
@@ -229,6 +260,7 @@ public class BaiduPpOcrClient {
             URI base = URI.create(ppocr.url().replaceAll("/+$", ""));
             if (!"https".equalsIgnoreCase(base.getScheme()) || !"aip.baidubce.com".equalsIgnoreCase(base.getHost())
                     || base.getUserInfo() != null || (base.getPort() != -1 && base.getPort() != 443)
+                    || !"/rest/2.0/ocr/v1/pp_ocrv5".equals(base.getPath())
                     || base.getQuery() != null || base.getFragment() != null) throw new IllegalArgumentException();
             return base;
         } catch (Exception e) {

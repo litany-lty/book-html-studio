@@ -34,10 +34,12 @@ public class QwenTocRecoveryService {
     private static final String FOUR_REGION="four-region",SINGLE_VERTICAL="single-page-vertical",NONE="none";
 
     private final QwenAssistProperties config;private final ObjectMapper json;private final Transport transport;
+    private UsageLedger usage;
 
     @Autowired
     public QwenTocRecoveryService(QwenAssistProperties config,ObjectMapper json){this(config,json,request->HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build().send(request,HttpResponse.BodyHandlers.ofInputStream()));}
     QwenTocRecoveryService(QwenAssistProperties config,ObjectMapper json,Transport transport){this.config=config;this.json=json;this.transport=transport;}
+    @Autowired public void setUsageLedger(UsageLedger usage){this.usage=usage;}
 
     public RecoveryResult recover(BufferedImage image,List<Block> source,BooleanSupplier cancelled){
         List<Block> original=source==null?List.of():List.copyOf(source);
@@ -45,21 +47,25 @@ public class QwenTocRecoveryService {
         if(NONE.equals(plan.mode())){if(!sourceCandidate)return new RecoveryResult(original,false,false,false,null);return fallback(original,false,"未可靠检测到目录分区或竖向点引线，将继续使用常规 Qwen3.8-Max 结构辅助");}
         if(cancelled.getAsBoolean())throw new CancelledException();
         if(!configured())return new RecoveryResult(original,true,false,false,null);
-        boolean attempted=false;
+        boolean attempted=false,responseSeen=false,parsed=false;String attemptId=null;
         try{
             List<Region>regions=regions(image,plan);HttpRequest request=request(regions,plan,image);long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(Math.max(1,config.getTimeoutSeconds()));
+            if(usage!=null)attemptId=usage.start("qwen",config.getModel());
             attempted=true;HttpResponse<InputStream>response=transport.send(request);if(response==null)throw new OcrException("目录恢复未返回响应");
+            responseSeen=true;
             if(cancelled.getAsBoolean()){close(response.body());throw new CancelledException();}
             if(response.statusCode()==429){close(response.body());throw new OcrException("目录恢复请求频率受限");}
             if(response.statusCode()<200||response.statusCode()>=300){int status=response.statusCode();close(response.body());throw new OcrException("目录恢复请求失败（HTTP "+status+"）");}
             byte[]body=readBody(response.body(),deadline,cancelled);if(body.length>MAX_RESPONSE_BYTES)throw new OcrException("目录恢复响应过大");
-            JsonNode root=json.readTree(body);if(root.has("error"))throw new OcrException("目录恢复返回业务错误");JsonNode choice=root.at("/choices/0");
+            JsonNode root=json.readTree(body);if(usage!=null)usage.captureUsage(attemptId,root);if(root.has("error"))throw new OcrException("目录恢复返回业务错误");JsonNode choice=root.at("/choices/0");
             if("length".equalsIgnoreCase(choice.path("finish_reason").asText()))throw new OcrException("目录恢复输出被截断");JsonNode content=choice.at("/message/content");
             if(!content.isTextual())throw new OcrException("目录恢复返回结构无效");Map<String,RegionAnswer>answers=parse(stripFence(content.asText()),regions.stream().map(Region::id).toList());
             List<Block>merged;if(SINGLE_VERTICAL.equals(plan.mode())){validateLeaderConsistency(plan,answers);merged=mergeSinglePage(original,regions,answers);}else merged=merge(original,regions,answers);
             int recoveredLines=directoryLines(answers);String warning=SINGLE_VERTICAL.equals(plan.mode())?"Qwen3.8-Max 已按单页竖向点引线恢复目录（本地检测 "+plan.evidenceColumns()+" 条，返回 "+recoveredLines+" 条）；自动结果仍需核对原图":"Qwen3.8-Max 已按四个页面区域恢复目录；自动结果仍需核对原图";
+            parsed=true;if(usage!=null)usage.succeeded(attemptId);
             return new RecoveryResult(merged,true,true,true,warning);
         }catch(CancelledException e){throw e;}catch(OcrException e){return fallback(original,attempted,failureWarning(attempted,e.getMessage()));}catch(Exception e){return fallback(original,attempted,failureWarning(attempted,null));}
+        finally{if(usage!=null&&responseSeen&&!parsed)try{usage.failed(attemptId);}catch(java.io.IOException ignored){}}
     }
 
     boolean configured(){return config.isEnabled()&&notBlank(config.getApiKey())&&notBlank(config.getBaseUrl())&&notBlank(config.getModel());}

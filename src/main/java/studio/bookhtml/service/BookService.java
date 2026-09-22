@@ -40,6 +40,34 @@ public class BookService {
     }
     public List<Book> list(){return store.listBooks().stream().map(this::refresh).toList();}
     public Book get(String id){return refresh(store.readBook(id));}
+    /** Called under JobService's task lock when archiving, to serialize task admission with the metadata write. */
+    Book updateLibrary(String id, String requestedTitle, Boolean archived) {
+        if ((requestedTitle == null) == (archived == null))
+            throw new ApiException(HttpStatus.BAD_REQUEST, "一次只能修改书名或归档状态");
+        String title = null;
+        if (requestedTitle != null) {
+            if (requestedTitle.codePoints().anyMatch(Character::isISOControl))
+                throw new ApiException(HttpStatus.BAD_REQUEST, "书名应为 1–120 字且不能包含控制字符");
+            title = requestedTitle.strip();
+            if (title.isEmpty() || title.codePointCount(0, title.length()) > 120)
+                throw new ApiException(HttpStatus.BAD_REQUEST, "书名应为 1–120 字且不能包含控制字符");
+        }
+        String validTitle = title;
+        try {
+            Book changed = store.updateBook(id, current -> {
+                if (Boolean.TRUE.equals(archived)) {
+                    Job job = store.readJob(id);
+                    if (job != null && List.of("QUEUED", "RUNNING", "CANCELLING").contains(job.status()))
+                        throw new ApiException(HttpStatus.CONFLICT, "本书正在识别，请等待任务完成或取消后归档");
+                }
+                return new Book(current.id(), validTitle == null ? current.title() : validTitle,
+                        current.filename(), current.totalPages(), current.createdAt(), Instant.now(),
+                        current.processedPages(), current.reviewedPages(), archived == null ? current.archived() : archived);
+            });
+            return refresh(changed);
+        } catch (ApiException e) { throw e; }
+        catch (IOException e) { throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "更新书架失败"); }
+    }
     public List<PageSummary> pages(String id){Book b=store.readBook(id);List<PageSummary> result=new ArrayList<>(b.totalPages());for(int n=1;n<=b.totalPages();n++){Page p=requirePage(id,n);result.add(summary(p));}return result;}
     public List<OutlineService.OutlineEntry> outline(String id){return outlines.outline(id);}
     public Page page(String id,int number){Book b=store.readBook(id);validatePage(number,b.totalPages());return requirePage(id,number);}
@@ -59,10 +87,10 @@ public class BookService {
     public byte[] image(String id,int n,int width){page(id,n);java.awt.image.BufferedImage image=null;try{image=pdf.render(store.pdf(id),n,width);return pdf.png(image);}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"页面图片生成失败");}finally{if(image!=null)image.flush();}}
     public byte[] figure(String id,int n,String blockId){Page p=page(id,n);Block b=p.blocks().stream().filter(x->x.id().equals(blockId)).findFirst().orElseThrow(()->new ApiException(HttpStatus.NOT_FOUND,"未找到该内容块"));try{return pdf.cropPng(store.pdf(id),n,config.maxImageWidth(),b.bbox());}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"内容块图片生成失败");}}
     public Path pdfPath(String id){store.readBook(id);return store.pdf(id);}
-    private Book refresh(Book b){int processed=0,reviewed=0;for(int n=1;n<=b.totalPages();n++){Page p=store.readPage(b.id(),n);if(p!=null&&"READY".equals(p.status()))processed++;if(p!=null&&p.reviewed())reviewed++;}return new Book(b.id(),b.title(),b.filename(),b.totalPages(),b.createdAt(),b.updatedAt(),processed,reviewed);}
-    private void touch(String id)throws IOException{Book b=refresh(store.readBook(id));store.writeBook(new Book(b.id(),b.title(),b.filename(),b.totalPages(),b.createdAt(),Instant.now(),b.processedPages(),b.reviewedPages()));}
+    private Book refresh(Book b){int processed=0,reviewed=0;for(int n=1;n<=b.totalPages();n++){Page p=store.readPage(b.id(),n);if(p!=null&&"READY".equals(p.status()))processed++;if(p!=null&&p.reviewed())reviewed++;}return new Book(b.id(),b.title(),b.filename(),b.totalPages(),b.createdAt(),b.updatedAt(),processed,reviewed,b.archived());}
+    private void touch(String id)throws IOException{Book b=refresh(store.readBook(id));store.updateBook(id,current->new Book(current.id(),current.title(),current.filename(),current.totalPages(),current.createdAt(),Instant.now(),b.processedPages(),b.reviewedPages(),current.archived()));}
     private Page requirePage(String id,int n){Page p=store.readPage(id,n);if(p==null)throw new ApiException(HttpStatus.NOT_FOUND,"页码不存在");return p;}
-    private static PageSummary summary(Page p){String title=HeadingText.pageTitle(p);List<Block>reading=p.blocks().stream().filter(b->!"advertisement".equals(b.type())).toList();int uncertain=(int)reading.stream().filter(Block::uncertain).count();return new PageSummary(p.pageNumber(),p.status(),reading.size(),uncertain,p.width(),p.height(),title,p.reviewed());}
+    static PageSummary summary(Page p){String title=HeadingText.pageTitle(p);List<Block>reading=p.blocks().stream().filter(b->!"advertisement".equals(b.type())).toList();int uncertain=(int)reading.stream().filter(Block::uncertain).count();return new PageSummary(p.pageNumber(),p.status(),reading.size(),uncertain,p.width(),p.height(),title,p.reviewed());}
     private static boolean contains(String value,String q){return value!=null&&value.toLowerCase(Locale.ROOT).contains(q.toLowerCase(Locale.ROOT));}
     private static void validatePage(int n,int total){if(n<1||n>total)throw new ApiException(HttpStatus.NOT_FOUND,"页码不存在");}
     private static String safeFilename(String s){String v=Paths.get(s).getFileName().toString().replaceAll("[\\p{Cntrl}]","_");return v.length()>200?v.substring(v.length()-200):v;}

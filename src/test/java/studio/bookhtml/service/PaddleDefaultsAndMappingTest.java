@@ -16,7 +16,7 @@ import static org.mockito.Mockito.*;
 import static org.mockito.ArgumentMatchers.*;
 
 class PaddleDefaultsAndMappingTest {
-    @Test void paddleIsDefaultProvider(){assertEquals("paddle",new JobRequest("1-20",null,"auto",true,false,true).providerOrDefault());assertEquals("local",new JobRequest("1","local","auto",false,false,false).providerOrDefault());}
+    @Test void paddleIsDefaultProvider(){assertEquals("paddle-aistudio",new JobRequest("1-20",null,"auto",true,false,true).providerOrDefault());assertEquals("local",new JobRequest("1","local","auto",false,false,false).providerOrDefault());}
     @Test void halfPageMappingKeepsInternalOrderAndStableSource(){Block local=new Block("paddle-layout-7","text",3,new double[]{.2,.1,.4,.5},"vertical-rl","原文","原文",null,true,false,null,"paddle",List.of("paddle-layout-7"),null,new double[]{20,10,40,50});Block mapped=PaddleOcrPipeline.remap(local,"R",1000,1000,2000,0);assertEquals(0,mapped.order());assertArrayEquals(new double[]{.6,.1,.2,.5},mapped.bbox(),1e-9);assertEquals("R-paddle-layout-7",mapped.id());assertEquals(List.of("R-paddle-layout-7"),mapped.sourceIds());assertEquals("paddle:R",mapped.source());assertEquals("原文",mapped.original());}
     @Test void halfPageMappingPreservesSpanDerivedProvenance(){Block local=new Block("paddle-toc","text",0,new double[]{0,0,1,1},"vertical-rl","目录 一","目录 一",null,true,false,null,"paddle-span",List.of("paddle-toc"),null,null);Block mapped=PaddleOcrPipeline.remap(local,"L",0,1000,2000,0);assertEquals("paddle-span:L",mapped.source());assertEquals("L-paddle-toc",mapped.id());}
     @Test void pageProcessorKeepsSelectedAiStudioProvenanceAndDoesNotInvokeOtherProviders() throws Exception {

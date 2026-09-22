@@ -33,6 +33,10 @@ public class EvidenceCollector {
     private final DecisionProperties config;
     private final DecisionOutboundGate gate;
     private final DecisionTransport visionTransport;
+    private studio.bookhtml.config.SettingsService settings;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setSettings(studio.bookhtml.config.SettingsService settings) { this.settings = settings; }
 
     @org.springframework.beans.factory.annotation.Autowired
     public EvidenceCollector(CandidateResolutionService resolution, IssueImageService images,
@@ -108,6 +112,10 @@ public class EvidenceCollector {
         }
         if (!allowFreshVision) {
             reasons.add("FRESH_VISION_NOT_REQUESTED");
+            return new Collection(raws, legacy, attempts, reasons);
+        }
+        if (settings != null) {
+            reasons.add("FRESH_VISION_DISABLED");
             return new Collection(raws, legacy, attempts, reasons);
         }
         int cap = allowSecondPath ? 2 : 1;

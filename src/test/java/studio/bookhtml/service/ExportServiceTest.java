@@ -47,6 +47,10 @@ class ExportServiceTest {
         assertEquals("inline-flex", property(css, "body.focus-reading .drawer-button", "display"));
         assertEquals("block", property(css, ".sidebar.open", "display"));
         assertEquals("block", property(css, ".sidebar.open .close-drawer", "display"));
+        assertEquals("block", property(css, ".reading-options-dialog[open]", "display"),
+                "桌面阅读设置打开后不能被旧的隐藏样式盖住");
+        assertEquals("none", property(css, ".reading-options-dialog:not([open])", "display"),
+                "阅读设置关闭后不能被移动端样式重新显示");
         assertTrue(Integer.parseInt(property(css, ".sidebar.open", "z-index"))
                         > Integer.parseInt(property(css, ".scrim", "z-index")),
                 "打开的目录必须位于遮罩上方");
@@ -146,6 +150,21 @@ class ExportServiceTest {
         String data = text(entries, "assets/book.js");
         String pageData = text(entries, "assets/pages-data/1.js");
         String app = text(entries, "assets/app.js");
+        assertTrue(html.contains("assets/fonts/reader-fonts.css"));
+        assertTrue(html.contains("assets/reader-fonts.js"));
+        assertTrue(app.contains("init?.('select[data-reader-font]'"),
+                "字体选择不能命中同样带 data-reader-font 的 HTML 根节点");
+        var fontAssets = new ObjectMapper().readTree(entries.get("assets/fonts/manifest.json")).path("assets");
+        assertTrue(fontAssets.isArray() && fontAssets.size() > 10);
+        for (var asset : fontAssets) {
+            String filename = asset.path("file").asText();
+            byte[] bytes = entries.get("assets/fonts/" + filename);
+            assertTrue(bytes != null, "离线字体资源缺失：" + filename);
+            assertEquals(asset.path("bytes").asLong(), bytes.length, filename);
+            assertEquals(asset.path("sha256").asText(), java.util.HexFormat.of().formatHex(
+                    java.security.MessageDigest.getInstance("SHA-256").digest(bytes)), filename);
+            if (filename.endsWith(".css")) assertFalse(new String(bytes, StandardCharsets.UTF_8).contains("https://"));
+        }
         assertFalse(html.contains("<script>bookAttack()"));
         assertTrue(html.contains("&lt;/title&gt;&lt;script&gt;bookAttack()&lt;/script&gt;"));
         assertFalse(data.contains("<script>"));

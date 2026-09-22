@@ -1,0 +1,28 @@
+@import url("noto-serif-sc.css");
+@import url("noto-sans-sc.css");
+@import url("lxgw-wenkai-tc.css");
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("jetbrains-mono-regular.woff2") format("woff2");
+}
+
+html[data-reader-font="serif"] { --reader-font: "Songti SC", "STSong", "SimSun", "Noto Serif SC", serif; }
+html[data-reader-font="sans"] { --reader-font: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif; }
+html[data-reader-font="source-serif"] { --reader-font: "Noto Serif SC", "Songti SC", "SimSun", serif; }
+html[data-reader-font="source-sans"] { --reader-font: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif; }
+html[data-reader-font="wenkai"] { --reader-font: "LXGW WenKai TC", "Noto Serif SC", "Songti SC", serif; }
+html[data-reader-font="jetbrains-mono"] { --reader-font: "JetBrains Mono", "Noto Serif SC", "Songti SC", "SimSun", monospace; }
+
+/* Font selection affects reflowed text, never scan images or coordinate facsimiles. */
+html[data-reader-font] .reading-flow {
+  --serif: var(--reader-font);
+  font-family: var(--reader-font);
+  font-variant-ligatures: none;
+}
+.reader-font-select { max-width: 100%; min-height: 36px; font: inherit; }
+.reader-font-note { color: var(--muted, #687684); font-size: 12px; line-height: 1.5; margin: 4px 0 0; }
+@media (max-width: 620px) { .reader-font-select { min-height: 44px; } }

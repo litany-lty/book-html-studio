@@ -16,6 +16,7 @@ import java.util.Set;
 import java.util.function.BooleanSupplier;
 import org.springframework.stereotype.Service;
 import studio.bookhtml.service.BoundedHttp;
+import studio.bookhtml.service.UsageLedger;
 
 /**
  * J04：单次传输、严格响应校验。每次真正发送登记独立 physicalAttemptId（由调用方传入）；
@@ -67,6 +68,7 @@ public class JevDecisionClient {
     private final ObjectMapper json;
     private final ObjectReader strictReader;
     private final DecisionTransport transport;
+    private UsageLedger usageLedger;
 
     public JevDecisionClient(ObjectMapper json, DecisionTransport transport) {
         this.json = json;
@@ -74,6 +76,9 @@ public class JevDecisionClient {
                 .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
         this.transport = transport;
     }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setUsageLedger(UsageLedger usageLedger) { this.usageLedger = usageLedger; }
 
     /**
      * 单次物理发送。endpoint 由调用方传入冻结的官方地址（生产）或测试 loopback（测试 profile）。
@@ -121,6 +126,11 @@ public class JevDecisionClient {
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body))
                 .build();
+        String usageAttempt = null;
+        if (usageLedger != null) {
+            try { usageAttempt = usageLedger.start("jev", model); }
+            catch (IOException e) { throw new JevCallException(Kind.PROTOCOL, "用量账本不可用，禁止决策外呼"); }
+        }
         BoundedHttp.Response response;
         try {
             response = transport.send(request, deadlineNanos, maxResponseBytes, cancelled);
@@ -134,6 +144,7 @@ public class JevDecisionClient {
         } catch (IOException e) {
             throw new JevCallException(Kind.NETWORK, "决策网络读写失败", e);
         }
+        try {
         int status = response.status();
         if (status == 401) throw new JevCallException(Kind.UNAUTHORIZED, "供应商拒绝授权");
         if (status == 422) throw new JevCallException(Kind.INVALID_REQUEST, "供应商拒绝请求体");
@@ -149,6 +160,10 @@ public class JevDecisionClient {
             root = strictReader.readTree(raw);
         } catch (IOException e) {
             throw new JevCallException(Kind.PROTOCOL, "决策响应非合法 JSON", e);
+        }
+        if (usageAttempt != null) {
+            try { usageLedger.captureUsage(usageAttempt, root); }
+            catch (IOException e) { throw new JevCallException(Kind.PROTOCOL, "用量账本不可用，决策响应未采用"); }
         }
         if (root == null || !root.isObject() || !root.has("answers") || !root.get("answers").isObject())
             throw new JevCallException(Kind.PROTOCOL, "决策响应缺少 answers");
@@ -188,7 +203,18 @@ public class JevDecisionClient {
         String requestId = null;
         for (String key : List.of("requestId", "request_id", "id"))
             if (root.has(key) && root.get(key).isTextual()) { requestId = root.get(key).asText(); break; }
+        if (usageAttempt != null) {
+            try { usageLedger.succeeded(usageAttempt); }
+            catch (IOException e) { throw new JevCallException(Kind.PROTOCOL, "用量账本不可用，决策响应未采用"); }
+        }
         return new CallResult(choice, gap, scores, usage, reportedModel, requestId, responseHash);
+        } catch (JevCallException e) {
+            if (usageAttempt != null) {
+                try { usageLedger.failed(usageAttempt); }
+                catch (IOException ignored) { throw new JevCallException(Kind.PROTOCOL, "用量账本不可用，决策响应未采用"); }
+            }
+            throw e;
+        }
     }
 
     private DecisionModels.NormalizedChoice parseChoice(String id, QuestionSpec spec, JsonNode answer)

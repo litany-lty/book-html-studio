@@ -1,8 +1,12 @@
 import { api } from './api.js';
 import { state, loadPreferences, savePreferences, getBookmarks, setBookmarks, cloneBlocks, isSameSession, canonicalJson } from './store.js';
-import { renderPaper, qualityOf } from './reader.js';
+import { renderPaper, qualityOf, statusMessage } from './reader.js';
 import { renderEditor, renderIssueWorkbench, issueReferences, createOverlay, enableDrawing } from './editor.js';
 import { createDecisionPanel } from './decision.js';
+import './settings.js';
+import { openBookUsage } from './usage.js';
+import { createReadingWindow } from './reading-window.js';
+import { createLibrary } from './library.js';
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -16,10 +20,169 @@ let pageRequest = 0;
 let pageFetchController = null;
 let editVersion = 0;
 let outlineRequest = 0;
-let pageInputPending = false;
+let pendingPageTarget = null;
+let pageInputIntent = 0;
 let assistPreference;
 let splitSpreadsPreference = true;
 let jobSyncError = false;
+let readingSnapshot = null;
+let deferredReady = null;
+const readingMetadataSignatures = new Map();
+const readingMetadataVersions = new Map();
+
+function currentPageProtected() {
+  return Boolean(state.dirty || state.conflict || currentSaveInFlight());
+}
+
+function olderRevision(incoming, current) {
+  const next = Number(incoming?.revision), existing = Number(current?.revision);
+  return incoming?.revision != null && current?.revision != null && Number.isFinite(next) && Number.isFinite(existing) && next < existing;
+}
+
+function renderReadingWindowStatus(snapshot = readingSnapshot) {
+  readingSnapshot = snapshot;
+  const active = readingWindow?.active() || false;
+  const bar = $('#reading-window-bar');
+  bar.hidden = !active && !snapshot && !deferredReady;
+  document.body.classList.toggle('reading-window-visible', !bar.hidden);
+  $('#reading-window-open').dataset.active = String(active);
+  $('#reading-window-open').setAttribute('aria-pressed', String(active));
+  $('#job-form button[type="submit"]').disabled = active || Boolean(state.pollTimer) || !state.book || jobSyncError;
+  $('#reading-window-stop').hidden = !active;
+  $('#reading-window-apply').hidden = !deferredReady || deferredReady.bookId !== state.book?.id || deferredReady.page !== state.currentPage;
+  $('#reading-window-manual').hidden = !(snapshot?.pages || []).some(page => page.status === 'FAILED');
+  $('#reading-window-refresh').hidden = !active;
+  const labels = { SETTLING: '停留 1 秒后开始', PROCESSING: '正在识别', READY: '窗口处理结束', IDLE: '等待阅读', STOPPING: '正在停止', STOPPED: '已停止', STOP_REQUESTED: '已发停止请求', STOP_UNKNOWN: '停止尚未确认', EXPIRED: '会话已过期', BLOCKED: '处理被占用' };
+  const failed = (snapshot?.pages || []).filter(page => page.status === 'FAILED').map(page => page.pageNumber);
+  $('#reading-window-status').textContent = deferredReady && state.book && deferredReady.bookId === state.book.id && deferredReady.page === state.currentPage
+    ? (deferredReady.revision == null
+      ? (currentPageProtected() ? '页面状态已更新，保存后可读取' : '页面状态已更新，可读取本页')
+      : (currentPageProtected() ? '识别结果已就绪，保存后更新' : '识别结果已就绪，可更新本页')) : snapshot?.status === 'READY' && failed.length
+      ? '本轮结束，部分页需手动重试' : (labels[snapshot?.status] || (active ? '随读识别' : '随读识别已停止'));
+  const processingCount = snapshot?.processingPages?.length || 0;
+  let processingText = '';
+  if (processingCount > 2) {
+    processingText = ` · ${processingCount} 页并发处理中`;
+  } else if (processingCount > 0) {
+    processingText = ` · 正在处理第 ${snapshot.processingPages.join('、')} 页`;
+  } else if (snapshot?.processingPage) {
+    processingText = ` · 正在处理第 ${snapshot.processingPage} 页`;
+  }
+
+  const failedText = failed.length ? ` · ${failed.length} 页失败` : '';
+
+  $('#reading-window-pages').textContent = snapshot?.message || (snapshot?.centerPage
+    ? `第 ${snapshot.centerPage} 页优先 · 准备 ${snapshot.fromPage}–${snapshot.toPage} 页${processingText}${failedText}`
+    : '随读识别就绪');
+  bar.title = '随读识别：未识别页仍显示原稿，缓存页不重复消耗额度。';
+  renderJobHeading();
+}
+
+function sameOutline(left, right) {
+  return left.length === right.length && left.every((entry, index) =>
+    Number(entry.pageNumber) === Number(right[index].pageNumber) && entry.blockId === right[index].blockId &&
+    entry.title === right[index].title && Number(entry.level) === Number(right[index].level));
+}
+
+function mergeReadingMetadata(snapshot) {
+  if (!state.book || !Array.isArray(snapshot?.pages)) return;
+  let processedDelta = 0, reviewedDelta = 0;
+  const outlineUpdates = new Map();
+  for (const info of snapshot.pages) {
+    const number = Number(info.pageNumber);
+    if (!Number.isInteger(number) || number < 1 || number > state.book.totalPages || !info.summary) continue;
+    const revision = info.revision == null ? null : Number(info.revision);
+    const knownRevision = readingMetadataVersions.get(number);
+    if (revision != null && Number.isFinite(revision) && knownRevision != null && revision < knownRevision) continue;
+    if (number === state.currentPage && olderRevision(info, state.page)) continue;
+    if (olderRevision(info, state.pageCache.get(number))) continue;
+    const signature = JSON.stringify([info.revision, info.summary, info.outline]);
+    if (readingMetadataSignatures.get(number) === signature) continue;
+    readingMetadataSignatures.set(number, signature);
+    if (revision != null && Number.isFinite(revision)) readingMetadataVersions.set(number, revision);
+    const summary = info.summary;
+    const index = state.summaries[number - 1]?.pageNumber === number ? number - 1
+      : state.summaries.findIndex(item => item.pageNumber === number);
+    const previous = index >= 0 ? state.summaries[index] : null;
+    const changed = !previous || ['pageNumber', 'status', 'blockCount', 'uncertainCount', 'width', 'height', 'title', 'reviewed']
+      .some(key => previous[key] !== summary[key]);
+    if (changed) {
+      processedDelta += Number(summary.status === 'READY') - Number(previous?.status === 'READY');
+      reviewedDelta += Number(Boolean(summary.reviewed)) - Number(Boolean(previous?.reviewed));
+      if (index >= 0) state.summaries[index] = summary;
+      else state.summaries.splice(number - 1, 0, summary);
+    }
+    if (Array.isArray(info.outline)) {
+      const current = state.outline.filter(entry => Number(entry.pageNumber) === number);
+      if (!sameOutline(current, info.outline)) outlineUpdates.set(number, info.outline);
+    }
+  }
+  if (processedDelta || reviewedDelta) {
+    state.book.processedPages = Math.max(0, Math.min(state.book.totalPages, Number(state.book.processedPages || 0) + processedDelta));
+    state.book.reviewedPages = Math.max(0, Math.min(state.book.totalPages, Number(state.book.reviewedPages || 0) + reviewedDelta));
+    state.books = state.books.map(book => book.id === state.book.id ? state.book : book);
+    renderBookMeta();
+  }
+  if (outlineUpdates.size) {
+    state.outline = [...state.outline.filter(entry => !outlineUpdates.has(Number(entry.pageNumber))),
+      ...[...outlineUpdates.values()].flat()].sort((left, right) => Number(left.pageNumber) - Number(right.pageNumber));
+    renderToc();
+  }
+}
+
+function acceptReadyPage(pageNumber, page) {
+  if (!state.book || pageNumber !== Number(page.pageNumber)) return;
+  if (olderRevision(page, state.pageCache.get(pageNumber)) ||
+      (pageNumber === state.currentPage && olderRevision(page, state.page))) return;
+  const bookId = state.book.id;
+  if (pageNumber === state.currentPage) {
+    if (currentPageProtected()) {
+      deferredReady = { bookId, page: pageNumber, revision: page.revision };
+      renderReadingWindowStatus();
+      return;
+    }
+    const scrollTop = $('#reader').scrollTop;
+    if (!state.page) { pageFetchController?.abort(); ++pageRequest; }
+    state.pageCache.set(pageNumber, page);
+    state.page = page; state.blocks = cloneBlocks(page.blocks); state.reviewedDraft = Boolean(page.reviewed);
+    state.selectedBlockId = null; state.selectedIssueId = null; state.editorEpoch++;
+    convertingState.completedAt = Date.now();
+    convertingState.completedPage = pageNumber;
+    convertingState.wasReprocessing = Boolean(convertingState.isReprocessing || state.reprocessingPage === pageNumber);
+    convertingState.isReprocessing = false;
+    state.reprocessingPage = null;
+    if (convertingState.timer) {
+      clearInterval(convertingState.timer);
+      convertingState.timer = null;
+    }
+    renderCurrent();
+    renderJobHeading();
+    setTimeout(() => {
+      if (convertingState.completedPage === pageNumber) {
+        convertingState.pageNumber = null;
+        convertingState.startTime = 0;
+        convertingState.completedAt = 0;
+        convertingState.completedPage = null;
+        renderJobHeading();
+      }
+    }, 1200);
+    requestAnimationFrame(() => { if (state.book?.id === bookId && state.currentPage === pageNumber) $('#reader').scrollTop = scrollTop; });
+  } else {
+    state.pageCache.set(pageNumber, page);
+    if (state.outline.some(entry => Number(entry.pageNumber) === pageNumber)) renderToc();
+  }
+  renderReadingWindowStatus();
+}
+
+const readingWindow = createReadingWindow({ api, state,
+  onStatus: snapshot => { mergeReadingMetadata(snapshot); renderReadingWindowStatus(snapshot); },
+  onPageReady: acceptReadyPage,
+  onError: error => {
+    const note = error?.status === 409 ? '本书已有手动处理任务或其他标签的随读识别；没有取消对方。请等其结束后手动刷新。' : error?.message || '随读状态读取失败，请手动刷新状态。';
+    toast(note, 'error');
+    $('#reading-window-refresh').hidden = !readingWindow.active();
+  }
+});
 
 function toast(message, tone = 'info') {
   const item = document.createElement('div');
@@ -71,14 +234,7 @@ function providerQuotaSource(provider) {
 
 function unavailableProviderReason(provider) {
   const reason = provider?.reason || '当前不可用，请检查服务端配置。';
-  if (provider?.id === 'paddle-aistudio' && !reason.includes('PADDLEOCR_ACCESS_TOKEN')) {
-    return `${reason} 请在服务端环境变量中设置 PADDLEOCR_ACCESS_TOKEN；Token 不会进入浏览器。`;
-  }
-  if (provider?.id === 'paddle' || provider?.id === 'ppocr') {
-    if (!reason.includes('BAIDU_OCR_API_KEY') || !reason.includes('BAIDU_OCR_SECRET_KEY')) return `${reason} 请在服务端环境变量中设置 BAIDU_OCR_API_KEY 与 BAIDU_OCR_SECRET_KEY。`;
-    return reason;
-  }
-  return reason;
+  return `${reason} 可在顶栏“工具配置”中检查凭据；保存配置不等于验证云端连通或额度。`;
 }
 
 function providerUsage(provider) {
@@ -90,8 +246,9 @@ function providerUsage(provider) {
 
 function renderProviders() {
   const wrap = $('#provider-options');
+  const previous = selectedProvider();
   wrap.replaceChildren();
-  const providers = state.config?.providers || [];
+  const providers = (state.config?.providers || []).filter(provider => ['paddle-aistudio', 'ppocr'].includes(provider.id));
   providers.forEach(provider => {
     const label = document.createElement('label');
     label.className = `radio${provider.available ? '' : ' disabled'}`;
@@ -108,8 +265,9 @@ function renderProviders() {
     if (detail.textContent) text.append(detail);
     label.append(input, text); wrap.append(label);
   });
-  const defaultProvider = state.config?.defaultProvider || 'paddle';
-  const preferred = [...wrap.querySelectorAll('input:not(:disabled)')].find(input => input.value === defaultProvider);
+  const defaultProvider = state.config?.defaultProvider || 'paddle-aistudio';
+  const available = [...wrap.querySelectorAll('input:not(:disabled)')];
+  const preferred = available.find(input => input.value === previous) || available.find(input => input.value === defaultProvider);
   if (preferred) preferred.checked = true;
   updateProviderNote();
 }
@@ -118,14 +276,13 @@ function updateProviderNote() {
   const id = selectedProvider();
   const provider = state.config?.providers?.find(item => item.id === id);
   if (!provider) {
-    const expected = state.config?.defaultProvider || 'paddle';
+    const expected = state.config?.defaultProvider || 'paddle-aistudio';
     $('#provider-note').textContent = `默认识别方式 ${expected} 当前不可用，请检查服务端配置或主动选择其他方式；不会静默改用旧提供商。`;
     updateAssistAvailability();
     updateSplitSpreadsAvailability();
     return;
   }
-  if (id === 'local') $('#provider-note').textContent = '本地处理不外发；扫描页自动结果不保证无误，可按需抽查。切换识别方式不会自动重跑已有 READY 页。';
-  else $('#provider-note').textContent = `${provider.label}会把所选页面图片发送给对应云服务。${providerUsage(provider)} 密钥只由服务端读取；所选 paddle 系通道额度不足或无权限时会自动改用同系其他可用通道并在页面警告中注明，也不会自动重跑已有 READY 页。重跑需勾选“覆盖已有识别与校对结果”并再次确认。`;
+  $('#provider-note').textContent = `${provider.label}会把所选页面图片发送给对应云服务。${providerUsage(provider)} 凭据只由服务端保存；是否尝试另一通道由“工具配置”的回退开关决定。已有 READY 页不会自动重跑；重跑需勾选覆盖并再次确认。`;
   updateAssistAvailability();
   updateSplitSpreadsAvailability();
 }
@@ -133,14 +290,14 @@ function updateProviderNote() {
 function updateAssistAvailability() {
   const input = $('#qwen-assist');
   const assist = state.config?.qwenAssist;
-  const cloudPrimary = selectedProvider() && selectedProvider() !== 'local';
+  const cloudPrimary = Boolean(selectedProvider());
   const available = Boolean(assist?.configured && cloudPrimary);
   if (assistPreference === undefined) assistPreference = Boolean(assist?.assistEnabled);
   input.disabled = !available;
   input.checked = available && Boolean(assistPreference);
   $('#qwen-assist-label').classList.toggle('disabled', !available);
   const model = assist?.model || 'Qwen3.8-Max';
-  if (!assist?.configured) $('#qwen-assist-note').textContent = '结构辅助未配置；需在服务端设置对应阿里云凭据，密钥不会进入浏览器。';
+  if (!assist?.configured) $('#qwen-assist-note').textContent = '结构辅助未配置；请从顶栏“工具配置”填写百炼凭据并开启 Qwen。';
   else if (!cloudPrimary) $('#qwen-assist-note').textContent = '本地识别模式下不调用云端结构辅助。';
   else $('#qwen-assist-note').textContent = `${model} 会额外读取完整页面和 OCR 来源块，只给出顺序、分类及疑点建议，不自动覆盖原文，并产生账户用量。`;
 }
@@ -161,9 +318,9 @@ function renderBooks() {
   const select = $('#book-select');
   const previous = state.book?.id || '';
   select.replaceChildren(new Option('选择书籍', ''));
-  state.books.forEach(book => select.append(new Option(`${book.title}（${book.totalPages} 页）`, book.id)));
+  state.books.filter(book => !book.archived).forEach(book => select.append(new Option(`${book.title}（${book.totalPages} 页）`, book.id)));
   select.value = previous;
-  $('#empty-state p').textContent = state.books.length
+  $('#empty-state p').textContent = state.books.some(book => !book.archived)
     ? '从上方书架选择已有书籍，或导入新的 PDF。先浏览原稿，再在“处理设置”中选择少量页面识别。'
     : '导入后先查看原稿，再挑选少量页面识别。没有识别结果的页面仍会诚实地显示原图。';
 }
@@ -207,21 +364,279 @@ function pageTitle(page) {
   return headingText(heading).trim() || `第 ${page?.pageNumber || state.currentPage} 页`;
 }
 
+const convertingState = {
+  pageNumber: null,
+  startTime: 0,
+  timer: null,
+  completedAt: 0,
+  completedPage: null,
+  isReprocessing: false,
+  wasReprocessing: false
+};
+
+function resetConvertingState(newPage = null) {
+  convertingState.pageNumber = newPage;
+  convertingState.startTime = newPage ? Date.now() : 0;
+  convertingState.completedAt = 0;
+  convertingState.completedPage = null;
+  convertingState.isReprocessing = false;
+  convertingState.wasReprocessing = false;
+  if (convertingState.timer) {
+    clearInterval(convertingState.timer);
+    convertingState.timer = null;
+  }
+}
+
+function getConvertingPagePct() {
+  if (convertingState.completedAt > 0) return 100;
+  if (!convertingState.startTime) return 15;
+  const elapsed = Date.now() - convertingState.startTime;
+  return Math.min(92, Math.max(15, Math.round(15 + 77 * (1 - Math.exp(-elapsed / 1100)))));
+}
+
+function isCurrentPageConverting() {
+  if (!state.book || !state.currentPage) return false;
+  const pageNum = state.currentPage;
+  if (state.job && activeJobs.has(state.job.status) && state.job.currentPage === pageNum) {
+    return true;
+  }
+  if (readingWindow?.active()) {
+    if (readingSnapshot?.processingPages?.includes(pageNum)) return true;
+    if (readingSnapshot?.processingPage === pageNum) return true;
+    if ((readingSnapshot?.status === 'PROCESSING' || readingSnapshot?.status === 'SETTLING') &&
+        readingSnapshot?.centerPage === pageNum && (!state.page || state.page.status !== 'READY')) {
+      return true;
+    }
+  }
+  if (state.page && state.page.status === 'PROCESSING' && Number(state.page.pageNumber) === pageNum) {
+    return true;
+  }
+  return false;
+}
+
+function renderJobHeading() {
+  const headingEl = $('#job-heading');
+  const titleContainer = $('#job-panel .job-title');
+  const retryHeaderBtn = $('#retry-page-header');
+  const reloadHeaderBtn = $('#reload-page-header');
+  const readerReloadBtn = $('#reader-reload-page');
+  if (!headingEl) return;
+  if (!state.book) {
+    headingEl.textContent = '开始转换';
+    titleContainer?.classList.remove('is-converting');
+    retryHeaderBtn?.setAttribute('hidden', '');
+    reloadHeaderBtn?.setAttribute('hidden', '');
+    readerReloadBtn?.setAttribute('hidden', '');
+    return;
+  }
+  const pageNum = state.currentPage;
+  const converting = isCurrentPageConverting();
+  const isFailed = state.page?.status === 'FAILED' && !converting;
+  const isReady = state.page?.status === 'READY' && !converting;
+  const isReprocessing = Boolean(state.reprocessingPage === pageNum || convertingState.isReprocessing);
+
+  if (retryHeaderBtn) {
+    if (isFailed) retryHeaderBtn.removeAttribute('hidden');
+    else retryHeaderBtn.setAttribute('hidden', '');
+  }
+  if (reloadHeaderBtn) {
+    if (converting && isReprocessing) {
+      reloadHeaderBtn.removeAttribute('hidden');
+      reloadHeaderBtn.disabled = true;
+      reloadHeaderBtn.innerHTML = '<span class="reprocessing-inline-spinner"></span> 正在二次处理…';
+    } else if (isReady) {
+      reloadHeaderBtn.removeAttribute('hidden');
+      reloadHeaderBtn.disabled = false;
+      reloadHeaderBtn.textContent = '重新处理本页';
+    } else {
+      reloadHeaderBtn.setAttribute('hidden', '');
+      reloadHeaderBtn.disabled = false;
+      reloadHeaderBtn.textContent = '重新处理本页';
+    }
+  }
+  if (readerReloadBtn) {
+    if (converting && isReprocessing) {
+      readerReloadBtn.removeAttribute('hidden');
+      readerReloadBtn.disabled = true;
+      readerReloadBtn.innerHTML = '<span class="reprocessing-inline-spinner"></span> 正在二次处理…';
+    } else if (isReady) {
+      readerReloadBtn.removeAttribute('hidden');
+      readerReloadBtn.disabled = false;
+      readerReloadBtn.textContent = '重新处理本页';
+    } else {
+      readerReloadBtn.setAttribute('hidden', '');
+      readerReloadBtn.disabled = false;
+      readerReloadBtn.textContent = '重新处理本页';
+    }
+  }
+
+  if (convertingState.completedAt > 0 && convertingState.completedPage === pageNum &&
+      Date.now() - convertingState.completedAt < 1200) {
+    headingEl.textContent = convertingState.wasReprocessing
+      ? `第 ${pageNum} 页二次处理完成 · 100%`
+      : `第 ${pageNum} 页转化完成 · 100%`;
+    titleContainer?.classList.add('is-converting');
+    return;
+  }
+
+  if (converting) {
+    if (convertingState.pageNumber !== pageNum) {
+      convertingState.pageNumber = pageNum;
+      convertingState.startTime = Date.now();
+      convertingState.completedAt = 0;
+      convertingState.completedPage = null;
+    }
+    if (!convertingState.timer) {
+      convertingState.timer = setInterval(() => {
+        if (!isCurrentPageConverting()) {
+          clearInterval(convertingState.timer);
+          convertingState.timer = null;
+          renderJobHeading();
+        } else {
+          const actionText = isReprocessing ? '正在二次处理' : '正在转化';
+          headingEl.textContent = `${actionText}第 ${state.currentPage} 页 · ${getConvertingPagePct()}%`;
+        }
+      }, 100);
+    }
+    const actionText = isReprocessing ? '正在二次处理' : '正在转化';
+    headingEl.textContent = `${actionText}第 ${pageNum} 页 · ${getConvertingPagePct()}%`;
+    titleContainer?.classList.add('is-converting');
+    return;
+  }
+
+  if (convertingState.timer) {
+    clearInterval(convertingState.timer);
+    convertingState.timer = null;
+  }
+  titleContainer?.classList.remove('is-converting');
+
+  if (state.job && state.job.status !== 'IDLE') {
+    const labels = { QUEUED: '等待处理', RUNNING: '正在转换', CANCELLING: '正在取消', COMPLETED: '处理完成', COMPLETED_WITH_ERRORS: '完成，部分页面失败', CANCELLED: '任务已取消', INTERRUPTED: '任务因服务重启而中断', FAILED: '任务失败' };
+    const pct = state.job.total ? Math.round(((state.job.completed || 0) / state.job.total) * 100) : 0;
+    if (activeJobs.has(state.job.status)) {
+      headingEl.textContent = `正在转换 · ${pct}%${state.job.currentPage ? ` (当前第 ${state.job.currentPage} 页)` : ''}`;
+    } else {
+      headingEl.textContent = labels[state.job.status] || '本书处理';
+    }
+    return;
+  }
+
+  if (readingWindow?.active()) {
+    if (state.page?.status === 'READY') {
+      headingEl.textContent = `第 ${pageNum} 页已就绪 · 随读中`;
+    } else if (state.page?.status === 'FAILED') {
+      headingEl.textContent = `第 ${pageNum} 页转化失败`;
+    } else {
+      headingEl.textContent = '随读识别中';
+    }
+    return;
+  }
+
+  if (isFailed) {
+    headingEl.textContent = `第 ${pageNum} 页转化失败`;
+    return;
+  }
+
+  headingEl.textContent = '本书处理';
+}
+
+async function retryCurrentPage() {
+  if (!state.book || !state.currentPage) return;
+  const pageNum = state.currentPage;
+  state.page = { ...state.page, status: 'PROCESSING', error: null };
+  state.pageCache.delete(pageNum);
+  renderCurrent();
+  renderJobHeading();
+  if (readingWindow?.active()) {
+    await readingWindow.retryCurrentPage();
+  } else {
+    const provider = selectedProvider();
+    const providerConfig = state.config?.providers?.find(item => item.id === provider);
+    if (!providerConfig?.available) { toast('请在处理设置中选择可用的云识别通道。', 'error'); return; }
+    try {
+      await api.startJob(state.book.id, {
+        pages: String(pageNum),
+        provider,
+        layout: 'auto',
+        splitSpreads: false,
+        force: true,
+        assist: $('#qwen-assist')?.checked && !$('#qwen-assist').disabled
+      });
+      schedulePoll();
+    } catch (err) {
+      showError(err);
+    }
+  }
+}
+
+async function reloadCurrentPage() {
+  if (!state.book || !state.currentPage) return;
+  const pageNum = state.currentPage;
+  state.reprocessingPage = pageNum;
+  convertingState.isReprocessing = true;
+  convertingState.pageNumber = pageNum;
+  convertingState.startTime = Date.now();
+  convertingState.completedAt = 0;
+  convertingState.completedPage = null;
+
+  // 保留已有 blocks 供视觉平滑过渡，不闪烁、不退回原图
+  state.page = {
+    ...state.page,
+    status: 'PROCESSING',
+    isReprocessing: true,
+    error: null
+  };
+  if (state.pageCache.has(pageNum)) {
+    const cached = state.pageCache.get(pageNum);
+    state.pageCache.set(pageNum, { ...cached, status: 'PROCESSING', isReprocessing: true });
+  }
+
+  renderCurrent();
+  renderJobHeading();
+
+  if (readingWindow?.active()) {
+    await readingWindow.retryCurrentPage();
+  } else {
+    const provider = selectedProvider();
+    const providerConfig = state.config?.providers?.find(item => item.id === provider);
+    if (!providerConfig?.available) { toast('请在处理设置中选择可用的云识别通道。', 'error'); return; }
+    try {
+      await api.startJob(state.book.id, {
+        pages: String(pageNum),
+        provider,
+        layout: 'auto',
+        splitSpreads: false,
+        force: true,
+        assist: $('#qwen-assist')?.checked && !$('#qwen-assist').disabled
+      });
+      schedulePoll();
+    } catch (err) {
+      showError(err);
+    }
+  }
+}
+
 function renderBookMeta() {
   if (!state.book) {
+    renderJobHeading();
     $('#book-summary').textContent = '先导入一本 PDF，原稿会始终保留。';
     $('#export-button').disabled = true;
+    $('#usage-open').disabled = true;
     $('#job-form button[type="submit"]').disabled = true;
     renderReadingProgress();
     return;
   }
   const b = state.book;
-  $('#book-summary').textContent = `${b.title} · ${b.totalPages} 页 · 已处理 ${b.processedPages || 0} 页 · 已校对 ${b.reviewedPages || 0} 页`;
+  const pct = b.totalPages ? Math.round(((b.processedPages || 0) / b.totalPages) * 100) : 0;
+  $('#book-summary').textContent = `已处理 ${b.processedPages || 0} / ${b.totalPages} 页 (${pct}%) · 已校对 ${b.reviewedPages || 0} 页`;
+  $('#book-select').title = b.title;
   $('#export-button').disabled = false;
-  $('#job-form button[type="submit"]').disabled = false;
+  $('#usage-open').disabled = false;
+  $('#job-form button[type="submit"]').disabled = readingWindow.active();
   $('#page-jump').max = b.totalPages;
   $('#total-pages').textContent = `/ ${b.totalPages} 页`;
   renderReadingProgress();
+  renderJobHeading();
 }
 
 function renderToc() {
@@ -304,10 +719,12 @@ async function goToOutlineEntry(entry) {
 }
 
 async function commitPageInput() {
-  if (pageInputPending) return;
-  pageInputPending = true;
-  try { await goToPage(Number($('#page-jump').value)); }
-  finally { pageInputPending = false; }
+  const target = Number($('#page-jump').value);
+  if (pendingPageTarget === target) return;
+  const intent = ++pageInputIntent;
+  pendingPageTarget = target;
+  try { await goToPage(target); }
+  finally { if (intent === pageInputIntent) pendingPageTarget = null; }
 }
 
 function renderBookmarks() {
@@ -327,18 +744,104 @@ function renderBookmarkButton() {
 }
 
 function renderQuality() {
+  const job = state.job;
+  const isJobRunning = job && activeJobs.has(job.status);
+  const isCurrentProcessing = (state.page?.status === 'PROCESSING') || (isJobRunning && job.currentPage === state.currentPage);
+
+  const badge = $('#quality-badge');
+  if (isCurrentProcessing) {
+    const pct = job?.total ? Math.round(((job.completed || 0) / job.total) * 100) : 0;
+    badge.className = 'quality-badge processing';
+    badge.replaceChildren();
+    const dot = document.createElement('span');
+    dot.className = 'pulse-dot';
+    badge.append(dot, document.createTextNode(`正在转换 · ${pct}%`));
+    const detail = job?.total
+      ? `正在处理第 ${state.currentPage} 页，全书已完成 ${job.completed || 0} / ${job.total} 页 (${pct}%)`
+      : '本页正在转换，完成前先显示原稿。';
+    $('#quality-detail').textContent = detail;
+    return;
+  }
+
   const quality = qualityOf(state.page);
-  $('#quality-badge').className = `quality-badge ${quality.tone}`;
-  $('#quality-badge').textContent = quality.label;
-  $('#quality-detail').textContent = quality.detail;
+  badge.className = `quality-badge ${quality.tone}`;
+  badge.textContent = quality.label;
+
+  if (isJobRunning && job?.currentPage && job.currentPage !== state.currentPage) {
+    const pct = job.total ? Math.round(((job.completed || 0) / job.total) * 100) : 0;
+    const bgInfo = ` · 后台正在转换第 ${job.currentPage} 页 (${pct}%)`;
+    $('#quality-detail').textContent = `${quality.detail || ''}${bgInfo}`;
+  } else {
+    $('#quality-detail').textContent = quality.detail || '';
+  }
+}
+
+function renderPageMessage(rawMessage) {
+  const node = $('#page-message');
+  if (!node) return;
+  const job = state.job;
+  const isJobRunning = job && activeJobs.has(job.status);
+  const isCurrentProcessing = (state.page?.status === 'PROCESSING') || (isJobRunning && job.currentPage === state.currentPage);
+
+  if (isCurrentProcessing) {
+    node.hidden = false;
+    node.className = 'page-message is-processing';
+    node.replaceChildren();
+
+    const card = document.createElement('div');
+    card.className = 'page-progress-card';
+
+    const head = document.createElement('div');
+    head.className = 'page-progress-head';
+    const title = document.createElement('div');
+    title.className = 'page-progress-title';
+    const spinner = document.createElement('span');
+    spinner.className = 'page-progress-spinner';
+    title.append(spinner, document.createTextNode(`第 ${state.currentPage} 页正在转换中…`));
+
+    const pct = job?.total ? Math.round(((job.completed || 0) / job.total) * 100) : 0;
+    const pctNode = document.createElement('span');
+    pctNode.className = 'page-progress-pct';
+    pctNode.textContent = `${pct}%`;
+    head.append(title, pctNode);
+
+    const track = document.createElement('div');
+    track.className = 'page-progress-track';
+    const fill = document.createElement('div');
+    fill.className = 'page-progress-fill';
+    fill.style.width = `${pct}%`;
+    track.append(fill);
+
+    const meta = document.createElement('div');
+    meta.className = 'page-progress-meta';
+    const countSpan = document.createElement('span');
+    countSpan.textContent = job?.total
+      ? `全书已完成 ${job.completed || 0} / ${job.total} 页 · 正在处理当前页`
+      : '正在进行文字与版面识别…';
+    const hintSpan = document.createElement('span');
+    hintSpan.className = 'page-progress-hint';
+    hintSpan.textContent = '识别完成后自动呈现排版正文，完成前先显示原稿。';
+    meta.append(countSpan, hintSpan);
+
+    card.append(head, track, meta);
+    node.append(card);
+    return;
+  }
+
+  node.className = 'page-message';
+  const msg = rawMessage !== undefined ? rawMessage : (state.page ? statusMessage(state.page) : '');
+  node.hidden = !msg;
+  node.textContent = msg || '';
 }
 
 function renderReview() {
   const available = Boolean(state.page);
   $('#review-empty').hidden = available;
   $('#review-content').hidden = !available;
+  updateSaveStatus();
   if (!available) return;
-  renderConflictBar();  const reviewImage = $('#review-original');
+  renderConflictBar();
+  const reviewImage = $('#review-original');
   const imageUrl = api.pageImage(state.book.id, state.currentPage, 900);
   if (reviewImage.getAttribute('src') !== imageUrl) reviewImage.src = imageUrl;
   const refs = issueReferences(state.blocks);
@@ -347,11 +850,21 @@ function renderReview() {
   }
   renderIssueWorkbench($('#issue-workbench'), state.blocks, {
     selectedIssueId: state.selectedIssueId,
+    page: state.page,
+    loadIssueEvidence: loadIssueEvidence,
     imageUrl,
     pageWidth: state.page.width,
     pageHeight: state.page.height,
     onSelect(blockId, issueId) {
-      state.selectedBlockId = blockId; state.selectedIssueId = issueId; renderReview(); syncOverlays(); scrollToSelectedBlock(blockId);
+      const panel = $('#review-panel');
+      const scrollTop = panel.scrollTop;
+      const action = document.activeElement?.textContent;
+      state.selectedBlockId = blockId; state.selectedIssueId = issueId; renderReview(); syncOverlays();
+      // 疑点导航留在疑点工作台，不跳到下方整块编辑表单。
+      panel.scrollTop = scrollTop;
+      const nextFocus = [...$('#issue-workbench').querySelectorAll('header button')]
+        .find(button => !button.disabled && button.textContent === action);
+      nextFocus?.focus({ preventScroll: true });
     },
     onUpdate(block, issue, patch) {
       Object.assign(issue, patch); state.selectedBlockId = block.id; state.selectedIssueId = issue.id; markDirty(); renderCurrent();
@@ -359,7 +872,7 @@ function renderReview() {
     onDirty() { markDirty(); }
   });
   $('#mark-reviewed').checked = Boolean(state.reviewedDraft);
-  $('#save-page').disabled = !state.dirty;
+  $('#save-page').disabled = !state.dirty || Boolean(state.conflict) || Boolean(currentSaveInFlight());
   renderDecisionSection();
   renderEditor($('#review-list'), state.blocks, {
     selectedId: state.selectedBlockId,
@@ -379,7 +892,8 @@ function renderReview() {
 const decisionPanel = createDecisionPanel({
   getSession: () => state.book
     ? { bookId: state.book.id, page: state.currentPage, epoch: state.editorEpoch } : null,
-  hasDirty: () => hasDirtyChanges(),
+  // 面板只查询草稿状态；不可复用会弹出“离开页面”确认框的导航函数。
+  hasDirty: () => Boolean(state.dirty),
   onAccepted: (result) => {
     // 接受已推进服务端版本：失效本页缓存；若有未保存草稿则保留草稿并同步版本，否则重载页面
     state.pageCache.delete(state.currentPage);
@@ -407,7 +921,7 @@ function renderDecisionSection() {
   if (!host) {
     host = document.createElement('section');
     host.className = 'decision-section';
-    workbench.append(host);
+    workbench.querySelector('.issue-edit')?.before(host);
   }
   const block = (state.blocks || []).find(b => b && b.id === state.selectedBlockId);
   const issue = block?.issues?.find(i => i && i.id === state.selectedIssueId);
@@ -432,9 +946,40 @@ function scrollToSelectedBlock(id) {
 function markDirty() {
   editVersion++;
   state.dirty = true;
-  $('#save-page').disabled = false;
+  $('#save-page').disabled = Boolean(state.conflict) || Boolean(currentSaveInFlight());
+  updateSaveStatus();
   // J08：草稿变脏即同步决策门禁（轻量，不重绘面板）
   try { decisionPanel.syncDraftGuard(true); } catch (_) { /* 面板未挂载时忽略 */ }
+}
+
+function currentSaveInFlight() {
+  return state.book && state.saveInFlight?.bookId === state.book.id
+    && state.saveInFlight.page === state.currentPage && state.saveInFlight.epoch === state.editorEpoch;
+}
+
+function updateSaveStatus() {
+  const hasPage = Boolean(state.book && state.page);
+  const saving = hasPage && currentSaveInFlight();
+  const tone = !hasPage ? '' : state.conflict ? 'conflict' : saving ? 'saving' : state.dirty ? 'dirty' : 'saved';
+  const label = { conflict: '冲突', saving: '保存中', dirty: '未保存', saved: '已保存' }[tone] || '';
+  const pageStatus = $('#page-save-status');
+  pageStatus.hidden = !hasPage;
+  pageStatus.textContent = label;
+  pageStatus.dataset.state = tone;
+  const reviewStatus = $('#review-save-status');
+  reviewStatus.textContent = tone === 'dirty' ? '未保存 · 标记解决后仍需保存' : label;
+  reviewStatus.dataset.state = tone;
+}
+
+async function loadIssueEvidence(issueId) {
+  const bookId = state.book?.id, pageNumber = state.currentPage, page = state.page, epoch = state.editorEpoch;
+  if (!bookId || !page || !issueId) return null;
+  const precise = await api.issueMetadata(bookId, pageNumber, issueId);
+  if (state.book?.id !== bookId || state.currentPage !== pageNumber || state.page !== page || state.editorEpoch !== epoch) return null;
+  if (!(state.blocks || []).some(block => (block.issues || []).some(issue => issue.id === issueId))) return null;
+  page.issueImages ||= {};
+  page.issueImages[issueId] = precise;
+  return precise;
 }
 
 // A1-01：编辑会话快照与身份判断。相同页号不代表相同会话。
@@ -476,8 +1021,8 @@ function renderConflictBar() {
   title.textContent = `保存冲突：远端已到版本 ${c.remoteRevision ?? '未知'}，本地基于版本 ${c.baseRevision ?? '未知'}。本地草稿已保留，未写入服务端。`;
   const detail = document.createElement('div'); detail.className = 'conflict-detail';
   detail.textContent = c.remote
-    ? `远端：${c.remote.blocks?.length ?? '?'} 个块${c.remote.reviewed ? '（已校对）' : ''}。`
-    : (c.note || '');
+    ? `远端：${c.remote.blocks?.length ?? '?'} 个块${c.remote.reviewed ? '（已校对）' : ''}。如需合并，先下载本地草稿，再加载远端并人工重填。`
+    : `${c.note || ''} 如需合并，先下载本地草稿，再加载远端并人工重填。`;
   const actions = document.createElement('div'); actions.className = 'conflict-actions';
   const mkButton = (text, onClick) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'button'; b.textContent = text; b.addEventListener('click', onClick); return b; };
   actions.append(
@@ -500,8 +1045,7 @@ function renderConflictBar() {
         state.dirty = false; state.conflict = null; state.pageCache.set(c.page, remote);
         renderCurrent(); toast('已加载远端版本。', 'success');
       } catch (error) { showError(error); }
-    }),
-    mkButton('继续保留草稿', () => { if (state.conflict === c) state.conflict = null; renderConflictBar(); })
+    })
   );
   bar.append(title, detail, actions);
 }
@@ -521,13 +1065,16 @@ function renderCurrent(full = true) {
   const paper = $('#paper');
   const message = renderPaper(paper, {
     book: state.book,
-    page: { ...state.page, blocks: state.blocks },
+    page: { ...state.page, blocks: state.blocks, isReprocessing: Boolean(state.reprocessingPage === state.currentPage || state.page?.isReprocessing) },
     blocks: state.blocks,
+    isReprocessing: Boolean(state.reprocessingPage === state.currentPage || state.page?.isReprocessing),
     view: state.view,
     script: state.script,
     evidence: { mode: state.evidenceMode, assistMap: state.assistMap },
     fontSize: state.fontSize,
     lineHeight: state.lineHeight,
+    onRetry: retryCurrentPage,
+    onReload: reloadCurrentPage,
     onIssueSelect(blockId, issueId) {
       state.selectedBlockId = blockId; state.selectedIssueId = issueId; renderReview(); syncOverlays(); openDrawer('review');
       requestAnimationFrame(() => {
@@ -548,8 +1095,7 @@ function renderCurrent(full = true) {
       }));
     }
   });
-  $('#page-message').hidden = !message;
-  $('#page-message').textContent = message;
+  renderPageMessage(message);
   $('#page-jump').value = state.currentPage;
   renderReadingProgress();
   $('#prev-page').disabled = state.currentPage <= 1;
@@ -582,21 +1128,43 @@ function syncEvidenceToggle() {
 
 async function goToPage(n, options = {}) {
   if (!state.book || !Number.isInteger(n) || n < 1 || n > state.book.totalPages) { renderReadingProgress(); if (state.book) $('#page-jump').value = state.currentPage; return false; }
+  if (options.force && n === state.currentPage && currentPageProtected()) {
+    deferredReady = { bookId: state.book.id, page: n, revision: null };
+    renderReadingWindowStatus();
+    return false;
+  }
   if (!options.force && n === state.currentPage && state.page) {
+    const bookId = state.book.id;
+    const requestId = pageRequest, editorEpoch = state.editorEpoch;
+    void api.page(bookId, n).then(fresh => {
+      if (state.book?.id === bookId && state.currentPage === n && requestId === pageRequest && editorEpoch === state.editorEpoch &&
+          !olderRevision(fresh, state.page) &&
+          (fresh.revision !== state.page?.revision || fresh.status !== state.page?.status) && fresh.status === 'READY')
+        acceptReadyPage(n, fresh);
+    }).catch(error => { if (state.book?.id === bookId && state.currentPage === n) showError(error); });
     state.activeOutlineBlockId = options.outlineBlockId || null; renderToc(); renderReadingProgress(); $('#page-jump').value = state.currentPage; return true;
   }
   if (!options.force && hasDirtyChanges()) { renderReadingProgress(); $('#page-jump').value = state.currentPage; return false; }
   const previousScrollTop = $('#reader').scrollTop;
+  const pageChanged = n !== state.currentPage;
   const previous = { currentPage: state.currentPage, page: state.page, blocks: state.blocks, selectedBlockId: state.selectedBlockId,
     selectedIssueId: state.selectedIssueId, reviewedDraft: state.reviewedDraft, dirty: state.dirty,
     activeOutlineBlockId: state.activeOutlineBlockId, editorEpoch: state.editorEpoch, conflict: state.conflict };
   cancelDrawing?.(); cancelDrawing = null; state.drawType = null; $('#draw-hint').hidden = true;
   if (!options.skipSavePosition) saveReadingPosition();
   state.currentPage = n; state.page = null; state.blocks = []; state.selectedBlockId = null; state.selectedIssueId = null; state.dirty = false; state.activeOutlineBlockId = options.outlineBlockId || null;
+  updateSaveStatus();
   // A1-01：进入新页面即开启新编辑会话，旧保存响应不得回写
   state.editorEpoch++; state.conflict = null;
   // J08：切页换作用域，辅助推荐映射清空，迟到决策响应只能丢弃（关闭面板不等同取消任务）
   state.assistMap = {};
+  if (pageChanged) {
+    deferredReady = null;
+    resetConvertingState(n);
+    renderJobHeading();
+    if (!readingWindow.active()) renderReadingWindowStatus(null);
+    readingWindow.navigated();
+  } else if (!readingWindow.active()) readingWindow.prefetch();
   const requestId = ++pageRequest, bookId = state.book.id;
   // 阶段2：取消上一次未完成的正文请求，后端仍以自身预算为准继续或终止解码
   pageFetchController?.abort();
@@ -606,17 +1174,31 @@ async function goToPage(n, options = {}) {
   $('#paper').replaceChildren();
   const loading = document.createElement('p'); loading.className = 'paper-loading'; loading.textContent = `正在读取第 ${n} 页…`; $('#paper').append(loading);
   try {
-    const page = state.pageCache.get(n) || await api.page(bookId, n, fetchSignal);
+    const cached = state.pageCache.get(n);
+    const page = cached || await api.page(bookId, n, fetchSignal);
     if (requestId !== pageRequest || state.book?.id !== bookId) return;
     state.pageCache.set(n, page); state.page = page; state.blocks = cloneBlocks(page.blocks); state.reviewedDraft = Boolean(page.reviewed); renderCurrent();
-    const position = options.restoreScroll ? Number(options.scrollTop || 0) : 0;
+    renderJobHeading();
+    const position = options.restoreScroll ? Number(options.scrollTop || 0) : options.preserveScroll ? previousScrollTop : 0;
     requestAnimationFrame(() => { $('#reader').scrollTop = position; });
     closeDrawers();
+    // 缓存先供即时阅读，但每次实际进入页面都以本地 JSON 重新核对；
+    // 旧窗口单页完成后即使不在新窗口状态中，也不会永久停留在 PENDING 原稿。
+    if (cached) void api.page(bookId, n, fetchSignal).then(fresh => {
+      if (requestId !== pageRequest || state.book?.id !== bookId || state.currentPage !== n) return;
+      if (olderRevision(fresh, state.page) || olderRevision(fresh, state.pageCache.get(n)) ||
+          (fresh.revision === cached.revision && fresh.status === cached.status)) return;
+      if (fresh.status === 'READY') acceptReadyPage(n, fresh);
+      else if (!currentPageProtected()) state.pageCache.set(n, fresh);
+    }).catch(error => {
+      if (error?.name !== 'StaleRequest' && requestId === pageRequest && state.book?.id === bookId) showError(error);
+    });
     return true;
   } catch (error) {
     // 阶段2：被更快翻页取代的请求静默丢弃，不恢复旧页、不报错
     if (error?.name === 'StaleRequest' || requestId !== pageRequest) return false;
     Object.assign(state, previous);
+    if (pageChanged) readingWindow.navigated();
     if (state.page) { renderCurrent(); requestAnimationFrame(() => { $('#reader').scrollTop = previousScrollTop; }); }
     else {
       renderReadingProgress(); $('#page-jump').value = state.currentPage; $('#paper').replaceChildren();
@@ -629,14 +1211,20 @@ async function goToPage(n, options = {}) {
 
 async function selectBook(id) {
   if (hasDirtyChanges()) { $('#book-select').value = state.book?.id || ''; return; }
+  void readingWindow.stop({ silent: true });
+  readingMetadataSignatures.clear(); readingMetadataVersions.clear();
+  deferredReady = null;
+  renderReadingWindowStatus(null);
   const requestId = ++bookRequest;
+  $('#usage-open').disabled = true;
   const submit = $('#job-form button[type="submit"]');
   const refresh = $('#refresh-job');
   setBusy(submit, false); submit.textContent = '开始处理'; delete submit.dataset.label; submit.disabled = true;
   setBusy(refresh, false); refresh.textContent = '刷新任务状态'; delete refresh.dataset.label;
   ++pageRequest;
   pageFetchController?.abort();
-  clearPolling(); ++outlineRequest; state.pageCache.clear(); state.page = null; state.blocks = []; state.selectedIssueId = null; state.dirty = false; state.outline = []; state.outlineStatus = 'idle'; state.activeOutlineBlockId = null;
+  clearPolling(); ++outlineRequest; state.pageCache.clear(); state.page = null; state.blocks = []; state.selectedIssueId = null; state.dirty = false; state.outline = []; state.outlineStatus = 'idle'; state.activeOutlineBlockId = null; state.job = null;
+  updateSaveStatus();
   jobSyncError = false; $('#job-progress').hidden = true; $('#job-recovery').hidden = true;
   // A1-01：切书开启新编辑会话并清空冲突栏
   state.editorEpoch++; state.conflict = null; state.saveInFlight = null;
@@ -665,6 +1253,24 @@ async function selectBook(id) {
     await goToPage(page, { force: true, restoreScroll: true, scrollTop: prefs.scrollTop, skipSavePosition: true });
     if (requestId !== bookRequest) return;
     await Promise.all([refreshJob(), outlinePromise]);
+    if (requestId !== bookRequest) return;
+    if (!readingWindow.active()) {
+      const provider = selectedProvider();
+      const providerConfig = state.config?.providers?.find(item => item.id === provider);
+      if (provider && providerConfig?.available) {
+        const form = new FormData($('#job-form'));
+        const options = {
+          provider,
+          layout: form.get('layout') || 'auto',
+          splitSpreads: form.get('splitSpreads') === 'on',
+          assist: $('#qwen-assist').checked && !$('#qwen-assist').disabled,
+          autoProcessAll: isAutoProcessAll()
+        };
+        readingWindow.enable(options).catch(err => {
+          console.warn('随读识别自动启动跳过:', err);
+        });
+      }
+    }
   } catch (error) { if (requestId === bookRequest) showError(error); }
 }
 
@@ -679,15 +1285,21 @@ function validateRange(value, total) {
 }
 
 function renderJob(job) {
+  state.job = job;
   const active = activeJobs.has(job.status);
   $('#job-progress').hidden = job.status === 'IDLE';
   $('#cancel-job').hidden = !active;
-  $('#job-form button[type="submit"]').disabled = active || !state.book;
+  $('#job-form button[type="submit"]').disabled = active || readingWindow.active() || !state.book;
   const labels = { IDLE: '未开始', QUEUED: '等待处理', RUNNING: '正在转换', CANCELLING: '正在取消', COMPLETED: '处理完成', COMPLETED_WITH_ERRORS: '完成，部分页面失败', CANCELLED: '任务已取消', INTERRUPTED: '任务因服务重启而中断', FAILED: '任务失败' };
-  $('#progress-label').textContent = labels[job.status] || job.status;
-  $('#progress-count').textContent = job.total ? `${job.completed || 0} / ${job.total}${job.currentPage ? ` · 第 ${job.currentPage} 页` : ''}` : '';
+  const pct = job.total ? Math.round(((job.completed || 0) / job.total) * 100) : 0;
+  renderJobHeading();
+  $('#progress-label').textContent = active ? `正在转换 · ${pct}%` : (labels[job.status] || job.status);
+  $('#progress-count').textContent = job.total
+    ? `${pct}% (${job.completed || 0} / ${job.total} 页)${job.currentPage ? ` · 当前第 ${job.currentPage} 页` : ''}`
+    : '';
   $('#progress-bar').max = Math.max(1, job.total || 1); $('#progress-bar').value = job.completed || 0;
   const errors = [...(job.errors || []), ...(job.error ? [job.error] : [])];
+  $('#job-panel').classList.toggle('job-settled', job.status === 'COMPLETED' && !errors.length && !jobSyncError);
   $('#job-errors').textContent = errors.slice(-3).join('；');
   $('#job-error-details').hidden = errors.length <= 3;
   $('#job-error-summary').textContent = `查看全部错误（${errors.length} 条）`;
@@ -705,6 +1317,8 @@ function renderJob(job) {
     : (guidance[job.status] || '');
   $('#refresh-job').hidden = !jobSyncError;
   $('#edit-job').hidden = Boolean(jobSyncError || !guidance[job.status]);
+  renderQuality();
+  renderPageMessage();
   if (active) schedulePoll(); else clearPolling();
 }
 
@@ -721,6 +1335,12 @@ function schedulePoll(delay = 1500) {
       if (!activeJobs.has(job.status)) {
         try { await refreshBookData(bookId, requestId); }
         catch (error) { if (jobSessionMatches(bookId, requestId)) showError(error); }
+      } else if (state.page && state.page.status !== 'READY' && (!job.currentPage || job.currentPage > state.currentPage)) {
+        api.page(bookId, state.currentPage).then(fresh => {
+          if (fresh && fresh.status === 'READY' && state.currentPage === fresh.pageNumber && jobSessionMatches(bookId, requestId)) {
+            acceptReadyPage(fresh.pageNumber, fresh);
+          }
+        }).catch(() => {});
       }
     } catch (_) {
       if (!jobSessionMatches(bookId, requestId)) return;
@@ -731,6 +1351,7 @@ function schedulePoll(delay = 1500) {
 
 function showJobSyncError() {
   jobSyncError = true;
+  $('#job-panel').classList.remove('job-settled');
   $('#job-progress').hidden = false;
   $('#job-recovery').hidden = false;
   $('#job-recovery-message').textContent = '暂时无法确认任务状态，处理可能仍在后台运行。请先刷新状态，不要重复创建任务。';
@@ -762,11 +1383,14 @@ async function refreshBookData(id = state.book?.id, requestId = bookRequest) {
   if (!id || !jobSessionMatches(id, requestId)) return;
   const [book, summaries] = await Promise.all([api.book(id), api.pages(id)]);
   if (!jobSessionMatches(id, requestId)) return;
-  state.book = book; state.books = state.books.map(item => item.id === id ? book : item); state.summaries = summaries; state.pageCache.clear(); renderBooks(); renderBookMeta(); renderToc();
+  const protectedPage = currentPageProtected() && state.page ? state.page : null;
+  state.book = book; state.books = state.books.map(item => item.id === id ? book : item); state.summaries = summaries; state.pageCache.clear();
+  if (protectedPage) state.pageCache.set(state.currentPage, protectedPage);
+  renderBooks(); renderBookMeta(); renderToc();
   await refreshOutline(id);
   if (!jobSessionMatches(id, requestId)) return;
-  if (state.dirty) { toast('任务状态已更新，保留当前未保存的校对内容。'); return; }
-  await goToPage(state.currentPage, { force: true });
+  if (currentPageProtected()) { deferredReady = { bookId: id, page: state.currentPage, revision: null }; renderReadingWindowStatus(); toast('任务状态已更新，保留当前校对内容；保存后可更新本页。'); return; }
+  await goToPage(state.currentPage, { force: true, preserveScroll: true });
 }
 
 let lastDrawerOpener = null;
@@ -807,11 +1431,8 @@ function startDrawing(type) {
 async function init() {
   // 阶段2：点击疑字后按需加载精确证据（正文读取不再附带高清渲染）
   globalThis.BookReadingLayout?.setEvidenceFetcher?.(({ page, issueId }) => {
-    if (!state.book || !page || !issueId) return Promise.resolve(null);
-    return api.issueMetadata(state.book.id, page.pageNumber, issueId).then(precise => {
-      if (precise && page.issueImages) page.issueImages[issueId] = precise;
-      return precise;
-    });
+    if (!page || page !== state.page || !issueId) return Promise.resolve(null);
+    return loadIssueEvidence(issueId);
   });
   try {
     const [config, books] = await Promise.all([api.config(), api.books()]);
@@ -819,8 +1440,83 @@ async function init() {
   } catch (error) { showError(error); $('#provider-note').textContent = '无法读取服务端配置，请确认 Java 服务已启动。'; }
 }
 
+window.refreshProcessingConfig = async () => {
+  const config = await api.config();
+  state.config = config;
+  renderProviders();
+  state.assistMap = {};
+  if (state.page) renderCurrent(false);
+  await decisionPanel.refresh();
+};
+
+const library = createLibrary({
+  books: () => state.books,
+  currentBookId: () => state.book?.id,
+  canArchiveCurrent: () => !currentPageProtected(),
+  openUsage: book => openBookUsage(book),
+  openBook: async id => {
+    if (state.book?.id === id) return true;
+    await selectBook(id);
+    return state.book?.id === id;
+  },
+  processBook: async book => {
+    if (readingWindow?.active()) {
+      await readingWindow.stop({ silent: true });
+    }
+    const provider = selectedProvider() || 'paddle-aistudio';
+    const form = new FormData($('#job-form'));
+    const assist = $('#qwen-assist')?.checked && !$('#qwen-assist').disabled;
+    await api.startJob(book.id, {
+      pages: `1-${book.totalPages}`,
+      provider,
+      layout: form.get('layout') || 'auto',
+      splitSpreads: form.get('splitSpreads') === 'on',
+      force: false,
+      assist: assist ?? true
+    });
+    if (state.book?.id === book.id) {
+      schedulePoll();
+    }
+  },
+  changed: async (updated, patch, latest) => {
+    if (latest) state.books = latest;
+    else if (updated) state.books = state.books.map(book => book.id === updated.id ? updated : book);
+    if (updated?.id === state.book?.id) {
+      if (patch?.archived) await selectBook('');
+      else { state.book = updated; renderBookMeta(); }
+    }
+    renderBooks();
+  }
+});
 $('#book-select').addEventListener('change', event => selectBook(event.target.value));
+const moreToggle = $('#more-toggle');
+const moreTools = $('#more-tools');
+function closeMore(restoreFocus = false) {
+  if (!moreTools.classList.contains('open')) return;
+  moreTools.classList.remove('open');
+  moreToggle.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) moreToggle.focus({ preventScroll: true });
+}
+moreToggle.addEventListener('click', () => {
+  const open = moreTools.classList.toggle('open');
+  moreToggle.setAttribute('aria-expanded', String(open));
+  if (open) moreTools.querySelector('label, button:not(:disabled)')?.focus?.();
+});
+moreTools.querySelector('.upload-button').addEventListener('keydown', event => {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    $('#pdf-upload').click();
+  }
+});
+document.addEventListener('pointerdown', event => {
+  if (!moreTools.contains(event.target) && !moreToggle.contains(event.target)) closeMore();
+});
+moreTools.addEventListener('click', event => {
+  const button = event.target.closest('button');
+  if (button && button.id !== 'usage-open' && button.id !== 'settings-open') closeMore();
+});
 $('#pdf-upload').addEventListener('change', async event => {
+  closeMore(true);
   const file = event.target.files[0]; if (!file) return;
   if (file.type && file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) { toast('请选择 PDF 文件。', 'error'); event.target.value = ''; return; }
   const max = Number(state.config?.maxUploadMb || 0); if (max && file.size > max * 1024 * 1024) { toast(`文件超过 ${max} MB 上传上限。`, 'error'); event.target.value = ''; return; }
@@ -831,6 +1527,7 @@ $('#pdf-upload').addEventListener('change', async event => {
   try {
     const book = await api.upload(file);
     state.books = [book, ...state.books.filter(item => item.id !== book.id)]; renderBooks();
+    library.render();
     importStatus('导入成功，正在打开原稿…');
     await selectBook(book.id);
     importStatus(''); toast('PDF 已导入，可以先浏览原稿。', 'success');
@@ -842,9 +1539,34 @@ $('#pdf-upload').addEventListener('change', async event => {
   } finally { labels.forEach(label => label.classList.remove('busy')); event.target.disabled = false; event.target.value = ''; }
 });
 
+const emptyState = $('#empty-state');
+emptyState.addEventListener('dragover', event => {
+  if (![...(event.dataTransfer?.items || [])].some(item => item.kind === 'file')) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'copy';
+  emptyState.classList.add('drop-target');
+});
+emptyState.addEventListener('dragleave', event => {
+  if (!emptyState.contains(event.relatedTarget)) emptyState.classList.remove('drop-target');
+});
+emptyState.addEventListener('drop', event => {
+  event.preventDefault();
+  emptyState.classList.remove('drop-target');
+  const files = event.dataTransfer?.files;
+  if (!files?.length) return;
+  if (files.length !== 1) { toast('请一次只导入一份 PDF。', 'error'); return; }
+  try {
+    const transfer = new DataTransfer();
+    transfer.items.add(files[0]);
+    const input = $('#pdf-upload');
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  } catch (_) { toast('拖放导入不可用，请使用“选择 PDF”。', 'error'); }
+});
+
 $('#refresh-library').addEventListener('click', async () => {
   const button = $('#refresh-library'); setBusy(button, true, '刷新中…');
-  try { state.books = await api.books(); renderBooks(); importStatus('书架已刷新。若找到刚才导入的书，请从书架选择；没有时再重新导入。'); }
+  try { state.books = await api.books(); renderBooks(); library.render(); importStatus('书架已刷新。若找到刚才导入的书，请从书架选择；没有时再重新导入。'); }
   catch (error) { importStatus(`刷新书架失败：${error?.message || '请检查服务状态后重试。'}`, true); }
   finally { setBusy(button, false); }
 });
@@ -868,6 +1590,7 @@ $('#qwen-assist').addEventListener('change', event => { assistPreference = event
 $('#split-spreads').addEventListener('change', event => { splitSpreadsPreference = event.target.checked; });
 $('#job-form').addEventListener('submit', async event => {
   event.preventDefault(); if (!state.book) return;
+  if (readingWindow.active()) { toast('请先停止随读识别，再启动手动处理任务。', 'error'); return; }
   if (jobSyncError) { toast('先刷新任务状态，确认后台没有仍在运行的任务。', 'error'); return; }
   const form = new FormData(event.currentTarget); const all = $('#all-pages').checked; const pages = all ? 'all' : String(form.get('pages') || '');
   if (!all && !validateRange(pages, state.book.totalPages)) { toast(`请输入 1 到 ${state.book.totalPages} 页内的页码，例如 1-20 或 1,3,25。`, 'error'); $('#page-range').focus(); return; }
@@ -944,6 +1667,66 @@ $('#prev-page').addEventListener('click', () => goToPage(state.currentPage - 1))
 $('#jump-form').addEventListener('submit', event => { event.preventDefault(); commitPageInput(); }); $('#page-jump').addEventListener('change', commitPageInput);
 $('#reading-progress-range').addEventListener('input', event => renderReadingProgress(Number(event.target.value)));
 $('#reading-progress-range').addEventListener('change', event => goToPage(Number(event.target.value)));
+$('#reading-window-open').addEventListener('click', () => {
+  if (!state.book) return;
+  const dialog = $('#reading-window-dialog');
+  const provider = selectedProvider();
+  const providerConfig = state.config?.providers?.find(item => item.id === provider);
+  const assist = $('#qwen-assist').checked && !$('#qwen-assist').disabled;
+  const qwenModel = state.config?.qwenAssist?.model || 'Qwen';
+  $('#reading-window-choice').textContent = readingWindow.active()
+    ? '随读识别已开启。本次通道和辅助选项固定；停止后可重新选择。'
+    : `本次使用：${providerConfig?.label || provider || '未选择可用通道'}。${providerConfig ? providerUsage(providerConfig) : ''} ${assist ? `另启用 ${qwenModel} 结构整理，可能额外计费。` : '不启用 Qwen；只有在处理设置中主动勾选后才会使用。'}`;
+  $('#reading-window-enable').hidden = readingWindow.active();
+  $('#reading-window-enable').disabled = !provider || !providerConfig?.available;
+  dialog.showModal();
+});
+$('#reading-window-enable').addEventListener('click', async () => {
+  if (!state.book || readingWindow.active()) return;
+  const provider = selectedProvider();
+  const providerConfig = state.config?.providers?.find(item => item.id === provider);
+  if (!providerConfig?.available) { toast('请选择可用的云识别通道。', 'error'); return; }
+  const form = new FormData($('#job-form'));
+  const options = { provider, layout: form.get('layout') || 'auto', splitSpreads: form.get('splitSpreads') === 'on',
+    assist: $('#qwen-assist').checked && !$('#qwen-assist').disabled, autoProcessAll: isAutoProcessAll() };
+  $('#reading-window-dialog').close();
+  await readingWindow.enable(options);
+});
+$('#reading-window-stop').addEventListener('click', () => { void readingWindow.stop(); });
+$('#reading-window-refresh').addEventListener('click', () => { void readingWindow.refreshStatus(); });
+$('#retry-page-header')?.addEventListener('click', retryCurrentPage);
+$('#reload-page-header')?.addEventListener('click', reloadCurrentPage);
+$('#reader-reload-page')?.addEventListener('click', reloadCurrentPage);
+const isAutoProcessAll = () => localStorage.getItem('book_html_auto_process_all') !== 'false';
+function setAutoProcessAll(val) {
+  localStorage.setItem('book_html_auto_process_all', String(val));
+  const cb1 = $('#auto-process-all');
+  if (cb1) cb1.checked = val;
+  const cb2 = $('#reading-window-auto-all');
+  if (cb2) cb2.checked = val;
+}
+$('#auto-process-all')?.addEventListener('change', e => setAutoProcessAll(e.target.checked));
+$('#reading-window-auto-all')?.addEventListener('change', e => setAutoProcessAll(e.target.checked));
+setAutoProcessAll(isAutoProcessAll());
+$('#reading-window-apply').addEventListener('click', async () => {
+  if (!deferredReady || !state.book || deferredReady.bookId !== state.book.id || deferredReady.page !== state.currentPage) return;
+  if (currentPageProtected()) { toast('请先保存或处理冲突，再更新本页。'); return; }
+  const bookId = state.book.id, pageNumber = state.currentPage;
+  try {
+    const page = await api.page(bookId, pageNumber);
+    if (state.book?.id === bookId && state.currentPage === pageNumber) acceptReadyPage(pageNumber, page);
+  } catch (error) { if (state.book?.id === bookId) showError(error); }
+});
+$('#reading-window-manual').addEventListener('click', async () => {
+  const failed = (readingSnapshot?.pages || []).filter(page => page.status === 'FAILED').map(page => page.pageNumber);
+  if (!failed.length) return;
+  await readingWindow.stop();
+  $('#page-range').value = failed.join(',');
+  $('#all-pages').checked = false; $('#page-range').disabled = false; $('#force-processing').checked = false;
+  $('#job-form').hidden = false; $('#job-toggle').setAttribute('aria-expanded', 'true');
+  toast('已填入失败页。请确认处理设置后手动开始；已发出的单页任务结束前可能提示占用。');
+  $('#page-range').focus();
+});
 $('#bookmark-button').addEventListener('click', () => { if (!state.book) return; const pages = getBookmarks(state.book.id); const found = pages.indexOf(state.currentPage); found >= 0 ? pages.splice(found, 1) : pages.push(state.currentPage); setBookmarks(state.book.id, pages); renderBookmarkButton(); renderBookmarks(); });
 
 $$('[data-left-tab]').forEach(button => button.addEventListener('click', () => { $$('[data-left-tab]').forEach(tab => { const active = tab === button; tab.classList.toggle('active', active); tab.setAttribute('aria-selected', String(active)); }); $$('[data-left-panel]').forEach(panel => { panel.hidden = panel.dataset.leftPanel !== button.dataset.leftTab; }); }));
@@ -958,6 +1741,7 @@ $('#uncertain-only').addEventListener('change', renderReview); $('#add-text').ad
 $('#mark-reviewed').addEventListener('change', event => { state.reviewedDraft = event.target.checked; markDirty(); });
 $('#save-page').addEventListener('click', async () => {
   if (!state.book || !state.page) return;
+  if (state.conflict) { toast('保存冲突尚未处理。请先在校对栏查看远端、下载草稿或加载远端。', 'error'); return; }
   // A1-01：单会话最多一个在途保存；Ctrl+S 走同一入口，同样受 guard 约束
   if (state.saveInFlight && state.saveInFlight.bookId === state.book.id
       && state.saveInFlight.page === state.currentPage && state.saveInFlight.epoch === state.editorEpoch) {
@@ -965,6 +1749,8 @@ $('#save-page').addEventListener('click', async () => {
     return;
   }
   const button = $('#save-page'); setBusy(button, true, '保存中…');
+  // 旧会话的请求可能尚未结束；新请求恢复时仍应回到按钮的固定文案。
+  button.dataset.label = '保存整页';
   // A1-01：提交快照——等待期间的对象变化不得改变本次含义
   const snapshot = {
     requestId: ++saveRequestSeq,
@@ -975,6 +1761,7 @@ $('#save-page').addEventListener('click', async () => {
     reviewed: $('#mark-reviewed').checked,
   };
   state.saveInFlight = { requestId: snapshot.requestId, bookId: snapshot.bookId, page: snapshot.page, epoch: snapshot.epoch };
+  updateSaveStatus();
   const clearFlight = () => { if (state.saveInFlight?.requestId === snapshot.requestId) state.saveInFlight = null; };
   try {
     const wasReviewed = Boolean(state.page.reviewed);
@@ -992,6 +1779,7 @@ $('#save-page').addEventListener('click', async () => {
       // 保存期间的新草稿保留，仍标记未保存；下一次用新 revision 提交
       state.dirty = true;
       $('#save-page').disabled = false;
+      updateSaveStatus();
       toast(`已保存到版本 ${page.revision ?? '最新'}；保存期间的新修改仍保留，请再次保存。`);
       return;
     }
@@ -1014,6 +1802,7 @@ $('#save-page').addEventListener('click', async () => {
         remote: null, note: error.message || '远端已被更新。',
       };
       renderConflictBar();
+      updateSaveStatus();
       showError(new Error(`${error.message}（远端已到版本 ${error?.body?.currentRevision ?? '未知'}）。本地草稿已保留，请在校对栏冲突条中处理。`));
       return;
     }
@@ -1028,6 +1817,7 @@ $('#save-page').addEventListener('click', async () => {
         if (state.page) state.page.revision = remote.revision;
         if (editVersion !== snapshot.draftVersion) { state.dirty = true; $('#save-page').disabled = false; }
         else { state.page = remote; state.blocks = cloneBlocks(remote.blocks); state.dirty = false; state.reviewedDraft = Boolean(remote.reviewed); renderCurrent(); }
+        updateSaveStatus();
         toast(`服务端已确认保存（版本 ${remote.revision ?? '最新'}，中断后核实一致）。`, 'success');
         return;
       }
@@ -1038,6 +1828,7 @@ $('#save-page').addEventListener('click', async () => {
           remote: verify.remote, note: '请求超时，服务端版本与本次提交不一致，请核对后再保存。',
         };
         renderConflictBar();
+        updateSaveStatus();
         showError(new Error('请求超时，服务端版本与本次提交不一致。本地草稿已保留，请在校对栏冲突条中处理。'));
         return;
       }
@@ -1046,9 +1837,16 @@ $('#save-page').addEventListener('click', async () => {
   }
   finally {
     clearFlight();
-    setBusy(button, false);
-    // A1-01：按钮是全局元素，恢复时必须按当前会话的 dirty  state，不能沿用旧会话状态
-    button.disabled = !state.dirty;
+    // 全局按钮可能已属于另一个会话的新请求；旧请求不得清掉它的忙碌反馈。
+    if (currentSaveInFlight()) {
+      button.textContent = '保存中…';
+      button.disabled = true;
+    } else {
+      setBusy(button, false);
+      button.disabled = !state.dirty || Boolean(state.conflict);
+    }
+    updateSaveStatus();
+    renderReadingWindowStatus();
   }
 });
 
@@ -1057,10 +1855,32 @@ $('#export-button').addEventListener('click', () => {
   if ((pending || unreviewed) && !window.confirm(`导出中将包含 ${pending} 个未处理页、${Math.max(0, unreviewed)} 个待校对页，并明确标注状态。仍要导出吗？`)) return;
   window.location.assign(api.exportUrl(state.book.id));
 });
+$('#usage-open').addEventListener('click', () => openBookUsage(state.book));
 
 $('#toc-toggle').addEventListener('click', () => openDrawer('toc')); $('#review-toggle').addEventListener('click', () => openDrawer('review')); $('#close-review').addEventListener('click', () => closeDrawers(true)); $('#drawer-scrim').addEventListener('click', () => closeDrawers(true));
+const readingOptions = $('#reading-options');
+globalThis.BookReaderFonts?.init?.('#reader-font', { noteElement: '#reader-font-note' });
+$('#reading-options-controls').append($('.reader-settings'));
+$('#reading-options-open').addEventListener('click', () => readingOptions.showModal());
+$('#reading-options-close').addEventListener('click', () => readingOptions.close());
+readingOptions.addEventListener('close', () => $('#reading-options-open').focus({ preventScroll: true }));
+for (const dialog of [readingOptions, $('#usage-dialog'), $('#settings-dialog')]) {
+  dialog.addEventListener('click', event => {
+    if (event.target !== dialog) return;
+    const bounds = dialog.getBoundingClientRect();
+    if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) dialog.close();
+  });
+}
+for (const dialog of [$('#usage-dialog'), $('#settings-dialog')]) dialog.addEventListener('close', () => closeMore(true));
 $('#reader').addEventListener('scroll', () => { window.clearTimeout(scrollTimer); scrollTimer = window.setTimeout(saveReadingPosition, 180); });
 window.addEventListener('beforeunload', event => { if (state.dirty) { event.preventDefault(); event.returnValue = ''; } });
-window.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawers(true); if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && state.page) { event.preventDefault(); $('#save-page').click(); } });
+window.addEventListener('pagehide', () => { void readingWindow.stop({ beacon: true }); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && readingWindow.active()) {
+    void readingWindow.stop();
+    toast('页面进入后台，已停止随读识别；返回后需主动重新开启。');
+  }
+});
+window.addEventListener('keydown', event => { if (event.key === 'Escape') { closeMore(true); closeDrawers(true); } if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && state.page) { event.preventDefault(); $('#save-page').click(); } });
 
 init();

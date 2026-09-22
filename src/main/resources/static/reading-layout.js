@@ -160,6 +160,7 @@
 
   let evidenceFetcher = null;
   let openIssueId = null;
+  let inspectionVersion = 0;
 
   function setEvidenceFetcher(fetcher) { evidenceFetcher = typeof fetcher === 'function' ? fetcher : null; }
 
@@ -235,7 +236,7 @@
     const image = el('img'); image.src = src;
     image.alt = safeContextSrc ? '文字所在原稿整行或竖列' : '原稿定位片段';
     link.append(image);
-    const targets = contextBoxes(entry).map((box, index) => {
+    const targets = (safeContextSrc ? contextBoxes(entry) : []).map((box, index) => {
       const marker = el('span', 'issue-context-box');
       marker.setAttribute('aria-hidden', 'true');
       marker.style.left = `${box.left}%`; marker.style.top = `${box.top}%`;
@@ -260,6 +261,7 @@
 
   function inspectIssue(options, trigger = document.activeElement) {
     const dialog = ensureInspector();
+    const version = ++inspectionVersion;
     if (dialog.open) { skipRestore = true; dialog.close(); }
     restoreState = scrollState(trigger);
     const { page, block, issue, sourceText = '', script = 'simplified', pageImageSrc, onEdit } = options;
@@ -342,7 +344,7 @@
     if (entry?.pending && typeof evidenceFetcher === 'function' && issue?.id) {
       const loadingFor = issue.id;
       evidenceFetcher({ page, issueId: loadingFor }).then(precise => {
-        if (!precise || !dialog.open || openIssueId !== loadingFor) return;
+        if (!precise || !dialog.open || openIssueId !== loadingFor || inspectionVersion !== version) return;
         inspectIssue({ ...options }, trigger);
       }).catch(() => {});
     }
@@ -419,5 +421,5 @@
     return Number.isFinite(previousCenter) && Number.isFinite(currentCenter) && previousCenter >= .5 && currentCenter < .5;
   }
 
-  globalThis.BookReadingLayout = Object.freeze({ appendIssueText, appendConfirmedIssueText, appendAssistedIssueText, resolveReadingText, appendText, canJoin, displayIssueText, inspectIssue, issueTextParts, normalizeText, numberedMultiline, parallelMultiline, preservesLineEntries, setEvidenceFetcher });
+  globalThis.BookReadingLayout = Object.freeze({ appendIssueText, appendConfirmedIssueText, appendAssistedIssueText, resolveReadingText, appendText, canJoin, displayIssueText, inspectIssue, createContextEvidence: contextEvidence, centerContextTarget, issueTextParts, normalizeText, numberedMultiline, parallelMultiline, preservesLineEntries, setEvidenceFetcher });
 })();

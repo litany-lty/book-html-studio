@@ -13,6 +13,7 @@ import studio.bookhtml.config.AppProperties;
 import studio.bookhtml.config.PpOcrProperties;
 import studio.bookhtml.config.QwenAssistProperties;
 import studio.bookhtml.config.PaddleAiStudioProperties;
+import studio.bookhtml.config.SettingsService;
 import studio.bookhtml.domain.*;
 import studio.bookhtml.service.*;
 
@@ -27,29 +28,29 @@ public class ApiController {
     private final BookService books;private final JobService jobs;private final ExportService export;private final AppProperties config;private final QwenOcrClient qwen;private final MiniMaxVisionClient miniMax;private final PaddleOcrClient paddle;private final QwenLayoutClient qwenAssist;private final QwenAssistProperties qwenAssistConfig;private final IssueImageService issueImages;private final ObjectMapper json;
     private final PaddleAiStudioClient aiStudio;private final PaddleAiStudioProperties aiStudioConfig;
     private final BaiduPpOcrClient ppocr;private final PpOcrProperties ppocrConfig;
+    private SettingsService settings;
     public ApiController(BookService books,JobService jobs,ExportService export,AppProperties config,QwenOcrClient qwen,MiniMaxVisionClient miniMax,PaddleOcrClient paddle,QwenLayoutClient qwenAssist,QwenAssistProperties qwenAssistConfig,IssueImageService issueImages,ObjectMapper json,PaddleAiStudioClient aiStudio,PaddleAiStudioProperties aiStudioConfig,BaiduPpOcrClient ppocr,PpOcrProperties ppocrConfig){this.books=books;this.jobs=jobs;this.export=export;this.config=config;this.qwen=qwen;this.miniMax=miniMax;this.paddle=paddle;this.qwenAssist=qwenAssist;this.qwenAssistConfig=qwenAssistConfig;this.issueImages=issueImages;this.json=json;this.aiStudio=aiStudio;this.aiStudioConfig=aiStudioConfig;this.ppocr=ppocr;this.ppocrConfig=ppocrConfig;}
+    @org.springframework.beans.factory.annotation.Autowired public void setSettings(SettingsService settings){this.settings=settings;}
     @GetMapping("/config") public Map<String,Object> config(){
-        String baiduLabel="PaddleOCR-VL · 百度智能云（AK/SK）",studioLabel="PaddleOCR-VL · AI Studio（Token）",ppocrLabel="PP-OCRv6 · 百度智能云（AK/SK）";
-        String baiduQuota="百度智能云 AK/SK 所属账户的 OCR 额度",studioQuota="AI Studio Access Token 所属账户的服务额度",ppocrQuota="百度智能云 AK/SK 所属账户的 PP-OCRv6 额度（与 PaddleOCR-VL 独立结算）";
-        return Map.of("defaultProvider","paddle","providers",List.of(
-                Map.of("id","paddle","label",baiduLabel,"available",paddle.configured(),"reason",paddle.configured()?"已配置百度智能云通道":"缺少 BAIDU_OCR_API_KEY 或 BAIDU_OCR_SECRET_KEY","quotaSource",baiduQuota),
-                Map.of("id","paddle-aistudio","label",studioLabel,"available",aiStudio.configured(),"reason",aiStudio.configured()?"已配置 AI Studio 通道":"缺少 PADDLEOCR_ACCESS_TOKEN","quotaSource",studioQuota),
-                Map.of("id","ppocr","label",ppocrLabel,"available",ppocr.configured(),"reason",ppocr.configured()?"已配置百度智能云 PP-OCRv6 通道":"缺少 BAIDU_OCR_API_KEY 或 BAIDU_OCR_SECRET_KEY","quotaSource",ppocrQuota),
-                Map.of("id","qwen","label","旧 Qwen OCR 手动兼容通道","available",qwen.configured(),"reason",qwen.configured()?"已配置":"缺少 DASHSCOPE_API_KEY","quotaSource","阿里云百炼账户额度"),
-                Map.of("id","local","label","本地 Tesseract（离线初稿）","available",true,"reason","复杂图表和手写需人工校对","quotaSource","本地处理，不消耗云 OCR 额度")),
+        SettingsService.State s=settings==null?null:settings.state();
+        boolean studio=s==null?aiStudio.configured():!s.paddleAccessToken().isBlank();
+        boolean baidu=s==null?ppocr.configured():!s.ppocrApiKey().isBlank()&&!s.ppocrSecretKey().isBlank();
+        String defaultProvider=s==null?"paddle-aistudio":s.defaultProvider();
+        boolean fallback=s!=null&&s.fallbackEnabled();
+        return Map.of("defaultProvider",defaultProvider,"fallbackEnabled",fallback,"providers",List.of(
+                Map.of("id","paddle-aistudio","label","PaddleOCR-VL-1.6 · 飞桨 AI Studio","available",studio,"reason",studio?"已配置":"缺少 Access Token"),
+                Map.of("id","ppocr","label","PP-OCRv6 · 百度智能云","available",baidu,"reason",baidu?"已配置":"缺少 API Key 或 Secret Key")),
                 "ocrChannels",List.of(
-                        Map.of("id","paddle","label",baiduLabel,"configured",paddle.configured(),"model",config.paddleModel(),"endpoint",safeEndpoint(config.paddleJobUrl()),"credentialType","API Key + Secret Key","quotaSource",baiduQuota),
-                        Map.of("id","paddle-aistudio","label",studioLabel,"configured",aiStudio.configured(),"model",aiStudioConfig.model(),"endpoint",safeEndpoint(aiStudioConfig.jobUrl()),"credentialType","Access Token","quotaSource",studioQuota),
-                        Map.of("id","ppocr","label",ppocrLabel,"configured",ppocr.configured(),"model","PP-OCRv6","endpoint",safeEndpoint(ppocrConfig.url()),"credentialType","API Key + Secret Key","quotaSource",ppocrQuota)),
-                "paddle",Map.of("configured",paddle.configured(),"model",config.paddleModel(),"jobUrl",safeEndpoint(config.paddleJobUrl())),
+                        Map.of("id","paddle-aistudio","configured",studio,"model","PaddleOCR-VL-1.6","endpoint","https://paddleocr.aistudio-app.com/api/v2/ocr/jobs","credentialType","Access Token"),
+                        Map.of("id","ppocr","configured",baidu,"model","PP-OCRv6","endpoint","https://aip.baidubce.com/rest/2.0/ocr/v1/pp_ocrv5","credentialType","API Key + Secret Key")),
                 "qwenAssist",Map.of("configured",qwenAssist.configured(),"model",qwenAssistConfig.getModel(),"assistEnabled",qwenAssistConfig.isEnabled()),
-                "qwen",Map.of("configured",qwen.configured(),"model",config.qwenModel(),"baseUrl",safeEndpoint(config.qwenBaseUrl())),
-                "minimax",Map.of("configured",miniMax.configured(),"model",config.minimaxModel(),"baseUrl",safeEndpoint(config.minimaxBaseUrl()),"assistEnabled",config.minimaxAssistEnabled()),"maxUploadMb",config.maxUploadMb());
+                "maxUploadMb",config.maxUploadMb());
     }
     private static String safeEndpoint(String value){try{java.net.URI uri=java.net.URI.create(value);if(uri.getHost()==null||!("https".equalsIgnoreCase(uri.getScheme())||"http".equalsIgnoreCase(uri.getScheme())))return "";return new java.net.URI(uri.getScheme(),null,uri.getHost(),uri.getPort(),uri.getPath(),null,null).toString();}catch(Exception ignored){return "";}}
     @GetMapping("/books") public List<Book> list(){return books.list();}
     @PostMapping(value="/books",consumes=MediaType.MULTIPART_FORM_DATA_VALUE) public Book upload(@RequestPart("file")MultipartFile file){return books.upload(file);}
     @GetMapping("/books/{id}") public Book book(@PathVariable String id){return books.get(id);}
+    @PatchMapping("/books/{id}/library") public Book updateLibrary(@PathVariable String id,@RequestBody LibraryUpdateRequest request){return jobs.updateLibrary(id,request.title(),request.archived());}
     @GetMapping("/books/{id}/pages") public List<PageSummary> pages(@PathVariable String id){return books.pages(id);}
     @GetMapping("/books/{id}/outline") public List<OutlineService.OutlineEntry> outline(@PathVariable String id){return books.outline(id);}
     @GetMapping("/books/{id}/pages/{n}") public Map<String,Object> page(@PathVariable String id,@PathVariable int n){return pagePayload(id,books.page(id,n));}

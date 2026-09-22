@@ -2,6 +2,7 @@ package studio.bookhtml.service;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import studio.bookhtml.config.SettingsService;
 import studio.bookhtml.domain.Block;
 import studio.bookhtml.domain.ContentIssue;
 import studio.bookhtml.domain.Page;
@@ -15,9 +16,12 @@ import java.util.function.BooleanSupplier;
 @Service
 public class PageProcessor {
     private final BookStore store;private final PdfService pdf;private final NativeTextExtractor nativeText;private final TesseractService tesseract;private final CloudOcrPipeline qwenOcr;private final PaddleOcrPipeline paddle;private final MiniMaxVisionClient miniMax;private final QwenLayoutClient qwenLayout;private final QwenTocRecoveryService tocRecovery;private final SparsePageGuard sparsePageGuard;private final VerticalLayoutNormalizer verticalNormalizer;private final AssistedReviewService review;private final TraditionalConverter converter;
+    private SettingsService settings;
     @Autowired public PageProcessor(BookStore store,PdfService pdf,NativeTextExtractor nativeText,TesseractService tesseract,CloudOcrPipeline qwenOcr,PaddleOcrPipeline paddle,MiniMaxVisionClient miniMax,QwenLayoutClient qwenLayout,QwenTocRecoveryService tocRecovery,SparsePageGuard sparsePageGuard,VerticalLayoutNormalizer verticalNormalizer,AssistedReviewService review,TraditionalConverter converter){this.store=store;this.pdf=pdf;this.nativeText=nativeText;this.tesseract=tesseract;this.qwenOcr=qwenOcr;this.paddle=paddle;this.miniMax=miniMax;this.qwenLayout=qwenLayout;this.tocRecovery=tocRecovery;this.sparsePageGuard=sparsePageGuard;this.verticalNormalizer=verticalNormalizer;this.review=review;this.converter=converter;}
     PageProcessor(BookStore store,PdfService pdf,NativeTextExtractor nativeText,TesseractService tesseract,CloudOcrPipeline qwenOcr,PaddleOcrPipeline paddle,MiniMaxVisionClient miniMax,QwenLayoutClient qwenLayout,QwenTocRecoveryService tocRecovery,VerticalLayoutNormalizer verticalNormalizer,AssistedReviewService review,TraditionalConverter converter){this(store,pdf,nativeText,tesseract,qwenOcr,paddle,miniMax,qwenLayout,tocRecovery,new SparsePageGuard(),verticalNormalizer,review,converter);}
+    @Autowired public void setSettings(SettingsService settings){this.settings=settings;}
     public ProcessingResult process(String bookId,int pageNumber,String provider,String layout,boolean split,boolean assist,BooleanSupplier cancelled)throws Exception{
+        try(UsageContext.Scope ignored=UsageContext.open(bookId,pageNumber,"OCR_PAGE")){
         if(cancelled.getAsBoolean())throw new CancelledException();Page previous=store.readPage(bookId,pageNumber);String nativeLayout="vertical".equals(layout)?"vertical":"horizontal".equals(layout)?"horizontal":"auto";
         Optional<List<Block>>nativeBlocks=nativeText.extract(store.pdf(bookId),pageNumber,nativeLayout);List<Block>blocks;List<Block>sourceRecords;String actualProvider;List<String>warnings=new ArrayList<>();
         if(nativeBlocks.isPresent()&&!nativeBlocks.get().isEmpty()&&!preferOcrOverNative(store.pdf(bookId),pageNumber,nativeBlocks.get(),warnings,cancelled)){
@@ -111,6 +115,7 @@ public class PageProcessor {
         ProcessingResult.Category category=bodyChars>0?ProcessingResult.Category.TEXT
             :(advertisements.marked()>0||QualityGate.isFigureOnly(blocks))?ProcessingResult.Category.VISUAL_ONLY:ProcessingResult.Category.TEXT;
         return new ProcessingResult(new Page(pageNumber,previous.width(),previous.height(),"READY",actualProvider,blocks,List.copyOf(warnings),false,null,sourceRecords),category);
+        }
     }
     /** 阶段3：混合页检查——原生字符少但图像墨多时改走图像识别；预览图失败也保守改走图像识别。 */
     private boolean preferOcrOverNative(Path pdfPath,int pageNumber,List<Block> nativeBlocks,List<String> warnings,BooleanSupplier cancelled){
@@ -134,10 +139,11 @@ public class PageProcessor {
         if(assisted==null||!QualityGate.check(source,assisted,op).accepted()){warnings.add(message);return source;}
         return assisted;
     }
-    /** 额度降级：主通道报额度/权限不足时，按固定顺序试同系其他已配置通道；成功则带回注明。 */
+    /** The user must explicitly enable cross-channel fallback; never try a hidden third channel. */
     private PaddleResult recognizePaddleWithFallback(BufferedImage image,String layout,boolean split,String provider,BooleanSupplier cancelled)throws Exception{
         try{return new PaddleResult(paddle.recognize(image,layout,split,provider,cancelled),provider,null);}
         catch(QuotaExceededException first){
+            if(settings==null||!settings.state().fallbackEnabled())throw first;
             for(String alt:PaddleOcrPipeline.fallbackOrder(provider)){
                 if(cancelled.getAsBoolean())throw new CancelledException();
                 if(!paddle.configured(alt))continue;

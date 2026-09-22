@@ -23,15 +23,25 @@ public final class ReadingStructureNormalizer {
                     + "|\\\\(?:to|mapsto)\\b)");
     private static final Pattern STEM_BRANCH = Pattern.compile("[甲乙丙丁戊己庚辛壬癸][子丑寅卯辰巳午未申酉戌亥]");
 
+    private static final Pattern PAGE_NUMBER_PATTERN = Pattern.compile(
+            "^[-—–~～·•●*#❖◆◇■□▲△▼▽|/\\\\_—=\\[\\]()（）《》【】\\s]*"
+            + "(?:[0-9]{1,5}|[第]?[〇零一二三四五六七八九十百千兩两廿卅]{1,8}[页頁]?)"
+            + "[-—–~～·•●*#❖◆◇■□▲△▼▽|/\\\\_—=\\[\\]()（）《》【】\\s]*$");
+    private static final Pattern MARGIN_DECORATOR_PATTERN = Pattern.compile(
+            "^[-—–~～·•●*#❖◆◇■□▲△▼▽★☆|/\\\\.,:;!?！？，。；：'\"“”‘’`·•_—=+§†‡\\s]+$");
+    private static final Pattern FOLIO_CHAR_PATTERN = Pattern.compile(
+            "^[0-9*#❖◆◇■□▲△▼▽·•~～\\-—_—=+BboO]+$");
+
     private ReadingStructureNormalizer() {
     }
 
     public static Page normalize(Page page) {
         if (page == null || page.reviewed() || page.blocks() == null || page.blocks().isEmpty()) return page;
-        List<Block> normalized = new ArrayList<>(page.blocks().size());
+        List<Block> rawBlocks = page.blocks();
+        List<Block> normalized = new ArrayList<>(rawBlocks.size());
         boolean changed = false;
-        for (Block block : page.blocks()) {
-            Block next = normalize(block);
+        for (Block block : rawBlocks) {
+            Block next = normalize(block, rawBlocks);
             normalized.add(next);
             changed |= next != block;
         }
@@ -46,19 +56,71 @@ public final class ReadingStructureNormalizer {
                 page.sourceRecords(), page.revision());
     }
 
-    private static Block normalize(Block block) {
-        if (!eligible(block) || !(relationshipDiagram(block.original()) || unreliableMatrix(block))) return block;
-        return new Block(block.id(), "figure", block.order(), block.bbox(), block.writingMode(),
-                block.original(), block.simplified(), block.confidence(), block.uncertain(), block.reviewed(),
-                block.headingLevel(), block.source(), block.sourceIds(), block.suggestion(), block.sourceRect(),
-                block.issues());
+    private static Block normalize(Block block, List<Block> allBlocks) {
+        if (!eligible(block)) return block;
+        if (isPageNumberOrFolioSymbol(block, allBlocks)) {
+            return new Block(block.id(), "page-number", block.order(), block.bbox(), block.writingMode(),
+                    block.original(), block.simplified(), block.confidence(), block.uncertain(), block.reviewed(),
+                    null, block.source(), block.sourceIds(), block.suggestion(), block.sourceRect(),
+                    block.issues());
+        }
+        if (relationshipDiagram(block.original()) || unreliableMatrix(block)) {
+            return new Block(block.id(), "figure", block.order(), block.bbox(), block.writingMode(),
+                    block.original(), block.simplified(), block.confidence(), block.uncertain(), block.reviewed(),
+                    block.headingLevel(), block.source(), block.sourceIds(), block.suggestion(), block.sourceRect(),
+                    block.issues());
+        }
+        return block;
     }
 
     private static boolean eligible(Block block) {
-        if (block == null || !"text".equals(block.type()) || block.reviewed() || !validBbox(block.bbox())) return false;
+        if (block == null || block.reviewed() || !validBbox(block.bbox())) return false;
+        if (!"text".equals(block.type()) && !"caption".equals(block.type())) return false;
         String source = block.source();
         return source != null && !source.isBlank()
                 && !source.toLowerCase(Locale.ROOT).startsWith("manual");
+    }
+
+    private static boolean isPageNumberOrFolioSymbol(Block block, List<Block> allBlocks) {
+        if (block == null || !validBbox(block.bbox())) return false;
+        double[] box = block.bbox();
+        double top = box[1];
+        double bottom = box[1] + box[3];
+        double height = box[3];
+        double width = box[2];
+        boolean inMargin = (top <= 0.12 || bottom <= 0.14) || (top >= 0.80 || bottom >= 0.86);
+        if (!inMargin || height > 0.12) return false;
+        String text = block.original();
+        if (text == null || text.isBlank()) text = block.simplified();
+        if (text == null || text.isBlank()) return false;
+        String stripped = text.strip();
+        if (stripped.length() > 24) return false;
+        if (PAGE_NUMBER_PATTERN.matcher(stripped).matches() || MARGIN_DECORATOR_PATTERN.matcher(stripped).matches()) {
+            return true;
+        }
+        if (stripped.length() <= 3 && width <= 0.08 && height <= 0.08 && FOLIO_CHAR_PATTERN.matcher(stripped).matches()) {
+            if (top >= 0.84 || bottom <= 0.08) return true;
+            if (hasAdjacentPageNumber(block, allBlocks, top)) return true;
+        }
+        return false;
+    }
+
+    private static boolean hasAdjacentPageNumber(Block block, List<Block> allBlocks, double top) {
+        if (allBlocks == null) return false;
+        for (Block other : allBlocks) {
+            if (other == block || other == null || !validBbox(other.bbox())) continue;
+            if ("page-number".equals(other.type()) || isLikelyPageNumber(other)) {
+                if (Math.abs(other.bbox()[1] - top) <= 0.05) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isLikelyPageNumber(Block block) {
+        String text = block.original();
+        if (text == null || text.isBlank()) text = block.simplified();
+        if (text == null || text.isBlank()) return false;
+        return PAGE_NUMBER_PATTERN.matcher(text.strip()).matches();
     }
 
     static boolean relationshipDiagram(String value) {
@@ -128,7 +190,8 @@ public final class ReadingStructureNormalizer {
         List<Block> ordered = new ArrayList<>(blocks);
         ordered.sort(Comparator.comparingInt(Block::order));
         List<Block> right = new ArrayList<>(), left = new ArrayList<>();
-        Integer rightPage = null, leftPage = null;
+        List<Integer> rightPages = new ArrayList<>();
+        List<Integer> leftPages = new ArrayList<>();
         int rightVertical = 0, leftVertical = 0;
         for (Block block : ordered) {
             if (block == null || block.reviewed() || "manual".equals(block.source())
@@ -141,19 +204,29 @@ public final class ReadingStructureNormalizer {
                 if (onRight) rightVertical++; else leftVertical++;
             }
             if ("page-number".equals(block.type())) {
-                String number = block.original();
-                if (number == null || !number.matches("[1-9][0-9]{0,3}")) return blocks;
-                if (onRight) {
-                    if (rightPage != null) return blocks;
-                    rightPage = Integer.valueOf(number);
-                } else {
-                    if (leftPage != null) return blocks;
-                    leftPage = Integer.valueOf(number);
+                String text = block.original();
+                if (text == null || text.isBlank()) text = block.simplified();
+                if (text != null) {
+                    String digits = text.replaceAll("[^0-9]", "");
+                    if (digits.matches("[1-9][0-9]{0,3}")) {
+                        int val = Integer.parseInt(digits);
+                        if (onRight) rightPages.add(val); else leftPages.add(val);
+                    }
                 }
             }
         }
-        if (rightVertical < 3 || leftVertical < 3 || rightPage == null || leftPage == null
-                || rightPage + 1 != leftPage) return blocks;
+        if (rightVertical < 3 || leftVertical < 3) return blocks;
+        Integer validRight = null, validLeft = null;
+        for (int r : rightPages) {
+            for (int l : leftPages) {
+                if (r + 1 == l) {
+                    if (validRight != null && (validRight != r || validLeft != l)) return blocks;
+                    validRight = r;
+                    validLeft = l;
+                }
+            }
+        }
+        if (validRight == null || validLeft == null) return blocks;
         List<Block> grouped = new ArrayList<>(ordered.size());
         grouped.addAll(right);
         grouped.addAll(left);

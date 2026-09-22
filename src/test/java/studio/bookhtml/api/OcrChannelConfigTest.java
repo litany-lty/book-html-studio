@@ -19,22 +19,21 @@ import org.springframework.http.HttpStatus;
 
 class OcrChannelConfigTest {
     @Test
-    void reportsBothChannelsIndependentlyAndKeepsBaiduDefault() {
+    void reportsOnlyTwoChannelsAndAiStudioDefault() {
         Map<String, Object> baiduOnly = controller(true, false).config();
-        assertEquals("paddle", baiduOnly.get("defaultProvider"));
-        assertEquals(true, provider(baiduOnly, "paddle").get("available"));
+        assertEquals("paddle-aistudio", baiduOnly.get("defaultProvider"));
+        assertEquals(2, ((List<?>) baiduOnly.get("providers")).size());
+        assertEquals(true, provider(baiduOnly, "ppocr").get("available"));
         assertEquals(false, provider(baiduOnly, "paddle-aistudio").get("available"));
-        assertEquals(true, channel(baiduOnly, "paddle").get("configured"));
+        assertEquals(true, channel(baiduOnly, "ppocr").get("configured"));
         assertEquals(false, channel(baiduOnly, "paddle-aistudio").get("configured"));
 
         Map<String, Object> studioOnly = controller(false, true).config();
-        assertEquals("paddle", studioOnly.get("defaultProvider"));
-        assertEquals(false, provider(studioOnly, "paddle").get("available"));
+        assertEquals("paddle-aistudio", studioOnly.get("defaultProvider"));
+        assertEquals(false, provider(studioOnly, "ppocr").get("available"));
         assertEquals(true, provider(studioOnly, "paddle-aistudio").get("available"));
-        assertEquals(false, channel(studioOnly, "paddle").get("configured"));
+        assertEquals(false, channel(studioOnly, "ppocr").get("configured"));
         assertEquals(true, channel(studioOnly, "paddle-aistudio").get("configured"));
-        assertNotEquals(provider(studioOnly, "paddle").get("quotaSource"),
-                provider(studioOnly, "paddle-aistudio").get("quotaSource"));
     }
 
     @Test
@@ -51,8 +50,8 @@ class OcrChannelConfigTest {
         assertFalse(json.contains("key=hidden"));
         assertFalse(json.contains("?"));
         assertFalse(json.contains("@"));
-        assertEquals("https://baidu.example/task", channel(config, "paddle").get("endpoint"));
-        assertEquals("https://studio.example/jobs", channel(config, "paddle-aistudio").get("endpoint"));
+        assertEquals("https://aip.baidubce.com/rest/2.0/ocr/v1/pp_ocrv5", channel(config, "ppocr").get("endpoint"));
+        assertEquals("https://paddleocr.aistudio-app.com/api/v2/ocr/jobs", channel(config, "paddle-aistudio").get("endpoint"));
     }
 
     @Test
@@ -65,7 +64,9 @@ class OcrChannelConfigTest {
                 new JobRequest("1-20", "paddle-aistudio", "auto", true, false, true).providerOrDefault());
         assertEquals("ppocr",
                 new JobRequest("1-20", "ppocr", "auto", true, false, true).providerOrDefault());
-        assertEquals("paddle", new JobRequest("1-20", null, "auto", true, false, true).providerOrDefault());
+        assertEquals("paddle-aistudio", new JobRequest("1-20", null, "auto", true, false, true).providerOrDefault());
+        assertFalse(java.util.regex.Pattern.matches(constraint.regexp(), "paddle"));
+        assertFalse(java.util.regex.Pattern.matches(constraint.regexp(), "qwen"));
     }
 
     @Test
@@ -74,7 +75,7 @@ class OcrChannelConfigTest {
         assertEquals(true, provider(config, "ppocr").get("available"));
         assertEquals(true, channel(config, "ppocr").get("configured"));
         assertEquals("PP-OCRv6", channel(config, "ppocr").get("model"));
-        assertNotEquals(channel(config, "paddle").get("quotaSource"), channel(config, "ppocr").get("quotaSource"));
+        assertEquals(2, ((List<?>) config.get("ocrChannels")).size());
 
         Map<String, Object> none = controller(false, false).config();
         assertEquals(false, provider(none, "ppocr").get("available"));

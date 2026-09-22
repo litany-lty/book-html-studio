@@ -23,6 +23,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import studio.bookhtml.api.ApiException;
 import studio.bookhtml.config.DecisionProperties;
+import studio.bookhtml.config.SettingsService;
+import studio.bookhtml.service.UsageContext;
 import studio.bookhtml.domain.Block;
 import studio.bookhtml.domain.Book;
 import studio.bookhtml.domain.ContentIssue;
@@ -57,6 +59,8 @@ public class DecisionCoordinator {
 
     private final ConcurrentHashMap<String, Object> bookLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, JobControl> controls = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, SettingsService.Lease> settingsLeases = new ConcurrentHashMap<>();
+    private SettingsService settings;
     private final BlockingQueue<String> queue;
     private final Object globalAdmissionLock = new Object();
     private Thread worker;
@@ -81,6 +85,17 @@ public class DecisionCoordinator {
         this.json = json;
         this.gate = gate != null ? gate : new DecisionOutboundGate(config);
         this.queue = new LinkedBlockingQueue<>();
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setSettings(SettingsService settings) { this.settings = settings; }
+
+    private void admitLease(String jobId) {
+        if (settings != null) settingsLeases.computeIfAbsent(jobId, ignored -> settings.beginWork());
+    }
+    private void releaseLease(String jobId) {
+        SettingsService.Lease lease = settingsLeases.remove(jobId);
+        if (lease != null) lease.close();
     }
 
     public DecisionCoordinator(BookStore store, DecisionStore decisions, DecisionBudget budget,
@@ -145,7 +160,8 @@ public class DecisionCoordinator {
                         persistTerminal(bookId, withState(job, "FAILED", "DONE",
                                 List.of("DEADLINE_EXPIRED_ON_RESTART"), null, null));
                     } else if (queue.size() < config.getMaxQueueEntries()) {
-                        queue.offer(item);
+                        admitLease(job.jobId());
+                        if (!queue.offer(item)) releaseLease(job.jobId());
                     } else {
                         persistTerminal(bookId, withState(job, "FAILED", "DONE",
                                 List.of("QUEUE_FULL_ON_RESTART"), null, null));
@@ -165,7 +181,8 @@ public class DecisionCoordinator {
                             persistTerminal(bookId, withState(updated, "FAILED", "DONE",
                                     List.of("DEADLINE_EXPIRED_ON_RESTART"), null, null));
                         } else if (queue.size() < config.getMaxQueueEntries()) {
-                            queue.offer(item);
+                            admitLease(job.jobId());
+                            if (!queue.offer(item)) releaseLease(job.jobId());
                         } else {
                             persistTerminal(bookId, withState(updated, "FAILED", "DONE",
                                     List.of("QUEUE_FULL_ON_RESTART"), null, null));
@@ -186,6 +203,9 @@ public class DecisionCoordinator {
      * 相同语义在途请求复用同一作业；完全相同的完成结果直接返回。
      */
     public CreateResult createOrReuse(String bookId, int sourcePage, String issueId, CreateBody body) {
+        SettingsService.Lease admissionLease = settings == null ? null : settings.beginWork();
+        boolean transferred = false;
+        try {
         validateCreate(bookId, sourcePage, issueId, body);
         synchronized (bookLock(bookId)) {
             Page page = readPageOr404(bookId, sourcePage);
@@ -226,26 +246,38 @@ public class DecisionCoordinator {
                         now, now, now.plusSeconds(Math.max(1, config.getJobDeadlineSeconds())),
                         body.allowFreshVision(), target);
                 String queueItem = job.jobId() + "\u0000" + bookId;
+                if (admissionLease != null) settingsLeases.put(job.jobId(), admissionLease);
+                boolean admitted = false;
                 try {
                     decisions.saveJob(bookId, job);
                 } catch (IOException e) {
+                    releaseLease(job.jobId());
                     throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "决策作业保存失败");
                 }
-                synchronized (globalAdmissionLock) {
-                    if (queue.size() >= config.getMaxQueueEntries() || !queue.offer(queueItem)) {
-                        try {
-                            decisions.deleteJob(bookId, job.jobId());
-                        } catch (Exception ignored) {
+                try {
+                    synchronized (globalAdmissionLock) {
+                        if (queue.size() >= config.getMaxQueueEntries() || !queue.offer(queueItem)) {
+                            try {
+                                decisions.deleteJob(bookId, job.jobId());
+                            } catch (Exception ignored) {
+                            }
+                            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "决策队列已满");
                         }
-                        throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "决策队列已满");
                     }
+                    admitted = true;
+                    transferred = true;
+                    return new CreateResult(202, job);
+                } finally {
+                    if (!admitted) settingsLeases.remove(job.jobId());
                 }
-                return new CreateResult(202, job);
             } catch (ApiException e) {
                 throw e;
             } catch (IOException e) {
                 throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "决策作业保存失败");
             }
+        }
+        } finally {
+            if (!transferred && admissionLease != null) admissionLease.close();
         }
     }
 
@@ -543,6 +575,13 @@ public class DecisionCoordinator {
                 summary.put("candidateSetHash", evidence.get().candidateSetHash());
                 summary.put("templateVersion", evidence.get().questionTemplateVersion());
                 summary.put("policyVersion", evidence.get().policyVersion());
+                String reported = evidence.get().reportedModel();
+                String requested = evidence.get().requestedModel();
+                String model = (reported != null && !reported.isBlank()) ? reported
+                        : (requested != null && !requested.isBlank()) ? requested
+                        : (config != null ? config.getModel() : null);
+                summary.put("model", model);
+                summary.put("provider", evidence.get().provider());
                 Optional<DecisionModels.CandidateSet> set =
                         decisions.loadCandidateSet(bookId, evidence.get().candidateSetHash());
                 if (set.isPresent()) {
@@ -611,7 +650,9 @@ public class DecisionCoordinator {
                 persistTerminal(bookId, withState(job, "FAILED", "DONE", List.of("JOB_TIMEOUT"), null, null));
                 return;
             }
-            execute(bookId, job, control);
+            try (UsageContext.Scope ignored = UsageContext.open(bookId, job.sourcePageNumber(), "JEV_DECISION")) {
+                execute(bookId, job, control);
+            }
         } catch (Exception e) {
             try {
                 DecisionStore.DecisionJob job = queryJob(bookId, jobId);
@@ -622,6 +663,7 @@ public class DecisionCoordinator {
             }
         } finally {
             controls.remove(jobId);
+            releaseLease(jobId);
         }
     }
 
@@ -897,9 +939,17 @@ public class DecisionCoordinator {
                         snapshot.issueRef().startUtf16(), snapshot.issueRef().endUtf16());
         } catch (Exception ignored) {
         }
+        // A configured calibration string must be bound to the model actually used; a settings edit
+        // or a provider-side model switch cannot silently retain formal recommendation eligibility.
+        String calibratedStatus = config.getCalibrationStatus();
+        String profile = config.getCalibrationProfile();
+        String expectedModelPart = "model=" + config.getModel();
+        if (profile == null || java.util.Arrays.stream(profile.split("\\|")).noneMatch(expectedModelPart::equals)
+                || call == null || call.reportedModel() == null || !call.reportedModel().equals(config.getModel()))
+            calibratedStatus = "UNVALIDATED";
         return DecisionPolicy.resolve(new DecisionPolicy.Input(snapshot, set,
                 built.aliasToCandidateId(), currentText, call, null, cancelled.getAsBoolean(), view,
-                false, built.hardRiskFlags(), false, config.getCalibrationStatus(),
+                false, built.hardRiskFlags(), false, calibratedStatus,
                 config.getCalibrationProfile(),
                 DecisionPolicy.PILOT_DEFAULT));
     }

@@ -7,6 +7,7 @@
   <title>纸页工坊</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/fonts/reader-fonts.css">
 </head>
 <body>
   <a class="skip-link" href="#reader">跳到正文</a>
@@ -17,17 +18,24 @@
     </div>
     <div class="library-tools">
       <label class="field compact"><span>书架</span><select id="book-select" aria-label="选择已导入书籍"><option value="">选择书籍</option></select></label>
-      <label class="upload-button" for="pdf-upload">导入 PDF<input id="pdf-upload" type="file" accept="application/pdf,.pdf" aria-describedby="import-status"></label>
-      <button id="export-button" class="button primary" type="button" disabled>导出离线书</button>
+      <button id="more-toggle" class="button quiet more-toggle" type="button" aria-expanded="false" aria-controls="more-tools">更多</button>
+      <div id="more-tools" class="more-tools">
+        <button id="library-open" class="button quiet" type="button" aria-haspopup="dialog" aria-controls="library-dialog">管理书架</button>
+        <label class="upload-button" for="pdf-upload" tabindex="0">导入 PDF<input id="pdf-upload" type="file" accept="application/pdf,.pdf" aria-describedby="import-status"></label>
+        <button id="export-button" class="button primary" type="button" disabled>导出离线书</button>
+        <button id="usage-open" class="button quiet" type="button" aria-haspopup="dialog" aria-controls="usage-dialog" aria-label="本书用量与费用" disabled>本书用量与费用</button>
+        <button id="settings-open" class="button quiet" type="button" aria-haspopup="dialog" aria-controls="settings-dialog">工具配置</button>
+      </div>
     </div>
   </header>
   <div id="import-status" class="import-status" role="status" hidden><span id="import-message"></span><button id="refresh-library" class="button quiet" type="button" hidden>刷新书架</button></div>
 
   <section id="job-panel" class="job-panel" aria-labelledby="job-heading">
-    <div class="job-title"><div><h1 id="job-heading">开始转换</h1><p id="book-summary">先导入一本 PDF，原稿会始终保留。</p></div><div class="job-title-actions"><button id="cancel-job" class="button danger" type="button" hidden>取消任务</button><button id="job-toggle" class="button quiet" type="button" aria-expanded="false">处理设置</button></div></div>
+    <div class="job-title"><div><h1 id="job-heading">开始转换</h1><p id="book-summary">先导入一本 PDF，原稿会始终保留。</p></div><div class="job-title-actions"><button id="reload-page-header" class="button quiet reload-button" type="button" title="重新识别并排版当前页（二次处理）" hidden>重新处理本页</button><button id="retry-page-header" class="button primary retry-button" type="button" hidden>重新转换本页</button><button id="cancel-job" class="button danger" type="button" hidden>取消任务</button><button id="job-toggle" class="button quiet" type="button" aria-expanded="false">处理设置</button></div></div>
     <form id="job-form" class="job-form" hidden>
       <label class="field"><span>页码范围</span><input id="page-range" name="pages" value="1-20" placeholder="例如 1-20 或 1,3,25" required><small>默认范围为前 20 页，点击“开始处理”后才会识别；必须主动选择才会处理全书。</small></label>
       <label class="check full-book"><input id="all-pages" type="checkbox"><span>处理全部页面</span></label>
+      <label id="auto-process-all-label" class="check"><input id="auto-process-all" type="checkbox"><span>随读就绪后自动处理全书其他页<small>开启随读时，即时准备当前阅读窗口后，在后台继续处理本书其余未转换页面（仅限当前书籍）。</small></span></label>
       <fieldset><legend>识别通道</legend><div id="provider-options" class="provider-options"></div><p id="provider-note" class="field-note">正在读取服务端识别配置…</p></fieldset>
       <label id="qwen-assist-label" class="check assist-check"><input id="qwen-assist" name="assist" type="checkbox"><span>启用 Qwen3.8-Max 结构整理与疑点建议<small id="qwen-assist-note">会额外调用阿里云服务，建议不会自动覆盖 OCR 原文。</small></span></label>
       <label class="field"><span>版面方向</span><select name="layout"><option value="auto">自动判断</option><option value="vertical">竖排</option><option value="horizontal">横排</option></select></label>
@@ -63,20 +71,24 @@
     </aside>
 
     <section id="reader" class="reader" tabindex="-1">
-      <div id="empty-state" class="empty-state"><div class="empty-sheet"><span aria-hidden="true">原</span></div><div><h2>从一份 PDF 开始</h2><p>导入后先查看原稿，再挑选少量页面识别。没有识别结果的页面仍会诚实地显示原图。</p><label class="upload-button large" for="pdf-upload">选择 PDF</label></div></div>
+      <div id="empty-state" class="empty-state"><div class="empty-sheet"><span aria-hidden="true">原</span></div><div><h2>从一份 PDF 开始</h2><p>导入后先查看原稿，再挑选少量页面识别。没有识别结果的页面仍会诚实地显示原图。</p><label class="upload-button large" for="pdf-upload">选择 PDF</label><p class="empty-hint">也可以将 PDF 拖放到此处；导入不会自动开始识别。</p></div></div>
       <div id="reader-shell" hidden>
         <div class="reader-toolbar" aria-label="阅读工具">
           <div class="view-switch" role="group" aria-label="显示方式"><button class="segmented" data-view="original" type="button">原稿</button><button class="segmented" data-view="facsimile" type="button">原貌 HTML</button><button class="segmented active" data-view="reading" type="button">横排阅读</button></div>
+          <div class="reader-primary-actions"><button id="reader-reload-page" class="button quiet reader-reload-btn" type="button" title="重新识别并排版当前页（二次处理）" hidden>重新处理本页</button><button id="reading-window-open" class="button quiet reading-window-open" type="button" aria-haspopup="dialog" aria-controls="reading-window-dialog" aria-pressed="false">随读识别</button><button id="reading-options-open" class="button quiet reading-options-open" type="button" aria-haspopup="dialog" aria-controls="reading-options">阅读设置</button></div>
           <div class="reader-settings">
             <button id="focus-toggle" class="button quiet" type="button" aria-pressed="false">专注阅读</button>
-            <button id="script-toggle" class="button quiet" type="button">显示：简体</button>
             <button id="evidence-toggle" class="button quiet" type="button" aria-pressed="false">阅读依据：已确认</button>
+            <button id="script-toggle" class="button quiet" type="button">显示：简体</button>
+            <label>字体 <select id="reader-font" aria-describedby="reader-font-note"></select></label>
+            <p id="reader-font-preview" class="reader-font-preview" aria-label="当前字体预览">山川有清音，书页有来处。</p>
             <label>字号 <input id="font-size" type="range" min="15" max="30" value="20"><output id="font-output">20</output></label>
             <label>行距 <input id="line-height" type="range" min="1.4" max="2.2" step="0.1" value="1.8"><output id="line-output">1.8</output></label>
+            <span id="reader-font-note" class="reader-font-note" aria-live="polite"></span>
           </div>
         </div>
         <div class="page-head">
-          <div><span id="quality-badge" class="quality-badge">等待处理</span><span id="quality-detail"></span></div>
+          <div><span id="quality-badge" class="quality-badge">等待处理</span><span id="quality-detail"></span><span id="page-save-status" class="page-save-status" role="status" aria-live="polite" hidden></span></div>
           <button id="bookmark-button" class="button quiet" type="button" aria-pressed="false">加入书签</button>
         </div>
         <div id="page-message" class="page-message" role="status" hidden></div>
@@ -90,6 +102,7 @@
           <div class="reading-progress-copy"><span>阅读进度</span><output id="reading-progress-output" for="reading-progress-range">0 / 0 页</output></div>
           <input id="reading-progress-range" type="range" min="1" max="1" value="1" disabled aria-label="拖动选择目标页">
         </div>
+        <div id="reading-window-bar" class="reading-window-bar" role="status" aria-live="polite" hidden><span id="reading-window-status"></span><span id="reading-window-pages"></span><button id="reading-window-apply" class="button quiet" type="button" hidden>更新本页</button><button id="reading-window-manual" class="button quiet" type="button" hidden>手动重试失败页</button><button id="reading-window-refresh" class="button quiet" type="button" hidden>刷新状态</button><button id="reading-window-stop" class="button quiet" type="button">停止</button></div>
       </div>
     </section>
 
@@ -97,19 +110,114 @@
       <div class="review-heading"><div><h2>逐块校对</h2><p>先选中原稿框，再修改文字或版面。</p></div><button id="close-review" class="drawer-close" type="button" aria-label="关闭校对栏">×</button></div>
       <div id="review-empty" class="side-empty">选择一本书和页面后开始校对。</div>
       <div id="review-content" hidden>
-        <figure class="review-reference"><img id="review-original" alt="当前页原稿缩略图"><figcaption>原稿依据 · 修改不会覆盖原始图片</figcaption></figure>
+        <details class="review-reference"><summary>查看整页原稿</summary><figure><img id="review-original" alt="当前页原稿缩略图"><figcaption>原稿图片始终保留，修改不会覆盖。</figcaption></figure></details>
         <section id="issue-workbench" class="issue-workbench" aria-label="当前页内容疑点" hidden></section>
         <div class="review-actions"><label class="check"><input id="uncertain-only" type="checkbox"><span>只看疑字</span></label><div><button id="add-text" class="button" type="button">框选文字</button><button id="add-figure" class="button" type="button">框选插图</button></div></div>
         <div id="draw-hint" class="inline-message" hidden>请在原稿上拖出一个矩形，按 Esc 取消。</div>
         <div id="review-list" class="review-list"></div>
-        <div class="save-dock"><label class="check"><input id="mark-reviewed" type="checkbox"><span>保存后标为已校对</span></label><button id="save-page" class="button primary" type="button" disabled>保存整页</button></div>
+        <div class="save-dock"><div class="save-dock-copy"><label class="check"><input id="mark-reviewed" type="checkbox"><span>保存后标为已校对</span></label><span id="review-save-status" class="review-save-status" role="status" aria-live="polite">已保存</span></div><button id="save-page" class="button primary" type="button" disabled>保存整页</button></div>
       </div>
     </aside>
   </main>
   <div id="drawer-scrim" class="drawer-scrim" hidden></div>
+  <dialog id="library-dialog" class="library-dialog" aria-labelledby="library-title">
+    <div class="library-head"><div><span class="library-eyebrow">我的藏书</span><h2 id="library-title">管理书架</h2><p>整理书名与归档状态。归档后可随时恢复，原稿、校对内容和用量记录都会保留。</p></div><button id="library-close" class="button quiet" type="button" aria-label="关闭书架管理">关闭</button></div>
+    <div class="library-controls"><label class="field"><span>查找书籍</span><input id="library-search" type="search" placeholder="搜索书名或 PDF 文件名" autocomplete="off"></label><label class="field"><span>排序</span><select id="library-sort"><option value="recent">最近导入</option><option value="title">书名</option><option value="progress">处理进度</option></select></label></div>
+    <div class="library-tabs" role="group" aria-label="书架范围"><button id="library-active" class="button active" type="button" aria-pressed="true">书架 <span id="library-active-count">0</span></button><button id="library-archived" class="button" type="button" aria-pressed="false">已归档 <span id="library-archived-count">0</span></button><button id="library-refresh" class="button quiet" type="button">刷新</button><button id="library-import" class="button" type="button">导入 PDF</button></div>
+    <p id="library-status" class="library-status" role="status" aria-live="polite"></p>
+    <div id="library-list" class="library-list"></div>
+  </dialog>
+  <dialog id="reading-options" class="reading-options-dialog" aria-labelledby="reading-options-title">
+    <div class="dialog-head"><h2 id="reading-options-title">阅读设置</h2><button id="reading-options-close" class="button quiet" type="button">关闭</button></div>
+    <p>调整正文显示；原稿图片和校对内容不变。</p>
+    <div id="reading-options-controls"></div>
+  </dialog>
+  <dialog id="usage-dialog" class="usage-dialog" aria-labelledby="usage-title">
+    <div class="dialog-head"><div><h2 id="usage-title">本书用量与费用</h2><p id="usage-book-name"></p></div><div class="usage-head-actions"><button id="usage-refresh" class="button" type="button">刷新</button><button id="usage-close" class="button quiet" type="button">返回阅读</button></div></div>
+    <div id="usage-status" role="status" aria-live="polite">正在读取本书记录…</div>
+    <div id="usage-content" hidden></div>
+  </dialog>
+  <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
+    <div class="dialog-head settings-head"><div><h2 id="settings-title">工具配置</h2><p>仅在本机在线工具中保存云服务凭据；离线导出书不包含这些设置。</p></div><button id="settings-close" class="button quiet" type="button">返回书架</button></div>
+    <div id="settings-status" class="settings-status" role="status" aria-live="polite">正在读取本机配置…</div>
+    <form id="settings-form" hidden>
+      <section class="settings-group" aria-labelledby="settings-ocr-heading">
+        <div class="settings-group-head"><div><h3 id="settings-ocr-heading">文字识别</h3><p>只从以下两条通道选择。识别会向所选服务发送 PDF 页面图像。</p></div></div>
+        <fieldset class="settings-choices"><legend>默认通道</legend><label class="settings-choice"><input type="radio" name="defaultProvider" value="paddle-aistudio"><span>PaddleOCR-VL-1.6<small>飞桨 AI Studio</small></span></label><label class="settings-choice"><input type="radio" name="defaultProvider" value="ppocr"><span>PP-OCRv6<small>百度智能云应用；接口仍使用服务端固定的 pp_ocrv5 标识</small></span></label></fieldset>
+        <label class="check settings-check"><input name="fallbackEnabled" type="checkbox"><span>主通道不可用时，允许另一个已配置通道接手<small>默认关闭；实际调用与额度由服务端记录。</small></span></label>
+        <div class="settings-channel"><div class="settings-channel-head"><h4>PaddleOCR-VL-1.6</h4><span id="paddle-status" class="settings-pill"></span></div><p><a href="https://aistudio.baidu.com/paddleocr" target="_blank" rel="noopener noreferrer">打开飞桨 AI Studio</a>，登录后创建 Access Token，粘贴到下方。保存只表示本地配置完整，不代表已连通或有可用额度。</p><label class="field"><span>Access Token</span><div class="field-password-wrap"><input name="paddleAccessToken" type="password" autocomplete="new-password" placeholder="留空则保持现有凭据"><button type="button" class="password-toggle-btn" data-target="paddleAccessToken" aria-label="显示或隐藏凭据" title="显示或隐藏凭据">👁️</button></div></label><label class="check settings-clear"><input name="clearPaddleAccessToken" type="checkbox"><span>清除已保存的 Access Token（保存时再次确认）</span></label></div>
+        <div class="settings-channel"><div class="settings-channel-head"><h4>PP-OCRv6</h4><span id="ppocr-status" class="settings-pill"></span></div><p><a href="https://cloud.baidu.com/doc/OCR/s/6mncwkr9c" target="_blank" rel="noopener noreferrer">查看百度智能云 OCR 接入说明</a>，创建应用并取得 API Key 和 Secret Key。接口地址由工具固定，不在这里修改。</p><div class="settings-credentials"><label class="field"><span>API Key</span><div class="field-password-wrap"><input name="ppocrApiKey" type="password" autocomplete="new-password" placeholder="留空则保持现有凭据"><button type="button" class="password-toggle-btn" data-target="ppocrApiKey" aria-label="显示或隐藏凭据" title="显示或隐藏凭据">👁️</button></div></label><label class="field"><span>Secret Key</span><div class="field-password-wrap"><input name="ppocrSecretKey" type="password" autocomplete="new-password" placeholder="留空则保持现有凭据"><button type="button" class="password-toggle-btn" data-target="ppocrSecretKey" aria-label="显示或隐藏凭据" title="显示或隐藏凭据">👁️</button></div></label></div><label class="check settings-clear"><input name="clearPpocrApiKey" type="checkbox"><span>清除已保存的 API Key（保存时再次确认）</span></label><label class="check settings-clear"><input name="clearPpocrSecretKey" type="checkbox"><span>清除已保存的 Secret Key（保存时再次确认）</span></label></div>
+      </section>
+      <section class="settings-group" aria-labelledby="settings-qwen-heading">
+        <div class="settings-group-head"><div><h3 id="settings-qwen-heading">Qwen 结构整理与疑点建议</h3><p>独立于 OCR；只建议阅读顺序、分类和疑点，不自动覆盖原文。</p></div><span id="qwen-status" class="settings-pill"></span></div>
+        <div class="settings-master-switch-card">
+          <div class="settings-master-switch-info">
+            <strong>开启 Qwen 结构整理与疑点建议服务</strong>
+            <small>这是 Qwen 服务的总开关。开启后可在转换时提取段落结构并针对上下文疑点生成纠错建议。</small>
+          </div>
+          <label class="switch-toggle" aria-label="开启 Qwen 辅助服务">
+            <input name="qwenEnabled" type="checkbox">
+            <span class="switch-slider"></span>
+          </label>
+        </div>
+        <div id="settings-qwen-body" class="settings-sub-body">
+          <p>在<a href="https://help.aliyun.com/zh/model-studio/get-api-key" target="_blank" rel="noopener noreferrer">百炼获取 API Key 指南</a>查看创建步骤；Key、模型与服务区域须匹配。启用后，处理时仍需主动勾选 Qwen，可能产生云服务用量。</p>
+          <div class="settings-credentials">
+            <label class="field"><span>服务区域</span><select name="qwenRegion"><option value="cn-beijing">北京</option><option value="ap-southeast-1">新加坡</option><option value="us-east-1">弗吉尼亚</option><option value="cn-hongkong">香港</option></select></label>
+            <label class="field"><span>模型</span><select name="qwenModel"><option value="qwen3.8-max">qwen3.8-max（推荐，旗舰能力）</option><option value="qwen-plus">qwen-plus（均衡性价比）</option><option value="qwen-max">qwen-max（旧版旗舰）</option><option value="qwen-vl-max">qwen-vl-max（视觉强化）</option><option value="qwen-vl-plus">qwen-vl-plus（视觉均衡）</option></select></label>
+          </div>
+          <details class="settings-advanced"><summary>业务空间接入（选填）</summary><p>在控制台创建 Key 的弹窗或业务空间管理页查看 API Host；只填 Host 最前一段，例如 <code>llm-xxx</code>，不要填写完整网址。留空使用该区域的现有 DashScope 地址。</p><label class="field"><span>业务空间 ID</span><input name="qwenWorkspaceId" type="text" spellcheck="false" autocomplete="off" placeholder="例如 llm-xxx"></label></details>
+          <p id="qwen-endpoint" class="settings-endpoint"></p>
+          <label class="field"><span>API Key</span><div class="field-password-wrap"><input name="qwenApiKey" type="password" autocomplete="new-password" placeholder="留空则保持现有凭据"><button type="button" class="password-toggle-btn" data-target="qwenApiKey" aria-label="显示或隐藏凭据" title="显示或隐藏凭据">👁️</button></div></label>
+          <label class="check settings-clear"><input name="clearQwenApiKey" type="checkbox"><span>清除已保存的 API Key（保存时再次确认）</span></label>
+        </div>
+      </section>
+      <section class="settings-group" aria-labelledby="settings-jev-heading">
+        <div class="settings-group-head">
+          <div>
+            <div class="settings-title-row">
+              <h3 id="settings-jev-heading">JEV 候选比较</h3>
+              <span id="jev-active-model-tag" class="settings-model-tag">模型: jev-1.13.0</span>
+            </div>
+            <p>使用 TypeSafe JEV 大语言决策模型对 OCR 疑点进行多候选评估与置信度对比。</p>
+          </div>
+          <span id="jev-status" class="settings-pill"></span>
+        </div>
+        <div class="settings-master-switch-card">
+          <div class="settings-master-switch-info">
+            <strong>开启 JEV 候选比较服务（总开关）</strong>
+            <small>这是 JEV 的总开关。开启后可在疑点校对栏评估模型候选词；需填入下方 API Key 及模型参数。</small>
+          </div>
+          <label class="switch-toggle" aria-label="开启 JEV 候选比较服务">
+            <input name="jevEnabled" type="checkbox">
+            <span class="switch-slider"></span>
+          </label>
+        </div>
+        <div id="settings-jev-body" class="settings-sub-body">
+          <p>在<a href="https://console.typesafe.ai/keys" target="_blank" rel="noopener noreferrer">TypeSafe 控制台</a>创建 API Key。候选比较仍受校准状态、调用预算和外发许可约束；不满足门槛时继续人工校对。</p>
+          <div class="settings-credentials">
+            <label class="field"><span>模型</span><select name="jevModel"><option value="jev-1.13.0">jev-1.13.0（推荐，最新决策模型）</option><option value="jev-1.12.0">jev-1.12.0（稳定版）</option><option value="mock">mock（本地模拟测试）</option></select></label>
+            <label class="field"><span id="jev-budget-label">本地调用预算单位</span><input name="jevBudgetUnits" type="number" min="1" step="1" inputmode="numeric"></label>
+          </div>
+          <p class="settings-note">预算单位是工具的本地调用核算单位，不代表美元、人民币或供应商硬金额上限。</p>
+          <label class="check settings-check">
+            <input name="jevAllowCloudData" type="checkbox">
+            <span><strong>授权外发疑点数据（开启评估必需）</strong><small>允许将当前疑点的上下文文字与图片片段发送给 TypeSafe 服务进行比较。若不勾选，评估将被系统门槛拦截。</small></span>
+          </label>
+          <label class="field"><span>API Key</span><div class="field-password-wrap"><input name="jevApiKey" type="password" autocomplete="new-password" placeholder="留空则保持现有凭据"><button type="button" class="password-toggle-btn" data-target="jevApiKey" aria-label="显示或隐藏凭据" title="显示或隐藏凭据">👁️</button></div></label>
+          <label class="check settings-clear"><input name="clearJevApiKey" type="checkbox"><span>清除已保存的 API Key（保存时再次确认）</span></label>
+          <p id="jev-detail" class="settings-note"></p>
+        </div>
+      </section>
+      <section class="settings-group" aria-labelledby="settings-billing-heading"><details class="settings-advanced"><summary id="settings-billing-heading">费用估算参考单价（可选）</summary><p>按自己的套餐填单价；全部留空即费用未知。OCR 填每次送识请求价格，Qwen/JEV 填每百万输入、输出 token 价格。只与通道和模型完全匹配时估算，保存时快照；改价不会重写旧记录。没有供应商实付回传时，这不是账单。</p><div id="settings-rates" class="settings-rates"></div></details></section>
+      <div class="settings-actions"><span id="settings-save-status" role="status" aria-live="polite"></span><button id="settings-local-check" class="button" type="button">检查本地填写</button><button id="settings-save" class="button primary" type="submit">保存配置</button></div>
+    </form>
+  </dialog>
+  <dialog id="reading-window-dialog" class="reading-window-dialog" aria-labelledby="reading-window-heading"><form method="dialog"><div class="reading-window-dialog-head"><div><h2 id="reading-window-heading">随读识别</h2><p>只准备当前页和前后各 5 页；翻页后停留约 1 秒才送识。阅读不等待识别，未完成时照常显示原稿。</p></div><button class="button quiet" value="cancel" aria-label="关闭">关闭</button></div><p id="reading-window-choice"></p><label class="check" style="margin: 12px 0 6px;"><input id="reading-window-auto-all" type="checkbox"><span>随读就绪后自动处理全书其他页</span></label><p class="reading-window-caution">开启后可能产生云服务用量。已识别并缓存的页面不会重复送识；本次选择固定到停止为止。关闭页面或切换书籍将停止新任务，已送出的当前页可能完成。</p><div class="reading-window-dialog-actions"><button id="reading-window-enable" class="button primary" type="button">确认开启随读识别</button></div></form></dialog>
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
   <script src="/reader-navigation.js"></script>
   <script src="/reading-layout.js"></script>
+  <script src="/reader-fonts.js"></script>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

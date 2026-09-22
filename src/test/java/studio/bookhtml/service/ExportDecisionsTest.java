@@ -104,7 +104,7 @@ class ExportDecisionsTest {
                 }
                 Map<String, Object> response = new java.util.LinkedHashMap<>();
                 response.put("answers", answers);
-                response.put("model", "mock-synthetic-high");
+                response.put("model", "mock-model");
                 byte[] bytes = json.writeValueAsBytes(response);
                 return new studio.bookhtml.service.BoundedHttp.Response(200, bytes);
             } catch (RuntimeException e) {

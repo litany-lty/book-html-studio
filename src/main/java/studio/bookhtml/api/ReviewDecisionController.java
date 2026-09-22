@@ -32,6 +32,10 @@ public class ReviewDecisionController {
     private final BookStore store;
     private final studio.bookhtml.config.DecisionProperties decisionConfig;
     private final studio.bookhtml.decision.DecisionBudget budget;
+    private studio.bookhtml.config.SettingsService settings;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setSettings(studio.bookhtml.config.SettingsService settings) { this.settings = settings; }
 
     public ReviewDecisionController(DecisionCoordinator coordinator, DecisionAcceptService acceptService,
                                     DecisionStore decisions, BookStore store) {
@@ -99,6 +103,8 @@ public class ReviewDecisionController {
         if (body == null || body.clientOperationId() == null || body.blockId() == null
                 || body.expectedPageRevision() == null || body.issueBasisHash() == null)
             throw new ApiException(HttpStatus.BAD_REQUEST, "参数非法");
+        if (settings != null && Boolean.TRUE.equals(body.allowFreshVision()))
+            throw new ApiException(HttpStatus.BAD_REQUEST, "本期未启用局部复识别");
         DecisionCoordinator.CreateBody request = new DecisionCoordinator.CreateBody(
                 body.clientOperationId(), body.blockId(), body.expectedPageRevision(),
                 body.issueBasisHash(), Boolean.TRUE.equals(body.allowFreshVision()));
@@ -135,9 +141,9 @@ public class ReviewDecisionController {
         response.put("basis", coordinator.issueBasisView(bookId, page, issueId));
         response.put("current", coordinator.currentDecisionView(bookId, page, issueId));
         response.put("history", coordinator.decisionHistory(bookId, page, issueId, 10));
-        // JR-08-T01：前端模式门需要知道当前模式；SHADOW/OFF 下不展示正式推荐接受入口
         try {
             response.put("decisionMode", decisionConfig == null ? "UNKNOWN" : decisionConfig.getMode());
+            response.put("configuredModel", decisionConfig == null ? null : decisionConfig.getModel());
         } catch (Exception ignored) {
             response.put("decisionMode", "UNKNOWN");
         }
@@ -147,6 +153,7 @@ public class ReviewDecisionController {
     /** 轻量状态与结果链接（11.3 必要字段；进度按实际阶段显示，不用假百分比）。 */
     private Map<String, Object> jobView(DecisionStore.DecisionJob job) {
         Map<String, Object> view = new LinkedHashMap<>();
+        view.put("configuredModel", decisionConfig == null ? null : decisionConfig.getModel());
         view.put("jobId", job.jobId());
         view.put("jobState", job.state());
         view.put("stateVersion", job.stateVersion());

@@ -187,6 +187,49 @@ class ReadingStructureNormalizerTest {
                 text, text, .8, true, false, null, "paddle", List.of(id), null, null, List.of());
     }
 
+    @Test
+    void normalizesMarginPageNumbersAndDecoratorsToPageNumber() {
+        Block pageNum24 = block("p24", "24", new double[]{.71, .90, .02, .03}, List.of());
+        Block starDecor = block("star", "*", new double[]{.73, .90, .02, .03}, List.of());
+        Block decor8Left = block("d8-left", "8", new double[]{.22, .89, .02, .02}, List.of());
+        Block pageNum25 = block("p25", "25", new double[]{.24, .88, .02, .02}, List.of());
+        Block dashFolio = block("dash", "- 16 -", new double[]{.48, .92, .05, .02}, List.of());
+        Block dotFolio = block("dot", "· 16 ·", new double[]{.48, .92, .05, .02}, List.of());
+        Block topDecor = block("top-d", "8", new double[]{.30, .06, .02, .03}, List.of());
+        Block bodyProse = block("body", "这是正文内容，绝不应被当成页码过滤。", new double[]{.50, .30, .03, .50}, List.of());
+
+        Page source = page(List.of(pageNum24, starDecor, decor8Left, pageNum25, dashFolio, dotFolio, topDecor, bodyProse), false);
+        Page normalized = ReadingStructureNormalizer.normalize(source);
+
+        assertEquals("page-number", normalized.blocks().get(0).type());
+        assertEquals("page-number", normalized.blocks().get(1).type());
+        assertEquals("page-number", normalized.blocks().get(2).type());
+        assertEquals("page-number", normalized.blocks().get(3).type());
+        assertEquals("page-number", normalized.blocks().get(4).type());
+        assertEquals("page-number", normalized.blocks().get(5).type());
+        assertEquals("page-number", normalized.blocks().get(6).type());
+        assertEquals("text", normalized.blocks().get(7).type());
+    }
+
+    @Test
+    void verifiedSpreadOrderWorksWithMarginPageNumbersAndDecorators() {
+        List<Block> blocks = new ArrayList<>(spreadBlocks());
+        // Insert decorators next to the page numbers (top margin at y=.10, height=.03)
+        blocks.add(new Block("r-star", "text", 11, new double[]{.73, .10, .02, .03}, "horizontal-tb",
+                "*", "*", .8, true, false, null, "paddle", List.of("r-star"), null, null, List.of()));
+        blocks.add(new Block("l-decor", "text", 12, new double[]{.24, .10, .02, .03}, "horizontal-tb",
+                "8", "8", .8, true, false, null, "paddle", List.of("l-decor"), null, null, List.of()));
+        Page source = spreadPage(blocks, false);
+
+        Page reading = ReadingStructureNormalizer.normalize(source);
+
+        // Spread ordering still succeeds despite decorators
+        assertEquals("page-number", reading.blocks().stream().filter(b -> b.id().equals("r-star")).findFirst().orElseThrow().type());
+        assertEquals("page-number", reading.blocks().stream().filter(b -> b.id().equals("l-decor")).findFirst().orElseThrow().type());
+        assertEquals("page-number", reading.blocks().stream().filter(b -> b.id().equals("r-number")).findFirst().orElseThrow().type());
+        assertEquals("page-number", reading.blocks().stream().filter(b -> b.id().equals("l-number")).findFirst().orElseThrow().type());
+    }
+
     private static Block copy(Block b, String text, double[] bbox, String mode, boolean reviewed, String source) {
         return new Block(b.id(), b.type(), b.order(), bbox == null ? b.bbox() : bbox,
                 mode == null ? b.writingMode() : mode, text == null ? b.original() : text,

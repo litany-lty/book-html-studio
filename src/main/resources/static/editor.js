@@ -1,6 +1,7 @@
 const BLOCK_TYPES = [
   ['text', '正文'], ['heading', '标题'], ['advertisement', '广告'], ['figure', '插图'], ['table', '表格'], ['formula', '公式'], ['caption', '图注'], ['page-number', '页码']
 ];
+const editedIssueDrafts = new WeakSet();
 
 function field(labelText, control) {
   const label = document.createElement('label');
@@ -66,6 +67,74 @@ export function issueReferences(blocks) {
   return refs;
 }
 
+function validPageBox(value) {
+  if (!Array.isArray(value) || value.length < 4) return null;
+  const [x, y, w, h] = value.slice(0, 4).map(Number);
+  return [x, y, w, h].every(Number.isFinite) && x >= 0 && y >= 0 && w > 0 && h > 0
+    && x + w <= 1.001 && y + h <= 1.001 ? [x, y, w, h] : null;
+}
+
+function appendBlockFallback(target, block, options, note) {
+  target.replaceChildren();
+  const status = document.createElement('p');
+  status.className = 'issue-evidence-status';
+  status.textContent = note;
+  target.append(status);
+  const box = validPageBox(block.bbox);
+  const pageWidth = Number(options.pageWidth), pageHeight = Number(options.pageHeight);
+  if (!box || !(pageWidth > 0 && pageHeight > 0) || !options.imageUrl) return;
+  const [x, y, w, h] = box;
+  const ratio = w * pageWidth / (h * pageHeight);
+  const viewport = document.createElement('div');
+  viewport.className = 'issue-context-stage issue-fallback-stage';
+  const link = document.createElement('a');
+  link.href = options.imageUrl; link.target = '_blank'; link.rel = 'noopener';
+  link.title = '打开整页原稿放大查看';
+  const crop = document.createElement('div');
+  crop.className = 'issue-fallback-crop';
+  crop.setAttribute('role', 'img');
+  crop.setAttribute('aria-label', '块级原稿区域，未精确定位疑字');
+  crop.style.width = `${Math.max(100, Math.min(320, Math.round(900 * w)))}px`;
+  crop.style.maxWidth = '100%';
+  crop.style.aspectRatio = String(ratio);
+  crop.style.backgroundImage = `url(${JSON.stringify(options.imageUrl)})`;
+  crop.style.backgroundSize = `${100 / w}% auto`;
+  crop.style.backgroundRepeat = 'no-repeat';
+  crop.style.backgroundPosition = `${x >= 1 - w ? 100 : x / (1 - w) * 100}% ${y >= 1 - h ? 100 : y / (1 - h) * 100}%`;
+  link.append(crop); viewport.append(link); target.append(viewport);
+}
+
+function needsCollapse(text, limit) {
+  return text.length > limit || text.split(/\r\n?|\n/u).length > 2;
+}
+
+function appendOriginalOcr(source, text) {
+  if (!needsCollapse(text, 80)) {
+    const raw = document.createElement('p'); raw.className = 'issue-source-ocr'; raw.textContent = text;
+    source.append(raw);
+    return;
+  }
+  const details = document.createElement('details'); details.className = 'issue-source-ocr';
+  const summary = document.createElement('summary'); summary.textContent = `原始 OCR（${Array.from(text).length} 字，展开查看）`;
+  const raw = document.createElement('p'); raw.textContent = text;
+  details.append(summary, raw); source.append(details);
+}
+
+function appendIssueMeta(parent, label, value, limit, className) {
+  const text = String(value || '');
+  if (!text) return;
+  if (needsCollapse(text, limit)) {
+    const details = document.createElement('details'); details.className = 'issue-meta-details';
+    const summary = document.createElement('summary'); summary.textContent = `${label}（展开查看）`;
+    const body = document.createElement('p'); body.className = className; body.textContent = text;
+    details.append(summary, body); parent.append(details);
+  } else {
+    const labelNode = document.createElement('span'); labelNode.className = 'issue-label'; labelNode.textContent = label;
+    const body = document.createElement('p'); body.className = className; body.textContent = text;
+    parent.append(labelNode, body);
+  }
+}
+
 export function renderIssueWorkbench(container, blocks, options) {
   const refs = issueReferences(blocks);
   container.replaceChildren();
@@ -90,34 +159,75 @@ export function renderIssueWorkbench(container, blocks, options) {
   const comparison = document.createElement('div'); comparison.className = 'issue-comparison';
   const source = document.createElement('section'); source.className = 'issue-source';
   const sourceTitle = document.createElement('strong'); sourceTitle.textContent = '原图与 OCR（只读）';
-  const crop = document.createElement('div'); crop.className = 'issue-crop'; crop.setAttribute('role', 'img'); crop.setAttribute('aria-label', '当前疑点的原稿区域');
-  const [x, y, w, h] = current.block.bbox || [0, 0, 1, 1];
-  crop.style.backgroundImage = `url(${JSON.stringify(options.imageUrl)})`;
-  crop.style.backgroundSize = `${100 / Math.max(.01, w)}% ${100 / Math.max(.01, h)}%`;
-  crop.style.backgroundPosition = `${x >= 1 - w ? 100 : x / Math.max(.01, 1 - w) * 100}% ${y >= 1 - h ? 100 : y / Math.max(.01, 1 - h) * 100}%`;
-  const pageWidth = Number(options.pageWidth || 1), pageHeight = Number(options.pageHeight || 1);
-  crop.style.aspectRatio = String(Math.max(.6, Math.min(4, (w * pageWidth) / Math.max(.001, h * pageHeight))));
+  const visual = document.createElement('div'); visual.className = 'issue-source-visual';
   const rawText = current.synthetic ? (current.block.original || '') : (current.block.original || '').slice(current.issue.start, current.issue.end);
-  const raw = document.createElement('p');
-  raw.textContent = rawText;
-  source.append(sourceTitle, crop, raw);
+  source.append(sourceTitle, visual);
+  appendOriginalOcr(source, rawText);
+  let preciseEntry = !current.synthetic ? options.page?.issueImages?.[current.issue.id] : null;
+  let mounted = false;
+  const sourceIsCurrent = () => !mounted || container.contains(source);
+  const showEvidence = entry => {
+    if (!sourceIsCurrent()) return;
+    const contextView = globalThis.BookReadingLayout?.createContextEvidence?.(entry);
+    if (!contextView) {
+      appendBlockFallback(visual, current.block, options, '没有可用的独立原稿截图；以下仅是块级区域，未精确定位疑字。');
+      return;
+    }
+    visual.replaceChildren(contextView.viewport);
+    const status = document.createElement('p'); status.className = 'issue-evidence-status';
+    status.textContent = entry.mode === 'glyphs' && contextView.targets.length
+      ? '红框仅标已定位疑字；滚动看全行，点图放大。'
+      : '仅定位到行或段，无疑字框；滚动看全区，点图放大。';
+    visual.append(status);
+    contextView.image.addEventListener('load', () => {
+      if (sourceIsCurrent()) requestAnimationFrame(() => globalThis.BookReadingLayout?.centerContextTarget?.(contextView));
+    }, { once: true });
+    contextView.image.addEventListener('error', () => {
+      if (sourceIsCurrent()) appendBlockFallback(visual, current.block, options, '独立原稿截图加载失败；以下仅是块级区域，未精确定位疑字。');
+    }, { once: true });
+  };
+  if (current.synthetic) {
+    appendBlockFallback(visual, current.block, options, '块级建议没有逐字定位；以下仅是块级原稿区域。');
+  } else if (preciseEntry && !preciseEntry.pending) {
+    showEvidence(preciseEntry);
+  } else if (typeof options.loadIssueEvidence === 'function') {
+    const loading = document.createElement('p'); loading.className = 'issue-evidence-status'; loading.textContent = '正在加载当前疑点的原稿依据…';
+    visual.append(loading);
+    Promise.resolve().then(() => sourceIsCurrent() ? options.loadIssueEvidence(current.issue.id) : null).then(entry => {
+      if (!sourceIsCurrent()) return;
+      preciseEntry = entry;
+      if (entry) showEvidence(entry);
+      else appendBlockFallback(visual, current.block, options, '暂未取得独立原稿截图；以下仅是块级区域，未精确定位疑字。');
+    }).catch(() => {
+      if (sourceIsCurrent()) appendBlockFallback(visual, current.block, options, '原稿依据加载失败；以下仅是块级区域，未精确定位疑字。');
+    });
+  } else {
+    appendBlockFallback(visual, current.block, options, '暂未取得独立原稿截图；以下仅是块级区域，未精确定位疑字。');
+  }
+  if (!current.synthetic && globalThis.BookReadingLayout?.inspectIssue) {
+    const actions = document.createElement('div'); actions.className = 'issue-source-actions';
+    const inspect = document.createElement('button'); inspect.type = 'button'; inspect.className = 'button quiet'; inspect.textContent = '查看完整文字依据';
+    inspect.addEventListener('click', () => {
+      globalThis.BookReadingLayout.inspectIssue({ page: options.page, block: current.block, issue: current.issue,
+        sourceText: rawText, script: 'original', pageImageSrc: options.imageUrl }, inspect);
+    });
+    actions.append(inspect); source.append(actions);
+  }
 
   const edit = document.createElement('section'); edit.className = 'issue-edit';
   const editTitle = document.createElement('strong'); editTitle.textContent = current.synthetic ? '块级模型建议' : current.issue.kind === 'unreadable' ? '模糊缺损' : '普通疑点';
-  const reason = document.createElement('p'); reason.className = 'issue-reason'; reason.textContent = current.issue.reason || '没有提供图像依据。';
-  edit.append(editTitle, reason);
-  if (!current.synthetic) {
-    const inferredLabel = document.createElement('span'); inferredLabel.className = 'issue-label'; inferredLabel.textContent = '推测候选';
-    const inferred = document.createElement('p'); inferred.className = 'issue-inferred'; inferred.textContent = current.issue.inferredText || '无推测候选';
-    const inferredNote = document.createElement('p'); inferredNote.className = 'issue-reason';
-    inferredNote.textContent = current.issue.inferredText
-      ? '候选尚未确认；阅读正文以纯文字和细虚线标出差异，点击可查看原字依据。原始 OCR 保留在左侧。'
-      : '没有候选时，原始 OCR 仍保留在左侧供核对。';
+  if (current.synthetic) edit.append(editTitle);
+  if (current.synthetic) {
+    appendIssueMeta(edit, '判断依据', current.issue.reason, 42, 'issue-reason');
+  } else {
+    const candidate = String(current.issue.inferredText || '');
+    if (candidate && !needsCollapse(candidate, 48)) appendIssueMeta(edit, '推测候选（未确认）', candidate, 48, 'issue-inferred');
     const replacement = document.createElement('textarea'); replacement.rows = 2; replacement.maxLength = 1000;
-    replacement.value = current.issue.resolved ? (current.issue.replacement ?? '') : (current.issue.inferredText || rawText);
+    replacement.value = current.issue.resolved ? (current.issue.replacement ?? '')
+      : (editedIssueDrafts.has(current.issue) || current.issue.replacement ? current.issue.replacement : (current.issue.inferredText || rawText));
     replacement.placeholder = '输入确认后的文字；可清空以删除伪识别片段';
-    replacement.addEventListener('input', () => { current.issue.replacement = replacement.value; options.onDirty(); });
-    edit.append(inferredLabel, inferred, inferredNote, field('当前编辑', replacement));
+    replacement.addEventListener('input', () => { editedIssueDrafts.add(current.issue); current.issue.replacement = replacement.value; options.onDirty(); });
+    edit.append(field(current.issue.resolved ? '当前编辑' : '当前编辑（尚未确认）', replacement));
     const actions = document.createElement('div'); actions.className = 'issue-actions';
     if (current.issue.inferredText) {
       const adopt = document.createElement('button'); adopt.type = 'button'; adopt.className = 'button primary'; adopt.textContent = '采用推测并确认';
@@ -133,6 +243,8 @@ export function renderIssueWorkbench(container, blocks, options) {
       actions.append(restore);
     }
     edit.append(actions);
+    if (candidate && needsCollapse(candidate, 48)) appendIssueMeta(edit, '推测候选（未确认）', candidate, 48, 'issue-inferred');
+    appendIssueMeta(edit, '判断依据', current.issue.reason, 42, 'issue-reason');
   }
   comparison.append(source, edit);
 
@@ -147,6 +259,7 @@ export function renderIssueWorkbench(container, blocks, options) {
     li.append(button); list.append(li);
   });
   container.append(header, comparison, list);
+  mounted = true;
 }
 
 export function renderEditor(container, blocks, options) {

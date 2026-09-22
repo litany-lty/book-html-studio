@@ -37,18 +37,20 @@ class PaddleOcrPipelineRoutingTest {
     }
 
     @Test
-    void selectedBaiduAndLegacyOverloadCallOnlyBaidu() throws Exception {
+    void legacyBaiduCallRemainsReadableButOverloadDefaultsToAiStudio() throws Exception {
         BufferedImage image = new BufferedImage(300, 400, BufferedImage.TYPE_INT_RGB);
         CloudOcrPipeline.Encoded encoded = new CloudOcrPipeline.Encoded(new byte[]{2}, 300, 400);
         when(encoder.encodeWithin(image)).thenReturn(encoded);
         when(baidu.recognize(same(encoded.bytes()), eq(300), eq(400), eq("auto"), any(BooleanSupplier.class)))
                 .thenReturn(List.of(block("baidu", "paddle")));
+        when(aiStudio.recognize(same(encoded.bytes()), eq(300), eq(400), eq("auto"), any(BooleanSupplier.class)))
+                .thenReturn(List.of(block("studio", "paddle-aistudio")));
 
         assertEquals("baidu", pipeline.recognize(image, "auto", false, "paddle", () -> false).get(0).id());
-        assertEquals("baidu", pipeline.recognize(image, "auto", false, () -> false).get(0).id());
+        assertEquals("studio", pipeline.recognize(image, "auto", false, () -> false).get(0).id());
 
-        verify(baidu, times(2)).recognize(same(encoded.bytes()), eq(300), eq(400), eq("auto"), any(BooleanSupplier.class));
-        verifyNoInteractions(aiStudio);
+        verify(baidu).recognize(same(encoded.bytes()), eq(300), eq(400), eq("auto"), any(BooleanSupplier.class));
+        verify(aiStudio).recognize(same(encoded.bytes()), eq(300), eq(400), eq("auto"), any(BooleanSupplier.class));
         image.flush();
     }
 
