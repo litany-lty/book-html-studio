@@ -13,7 +13,7 @@ public class SparsePageGuard {
     private static final Set<String> STRUCTURAL_TYPES=Set.of("table","figure","formula");
 
     GuardResult apply(BufferedImage image,List<Block>source){
-        List<Block>original=source==null?List.of():List.copyOf(source);if(image==null||original.isEmpty()||!claimsDenseFullPageStructure(original)||!hasExtremelyLowVisualInformation(image))return new GuardResult(original,false,null);
+        List<Block>original=source==null?List.of():List.copyOf(source);if(image==null||original.isEmpty()||!claimsDenseFullPageStructure(original)||!QualityGate.isTrueBlank(image))return new GuardResult(original,false,null);
         List<String>sourceIds=original.stream().filter(Objects::nonNull).map(Block::id).filter(Objects::nonNull).toList();Block fallback=new Block("sparse-page-original","figure",0,new double[]{0,0,1,1},"horizontal-tb","","",null,true,false,null,"sparse-page-guard",sourceIds.isEmpty()?List.of("sparse-page-original"):sourceIds,"原页图像信息极少，云端满页结构文字未作为正文采用；原始识别记录仍保留供核对",new double[]{0,0,image.getWidth(),image.getHeight()});
         return new GuardResult(List.of(fallback),true,"页面图像信息极少且与 PaddleOCR-VL 的满页结构结果不一致；未将该文字作为正文，已保留原页图和原始识别记录供核对");
     }

@@ -83,6 +83,21 @@ function originalImage(book, page, className = '') {
   return img;
 }
 
+function hasBlankEvidence(page) {
+  // Legacy +blank alone predates the strengthened image gate; never certify it on load.
+  return page?.provider?.endsWith('+blank') && !page?.blocks?.length && !page?.sourceRecords?.length
+    && (page.warnings || []).some(w => typeof w === 'string' && w.startsWith('[BLANK_EVIDENCE_V2]'));
+}
+
+export function emptyReadingMessage(page) {
+  if (hasBlankEvidence(page))
+    return '本页经图像检查为近空白，原稿保留，可随时对照。';
+  const hasEvidence = [...(page?.blocks || []), ...(page?.sourceRecords || [])]
+    .some(block => typeof block?.original === 'string' && block.original.trim());
+  return hasEvidence ? '本页有识别内容未进入阅读排版，请对照下方原稿核对。'
+    : '未提取到可读正文，不能据此判定为空白或纯插图；请对照原稿，必要时重新识别。';
+}
+
 export function statusMessage(page) {
   if (!page) return '';
   if (page.status === 'FAILED') return page.error || '本页暂未生成文字，可以先读原稿。';
@@ -93,8 +108,8 @@ export function statusMessage(page) {
     return '正在识别本页，原稿可以继续阅读。';
   }
   if (page.status !== 'READY') return '本页尚未识别，原稿保留，可随时对照。';
-  // U1：空白/纯图页使用轻量空态，不误报为识别失败，不诱导付费重试。
-  if (!page.blocks?.length) return '本页为空白页或仅含插图，原稿保留，可切换原稿查看。';
+  // Missing transcription is not evidence of a blank page (watermarks, handwriting, grids).
+  if (!page.blocks?.length) return emptyReadingMessage(page);
   // U1：默认阅读不拼出长技术条；多条提示只给一句话，详情进入校对/诊断。
   // 处理追溯（通道/版式/PDF 指纹）是技术信息，只进诊断详情，不占阅读首屏。
   const actionableWarnings = (page.warnings || []).filter(warning => !/尚未人工校对|自动结果仍需核对原图|自动原图复核候选|处理追溯/u.test(warning));
@@ -116,6 +131,10 @@ export function qualityOf(page) {
     return { label: page?.status === 'FAILED' ? '本页暂未生成文字' : '原稿保留，可随时对照', tone: 'pending', detail: '' };
   }
   const blocks = page.blocks || [];
+  if (!blocks.length && !hasBlankEvidence(page))
+    return { label: '正文未识别，需核对', tone: 'warning', detail: emptyReadingMessage(page) };
+  if ((page.warnings || []).some(w => w.startsWith('[OCR_RECOVERY_PARTIAL]')) && !page.reviewed)
+    return { label: '仅恢复部分文字', tone: 'warning', detail: '局部重识别结果尚未完整核对，原图和未识别区域均保留。' };
   const uncertain = blocks.filter(block => block.uncertain || (block.confidence != null && block.confidence < .75)).length;
   const unresolvedIssues = blocks.flatMap(block => block.issues || []).filter(issue => !issue.resolved).length;
   const scored = blocks.filter(block => block.confidence != null);
@@ -227,7 +246,7 @@ function renderReading(container, ctx) {
       img.loading = 'lazy';
       img.decoding = 'async';
       img.src = api.figureImage(book.id, page.pageNumber, block.id);
-      img.alt = block.type === 'table' ? '原稿中的表格裁图' : block.type === 'formula' ? '原稿中的公式裁图' : '原稿中的插图';
+      img.alt = block.type === 'table' ? '原稿中的表格裁图' : block.type === 'formula' ? '原稿中的公式裁图' : '原稿保留区域（可能含未识别文字）';
       figure.append(img);
       if (text) {
         const details = document.createElement('details');
@@ -261,8 +280,13 @@ function renderReading(container, ctx) {
   if (!flow.children.length) {
     const empty = document.createElement('p');
     empty.className = 'flow-empty';
-    empty.textContent = '本页为空白页或仅含插图，可切换原稿查看。';
+    empty.textContent = emptyReadingMessage(page);
     flow.append(empty);
+    // Legacy READY + empty blocks must keep the actual source visible without a paid retry.
+    const original = document.createElement('figure');
+    original.className = 'reading-figure empty-reading-original';
+    original.append(originalImage(book, page));
+    flow.append(original);
   }
   if (advertisements.length) {
     const details = document.createElement('details');

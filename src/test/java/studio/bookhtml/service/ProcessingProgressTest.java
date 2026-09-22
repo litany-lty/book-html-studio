@@ -91,6 +91,23 @@ class ProcessingProgressTest {
                 List.of(), false, null, List.of(b)), ProcessingResult.Category.TEXT);
     }
 
+    @Test void regionalPartialBaselineNeverBecomesSucceededOrTriggersMoreEnhancement() throws Exception {
+        setup(1);
+        Block b = text("recovered", "局部原图转录");
+        Page page = new Page(1,600,800,"READY","paddle-aistudio",List.of(b),
+                List.of(OcrTextRecovery.PARTIAL + " 待核对"),false,null,List.of(b));
+        when(processor.processBaseline(eq(book.id()), eq(1), anyString(), anyString(), anyBoolean(), any()))
+                .thenReturn(new ProcessingResult(page, ProcessingResult.Category.TEXT_PARTIAL));
+        windows.update(book.id(), assistRequest(UUID.randomUUID(), 1, 1));
+        clock.advance(Duration.ofSeconds(1)); windows.tick();
+        await(() -> { var snap=progress.latest(book.id(),1); return snap!=null && "PARTIAL".equals(snap.lifecycle()); });
+        var snap=progress.latest(book.id(),1);
+        assertTrue(snap.canRead()); assertTrue(snap.canRetry());
+        assertEquals("OCR_RECOVERY_PARTIAL",snap.messageCode());
+        assertEquals("局部原图转录",store.readPage(book.id(),1).blocks().get(0).original());
+        verify(processor,never()).enrichBaseline(anyString(),anyInt(),any(),anyString(),anyString(),any());
+    }
+
     @Test void prog04_baselineReadableWhileEnhancementBlocked() throws Exception {
         setup(5);
         CountDownLatch enrichEntered = new CountDownLatch(1);

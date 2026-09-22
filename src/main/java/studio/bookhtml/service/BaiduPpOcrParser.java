@@ -43,7 +43,10 @@ public class BaiduPpOcrParser {
                 blocks.add(new Block(id, "text", order++, bbox, mode, text, text, confidence,
                         true, false, null, "ppocr", List.of(id), null, raw));
             }
-            if (blocks.isEmpty()) throw new OcrException("PP-OCRv6 未返回可用文字行");
+            if (blocks.isEmpty()) {
+                if (layouts.isEmpty()) throw new OcrNoTextException("PP-OCRv6 未检出文字行");
+                throw new OcrException("PP-OCRv6 未返回可用文字行");
+            }
             BlockValidator.validate(blocks);
             return List.copyOf(blocks);
         } catch (OcrException e) {
