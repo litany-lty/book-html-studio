@@ -20,16 +20,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Prepare private audit snapshot
+      - name: Record tested SHA
         run: |
           mkdir -p audit-evidence
           git rev-parse HEAD > audit-evidence/tested-sha.txt
-          git archive --format=zip --output=audit-evidence/tracked-source.zip HEAD
-      - uses: actions/upload-artifact@v7
-        with:
-          name: reader-audit-source-${{ github.sha }}
-          path: audit-evidence/
-          retention-days: 1
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -55,7 +49,21 @@ jobs:
           python3 scripts/verification/shadow_eval.py --selftest
           python3 -m unittest discover -s scripts/verification -p 'test_*.py'
       - name: Java regression tests
+        id: java-tests
+        continue-on-error: true
         run: mvn --batch-mode verify
+      - name: Collect offline verification dependencies
+        if: always()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+          root = Path.home() / '.m2/repository'
+          with zipfile.ZipFile('audit-evidence/test-dependencies.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              for p in root.rglob('*.jar'):
+                  if p.is_file() and not p.is_symlink():
+                      z.write(p, p.relative_to(root))
+          PY
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -63,5 +71,8 @@ jobs:
           path: |
             target/surefire-reports/
             test-results/
-            audit-evidence/tested-sha.txt
-          retention-days: 7
+            audit-evidence/
+          retention-days: 1
+      - name: Preserve regression failure
+        if: steps.java-tests.outcome == 'failure'
+        run: exit 1
