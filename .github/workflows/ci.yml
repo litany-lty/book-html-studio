@@ -74,6 +74,18 @@ jobs:
           python3 -m unittest discover -s scripts/verification -p 'test_*.py'
       - name: Test and package
         run: mvn --batch-mode verify
+      - name: Repeat lifecycle regression gates
+        shell: bash
+        run: |
+          mkdir -p test-results/full-suite
+          cp target/surefire-reports/TEST-*.xml test-results/full-suite/
+          for round in 1 2 3; do
+            mvn --batch-mode -Dtest=ReadingWindowServiceTest,PageAttemptLifecycleTest,RemediationLifecycleTest,ProgressReducerRegressionTest,QwenRequestGateTest test
+            mkdir -p "test-results/lifecycle-repeat-$round"
+            for suite in ReadingWindowServiceTest PageAttemptLifecycleTest RemediationLifecycleTest ProgressReducerRegressionTest QwenRequestGateTest; do
+              cp "target/surefire-reports/TEST-studio.bookhtml.service.$suite.xml" "test-results/lifecycle-repeat-$round/"
+            done
+          done
       - name: Build manifest
         run: |
           python3 scripts/verification/build_manifest.py --jar target/book-html-studio.jar --out test-results/build

@@ -25,6 +25,7 @@ public class JobService {
             new ArrayBlockingQueue<>(24), r -> { Thread t = new Thread(r, "book-html-worker"); t.setDaemon(true); return t; },
             new ThreadPoolExecutor.AbortPolicy());
     private Running active;
+    private boolean closing;
     private final Map<Integer, Running> activeReserved = new ConcurrentHashMap<>();
     // U2：页面级 attempt 登记（调度用；最终写入权限仍以 BookStore 锁内校验为准）。
     private final Map<String, PageAttempt> pageAttempts = new ConcurrentHashMap<>();
@@ -40,8 +41,52 @@ public class JobService {
     /** U4：阶段事件聚合（测试可注入；缺省关闭，不影响正式保存）。 */
     @org.springframework.beans.factory.annotation.Autowired(required=false) public void setProgress(ProcessingProgressService progress){this.progress=progress;}
     @PostConstruct void recover(){store.recoverInterruptedJobs();reconcileAttemptIntents();}
-    @PreDestroy void close(){worker.shutdownNow();cancelAllReserved();}
+    @PreDestroy void close() {
+        RuntimeException shutdownFailure = null;
+        synchronized (this) {
+            closing = true;
+            if (active != null) {
+                Running running = active;
+                running.cancelled = true;
+                if (running.future != null) running.future.cancel(true);
+                if (running.thread != null) running.thread.interrupt();
+                if (!running.started) {
+                    try {
+                        Job queued = store.readJob(running.bookId);
+                        if (queued != null) write(running.bookId, statusJob(queued, "CANCELLED",
+                                queued.completed(), queued.total(), queued.currentPage(), null, queued.errors()));
+                    } catch (RuntimeException failure) {
+                        shutdownFailure = new IllegalStateException("排队任务关闭状态保存失败，请检查恢复日志");
+                    } finally {
+                        active = null;
+                        if (running.lease != null) running.lease.close();
+                    }
+                }
+            }
+            cancelAllReserved();
+            worker.shutdownNow();
+        }
+        // Never hold the admission monitor while joining: worker finalizers need it to
+        // settle journals and release their real ownership before BookStore is closed.
+        boolean interrupted = Thread.interrupted();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        try {
+            while (!worker.isTerminated()) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) throw new IllegalStateException("任务线程未在关闭期限内结束；不能确认数据目录可交接");
+                try {
+                    if (worker.awaitTermination(remaining, TimeUnit.NANOSECONDS)) break;
+                } catch (InterruptedException cancellation) { interrupted = true; }
+            }
+        } finally { if (interrupted) Thread.currentThread().interrupt(); }
+        if (shutdownFailure != null) throw shutdownFailure;
+    }
+
+    private void requireOpen() {
+        if (closing) throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "应用正在关闭，不接受新识别任务");
+    }
     public synchronized void reserveReading(UUID reservation,String bookId){
+        requireOpen();
         if(readingReservation!=null||active!=null||!activeReserved.isEmpty())throw new ApiException(HttpStatus.CONFLICT,"已有识别任务或阅读窗口正在运行");
         if(store.readBook(bookId).archived())throw new ApiException(HttpStatus.CONFLICT,"本书已归档，请先恢复后再识别");
         Job current=store.readJob(bookId);
@@ -100,6 +145,7 @@ public class JobService {
         return books.updateLibrary(bookId,title,archived);
     }
     public synchronized Job submitReserved(UUID reservation, String bookId, JobRequest request) {
+        requireOpen();
         if (!Objects.equals(readingReservation, reservation) || !Objects.equals(readingReservationBookId, bookId))
             throw new ApiException(HttpStatus.CONFLICT, "阅读窗口预约已失效");
         if (active != null) throw new ApiException(HttpStatus.CONFLICT, "已有识别任务正在运行");
@@ -368,6 +414,7 @@ public class JobService {
         }
     }
     public synchronized Job submit(String bookId,JobRequest request){
+        requireOpen();
         if(readingReservation!=null)throw new ApiException(HttpStatus.CONFLICT,"阅读窗口正在运行，请先停止随读处理");
         SettingsService.Lease lease=settings==null?null:settings.beginWork();boolean transferred=false;try{Book book=books.get(bookId);if(book.archived())throw new ApiException(HttpStatus.CONFLICT,"本书已归档，请先恢复后再识别");String provider=request.provider()==null?(settings==null?"paddle-aistudio":settings.state().defaultProvider()):request.provider();if(settings!=null&&!List.of("paddle-aistudio","ppocr").contains(provider))throw new ApiException(HttpStatus.BAD_REQUEST,"新任务仅支持 AI Studio 与 PP-OCRv6 通道");String layout=request.layout()==null?"auto":request.layout();List<Integer> pages=PageRanges.parse(request.pages(),book.totalPages());String fingerprint=bookId+"|"+pages+"|"+provider+"|"+layout+"|"+request.splitSpreads()+"|"+request.force()+"|"+request.assistEnabled();
         if(active!=null){if(!active.cancelled&&active.fingerprint.equals(fingerprint))return store.readJob(bookId);throw new ApiException(HttpStatus.CONFLICT,"已有识别任务正在运行或正在取消");}

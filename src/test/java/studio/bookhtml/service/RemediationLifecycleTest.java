@@ -136,10 +136,54 @@ class RemediationLifecycleTest {
         assertEquals("READY", store.readPage(bookId, 1).status());
         assertFalse(settings.busy());
         clearInvocations(processor);
-        doThrow(new IOException("synthetic disk failure")).when(store).writeSidecar(eq(store.pageAttemptsPath(bookId)), any());
+        Path journalPath = store.pageAttemptsPath(bookId);
+        doThrow(new IOException("synthetic disk failure")).when(store).writeSidecar(eq(journalPath), any());
         assertThrows(ApiException.class, () -> jobs.submitReserved(reservation, bookId, new JobRequest("1", "paddle-aistudio", "auto", false, true, false)));
         verifyNoInteractions(processor);
         assertFalse(jobs.readingJobActive(reservation, 1));
         assertFalse(settings.busy());
     }
+
+    @Test void closeWaitsForPhysicalWorkerFinalizerAndRejectsNewAdmission() throws Exception {
+        var entered = new CountDownLatch(1);
+        var cancelled = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        when(processor.processBaseline(eq(bookId), eq(1), anyString(), anyString(), anyBoolean(), any()))
+                .thenAnswer(inv -> {
+                    entered.countDown();
+                    boolean interrupted = false;
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    try {
+                        while (true) {
+                            try {
+                                assertTrue(release.await(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS));
+                                break;
+                            } catch (InterruptedException cancellation) {
+                                interrupted = true;
+                                cancelled.countDown();
+                            }
+                        }
+                    } finally { if (interrupted) Thread.currentThread().interrupt(); }
+                    return result("取消后返回的正文");
+                });
+        byte[] previous = java.nio.file.Files.readAllBytes(store.pagePath(bookId, 1));
+        submit(request("close-drain", BookStore.revisionOrZero(store.readPage(bookId, 1)), false, false));
+        assertTrue(entered.await(3, TimeUnit.SECONDS));
+        var closer = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            var closing = closer.submit(jobs::close);
+            assertTrue(cancelled.await(3, TimeUnit.SECONDS));
+            assertFalse(closing.isDone(), "close must not return while the physical worker still owns its finalizer");
+            assertTrue(settings.busy());
+            release.countDown();
+            closing.get(5, TimeUnit.SECONDS);
+            assertFalse(settings.busy());
+            assertFalse(jobs.readingJobActive(reservation, 1));
+            assertEquals("CANCELLED", progress.latest(bookId, 1).lifecycle());
+            assertArrayEquals(previous, java.nio.file.Files.readAllBytes(store.pagePath(bookId, 1)));
+            assertThrows(ApiException.class, () -> jobs.submitReserved(reservation, bookId,
+                    new JobRequest("1", "paddle-aistudio", "auto", false, true, false)));
+        } finally { release.countDown(); closer.shutdownNow(); }
+    }
+
 }
