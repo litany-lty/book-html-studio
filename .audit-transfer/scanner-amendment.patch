@@ -1,0 +1,24 @@
+diff --git a/scripts/verification/secret_scan.py b/scripts/verification/secret_scan.py
+index ea1eaf2..dbcc51a 100644
+--- a/scripts/verification/secret_scan.py
++++ b/scripts/verification/secret_scan.py
+@@ -35,6 +35,10 @@ def findings(data: bytes):
+     for name, rule in RULES.items():
+         for match in rule.finditer(text):
+             value = match.group(1) if match.lastindex else match.group(0)
++            # Reviewed synthetic sentinel in the repository's separate guard-test branch.
++            # Exact equality only: never exempt a whole file, path, or provider prefix.
++            if value == 'your-placeholder-value-not-a-real-secret':
++                continue
+             if name != 'private-key' and (entropy(value) < 3.2 or '${' in value):
+                 continue
+             result.append((name, text.count('\n', 0, match.start()) + 1))
+@@ -90,6 +94,8 @@ def self_test():
+     assert findings(('apiKey="' + 'aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0iL' + '"').encode())
+     assert findings(('-' * 5 + 'BEGIN PRIVATE KEY' + '-' * 5).encode())
+     assert not findings(b'apiKey=""\napi-key: ${QWEN_API_KEY:}\napiKey="test-key"')
++    assert not findings(b'apiKey="your-placeholder-value-not-a-real-secret"')
++    assert findings(('apiKey="' + synthetic + '"').encode())
+     assert not findings(b'\x00\xffbinary')
+     print('secret_scan_selftest=PASS')
+ 
