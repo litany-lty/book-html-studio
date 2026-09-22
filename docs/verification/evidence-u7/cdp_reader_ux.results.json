@@ -1,0 +1,177 @@
+[
+  {
+    "name": "书架载入",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "合成书正文载入",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "默认阅读模式",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "显式进入校对模式",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "桌面无横向溢出",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "编辑框在桌面首屏",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "字体预览存在",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "字体选项齐全",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "阅读设置关闭回焦",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "关闭JEV仍可查看面板",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "渲染候选不弹离页确认",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "切换疑点不跳走工作台",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "修改显示未保存",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "保存中禁重复提交",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "真实保存成功反馈",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "A页延迟保存开始",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "切入B页",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "B页独立保存开始",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "A实际写入完成",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "旧保存不解除新保存按钮",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "保存后新增草稿仍待保存",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "新增草稿可再次保存",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "返回A页",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "独立写入推进版本",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "冲突常驻且不显示已保存",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "手机书架载入",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "手机正文载入",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "手机校对页载入",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "手机正文首屏空间",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "手机无横向溢出",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "更多工具可打开",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "更多关闭回焦",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "手机关键触控尺寸",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "手机编辑框可见",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "无未捕获脚本异常",
+    "pass": true,
+    "detail": true
+  }
+]

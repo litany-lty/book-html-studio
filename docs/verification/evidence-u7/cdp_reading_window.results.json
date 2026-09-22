@@ -1,0 +1,207 @@
+[
+  {
+    "name": "旧会话心跳不能在新服务上开启识别",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "书架就绪",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "未识别页也可进入阅读",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "默认关闭不识别",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "跳至第10页",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "开启前展示云用量说明",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "开启立即进入静止等待",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "快速跳12",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "快速跳20",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "快速跳30",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "停留不足1秒无识别调用",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "仅最新中心30先识别",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "服务端1秒门禁生效",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "识别等待期间仍显示当前原稿",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "其他标签无法抢占当前窗口",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "手动任务不能插入随读队列",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "在途时跳40",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "再跳42",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "在途未完成时新中心并行发送",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "旧请求收尾后最新42优先",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "旧30结果不切回旧页",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "邻页顺序当前后先43",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "不等全窗口当前42自动展示文字",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "随读轮询不重复查询全书内容与目录",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "390px开启态无横向溢出",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "390px停止与刷新可点击",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "状态条不遮挡底部跳页输入",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "建立未保存草稿",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "新结果提示而非覆盖草稿",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "未保存正文未被远端替换",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "停止新队列",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "停止后无旧队列继续发送",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "回到已在旧窗口完成的30",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "旧窗口完成页不受PENDING缓存遮挡",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "读取完成页不重复识别",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "390px无横向溢出",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "手机随读入口可见且触控合格",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "页面缓存有界",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "刷新恢复书架",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "刷新不自动恢复云识别",
+    "pass": true,
+    "detail": true
+  },
+  {
+    "name": "没有JS未处理异常",
+    "pass": true,
+    "detail": true
+  }
+]
