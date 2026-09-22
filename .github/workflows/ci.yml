@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, jev-m1]
+    branches: [main, jev-m1, 'audit/reader-stream-r2-20260922']
   pull_request:
 
 permissions:
