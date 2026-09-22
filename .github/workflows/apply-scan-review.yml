@@ -1,0 +1,96 @@
+name: Verify scan recovery changes
+
+on:
+  push:
+    branches: [fix/scan-empty-recovery-20260922]
+    paths: ['.review/**', '.github/workflows/apply-scan-review.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      tested_tree: ${{ steps.apply.outputs.tested_tree }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Apply exact reviewed source deltas
+        id: apply
+        run: |
+          python3 .review/apply_scan.py
+          git add src scripts docs
+          git diff --cached --check
+          echo "tested_tree=$(git write-tree)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Java full regression and package
+        run: mvn --batch-mode -Djava.awt.headless=true verify
+      - name: Frontend and Python regressions
+        run: |
+          node --check src/main/resources/static/reader.js
+          node --test scripts/verification/probe_scan_empty.mjs
+          node scripts/verification/probe_display.js
+          node scripts/verification/probe_job_scope.js
+          python3 -m pip install --disable-pip-version-check OpenCC==1.4.2 playwright==1.51.0
+          python3 -m py_compile scripts/verification/*.py
+          python3 -m unittest discover -s scripts/verification -p 'test_*.py'
+      - name: Browser rendering regression (synthetic data, no OCR)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+          if ! command -v chromium && ! command -v google-chrome; then python3 -m playwright install --with-deps chromium; fi
+          python3 scripts/verification/browser_scan_recovery.py
+      - name: Verify tests did not mutate source
+        run: |
+          python3 .review/apply_scan.py --check-output
+          git diff --exit-code
+          mkdir -p test-results/scan-recovery
+          git write-tree > test-results/scan-recovery/tested-tree.txt
+          git rev-parse HEAD > test-results/scan-recovery/base-sha.txt
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: scan-recovery-evidence-${{ github.sha }}
+          path: |
+            target/surefire-reports/
+            test-results/scan-recovery/
+          retention-days: 7
+  publish:
+    needs: verify
+    if: github.repository == 'litany-lty/book-html-studio' && github.ref == 'refs/heads/fix/scan-empty-recovery-20260922'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Publish only the identical verified tree, no force push
+        env:
+          TESTED_TREE: ${{ needs.verify.outputs.tested_tree }}
+        run: |
+          python3 .review/apply_scan.py
+          git add src scripts docs
+          git diff --cached --check
+          test "$(git write-tree)" = "$TESTED_TREE"
+          branch='refs/heads/fix/scan-empty-recovery-20260922'
+          test "$(git ls-remote origin "$branch" | cut -f1)" = "$GITHUB_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -c core.hooksPath=/dev/null commit -m 'fix(ocr): distinguish missed manuscript text from blank pages and preserve partial recovery'
+          git push origin "HEAD:$branch"
