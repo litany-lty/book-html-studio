@@ -11,9 +11,11 @@ public record ProcessingResult(Page page, ProcessingResult.Category category) {
     public enum Category {
         /** 有可用文字。 */
         TEXT,
+        /** Local recovery supplied some text, but complete transcription is unverified. */
+        TEXT_PARTIAL,
         /** 图像证据确实近空白，成功的空结果。 */
         BLANK_CONFIRMED,
-        /** 合法纯视觉页（插图/表格/公式），保留原图与有效区域。 */
+        /** 仅有视觉区域（插图/表格/公式），保留原图；不代表已经证明无漏识文字。 */
         VISUAL_ONLY,
         /** 非空白扫描页但 OCR 为空：未解决，必须失败或候选，绝不能成功空白化。 */
         OCR_EMPTY_UNRESOLVED,

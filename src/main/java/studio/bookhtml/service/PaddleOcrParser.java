@@ -32,7 +32,7 @@ public class PaddleOcrParser {
                 boolean uncertain=unknown||text.isBlank();
                 blocks.add(new Block(id,type,order++,bbox,mode,text,text,null,uncertain,false,null,fromDirectorySpans?"paddle-span":"paddle",List.of(id),suggestion,raw));
             }
-            if(blocks.isEmpty())throw new OcrException("PaddleOCR-VL 未返回带有效坐标的内容块");
+            if(blocks.isEmpty()){if(layouts.isEmpty())throw new OcrNoTextException("PaddleOCR-VL 未检出内容块");throw new OcrException("PaddleOCR-VL 未返回带有效坐标的内容块");}
             BlockValidator.validate(blocks);return List.copyOf(blocks);
         }catch(OcrException e){throw e;}catch(Exception e){throw new OcrException("PaddleOCR-VL 结果 JSON 或坐标无效",e);}
     }

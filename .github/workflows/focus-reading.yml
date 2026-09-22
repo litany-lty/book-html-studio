@@ -1,0 +1,57 @@
+name: Focus reading
+
+on:
+  push:
+    branches: [feat/focus-reading-20260922]
+  pull_request:
+    paths:
+      - 'src/main/resources/static/**'
+      - 'scripts/verification/*focus*'
+      - '.github/workflows/focus-reading.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: focus-reading-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Focus navigation contracts
+        run: |
+          node --check src/main/resources/static/focus-reading.js
+          node --test scripts/verification/probe_focus_reading.mjs
+          node scripts/verification/probe_display.js
+          node scripts/verification/probe_job_scope.js
+      - name: Browser prerequisites
+        run: |
+          python3 -m pip install --disable-pip-version-check playwright==1.51.0
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+          if ! command -v chromium && ! command -v google-chrome; then python3 -m playwright install --with-deps chromium; fi
+      - name: Actual frontend, synthetic API, no cloud requests
+        run: python3 scripts/verification/browser_focus_reading.py
+      - name: Record revision
+        if: always()
+        run: |
+          mkdir -p test-results/focus-reading
+          git rev-parse HEAD > test-results/focus-reading/tested-sha.txt
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: focus-reading-${{ github.sha }}
+          path: test-results/focus-reading/
+          retention-days: 7

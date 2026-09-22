@@ -1,0 +1,37 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+const load = async path => import('data:text/javascript;base64,' + Buffer.from(await fs.readFile(path)).toString('base64'));
+const { progressView, createPageProgress } = await load(new URL('../../src/main/resources/static/page-progress.js', import.meta.url));
+assert.equal(progressView(null, { status: 'READY' }).hidden, true);
+assert.equal(progressView(null, { status: 'PENDING' }).label, '待处理 · 0%');
+assert.equal(progressView({ lifecycle: 'RUNNING', stage: 'REVIEW', percent: 72 }).label, '核对 · 72%');
+assert.equal(progressView({ lifecycle: 'PARTIAL', percent: 95 }).hidden, false);
+assert.equal(progressView({ lifecycle: 'FAILED', percent: 10 }).label, '处理失败 · 10%');
+assert.equal(progressView({ lifecycle: 'SUCCEEDED', percent: 100 }).hidden, true);
+assert.equal(progressView({ lifecycle: 'RUNNING', percent: NaN }).percent, 0);
+const element = { hidden: true, dataset: {}, style: { setProperty() {} }, setAttribute(k,v) { this[k]=v; } };
+globalThis.document = { querySelector: () => element, hidden: true };
+const progress = createPageProgress({ api: {}, onPublished() {} });
+progress.setPage('book-A', 9, { status: 'PENDING' });
+const event = { bookId:'book-A', pageNumber:9, attemptId:'new', startedAt:'2026-01-01T00:01:00Z', snapshotVersion:2, lifecycle:'RUNNING', stage:'REVIEW', percent:70 };
+progress.update(event);
+assert.equal(element['aria-valuenow'], '70');
+progress.update({...event, bookId:'book-B', percent:90});
+progress.update({...event, pageNumber:10, percent:90});
+progress.update({...event, snapshotVersion:1, percent:60});
+progress.update({...event, attemptId:'old', startedAt:'2026-01-01T00:00:00Z', snapshotVersion:100, percent:95});
+assert.equal(element['aria-valuenow'], '70', 'book/page/attempt/version fencing');
+progress.clear(); assert.equal(element.hidden, true);
+progress.setPage('book-B', 1, { status:'PENDING' });
+progress.update(event); assert.equal(element.textContent, '待处理 · 0%'); progress.clear();
+
+// The body has its own latency: receiving headers must not clear the request deadline.
+globalThis.window = { setTimeout, clearTimeout };
+globalThis.fetch = async (_url, {signal}) => ({ ok:true, status:200, json:() => new Promise((resolve,reject) => {
+  signal.addEventListener('abort', () => { const error=new Error('aborted'); error.name='AbortError'; reject(error); }, {once:true});
+}) });
+const { api } = await load(new URL('../../src/main/resources/static/api.js', import.meta.url));
+await assert.rejects(api.savePage('book', 1, {}, 10), { name:'TimeoutError' });
+const html = await fs.readFile(new URL('../../src/main/resources/static/index.html', import.meta.url), 'utf8');
+assert.match(html, /id="page-save-status"[^>]*>.*?<\/span>\s*<span id="page-processing-progress"/s);
+console.log('PASS: page progress state, cross-book/attempt fences, body deadline and adjacent status markup');

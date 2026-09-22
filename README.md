@@ -167,3 +167,9 @@ python3 scripts/verification/apply_review_labels.py \
 `scripts/verification/sample_books.py` 可在独立本地服务上复现有限抽页计划（本机需要 `requests`）：按私有 JSON 中的 PDF 路径和 `samples[].pdfPage` 导入、只处理明确选中的页面、导出样本；不重试不确定的提交、不自动覆盖，默认最多 24 页。仅对自己的隔离数据目录使用，不要指向日常书库。私有样本、标注和云响应应放在被忽略的 `verification/` 或其他私有目录，不提交 Git。
 
 更新阅读器后，可用 `scripts/verification/export_sample_gallery.py --base http://127.0.0.1:18769 --report /path/to/private/samples/report.json --out /path/to/private/new-gallery` 通过工具重新导出全部已完成样页并生成阅读入口；这一步仅调用本地读取/导出接口，不重跑 OCR、不写回书籍、不覆盖旧的离线校对文件。
+
+## 阅读优先整改（2026-09-22）
+
+默认打开书后按当前页启动随读，可在随读设置关闭；只处理当前页与前 3 / 后 5 页，整本书后台处理需另行选择。使用已配置的云识别通道可能计费。当前页处理进度位于“已保存”右侧，百分比是任务里程碑，不是文字准确率。上下文纠错保留同书来源证据，辅助候选不自动冒充原文。
+
+设置接口不返回已保存的密钥，密钥输入留空表示保留。软件仍限定本机单用户使用，不应直接暴露公网。详细改动、验证边界及运行方法见 [整改审查记录](docs/verification/reader-stream-context-security-20260922.md)。

@@ -454,6 +454,7 @@ public class JobService {
             try{
                 ProcessingResult result=processor.process(running.bookId,pageNumber,provider,layout,split,assist,()->running.cancelled||Thread.currentThread().isInterrupted());
                 Page page=mergeUnresolvedIssues(old,result.page());
+                if(result.category()==ProcessingResult.Category.TEXT_PARTIAL)errors.add("第 "+pageNumber+" 页仅恢复部分转录，需对照原稿核对");
                 if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
                 if(!stillCurrent(running,initial.id()))return;
                 // F03/R08：有证据的空白/纯视觉页直接成功；显著缩水仍拒绝；其他空结果仍失败
@@ -591,7 +592,10 @@ public class JobService {
                         }
                     }
                     // U4 phase 2：可选增强。基线已落盘才可读；增强阻塞/失败/取消不影响基线。
-                    if (baselinePublishedThisPage && assist) {
+                    if (baselinePublishedThisPage && baselineResult.category()==ProcessingResult.Category.TEXT_PARTIAL) {
+                        completeIntent(running, pageNumber, "PARTIAL");
+                        if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"PARTIAL","OCR_RECOVERY_PARTIAL",true);
+                    } else if (baselinePublishedThisPage && assist) {
                         if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
                         if(attemptId!=null)progress.stage(running.bookId,pageNumber,attemptId,"STRUCTURE");
                         try {

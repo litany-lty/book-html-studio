@@ -29,6 +29,9 @@ public class QwenAssistCoordinator {
     private QwenTextReviewClient reviewClient;
     private QwenLayoutClient structureClient;
     private TraditionalConverter converter;
+    private ProcessingProgressService progress;
+    @Autowired(required = false)
+    public void setProgress(ProcessingProgressService progress) { this.progress = progress; }
 
     private volatile ExecutorService pool;
 
@@ -57,11 +60,13 @@ public class QwenAssistCoordinator {
             // U5：独立有界出站池；禁止把付费模型请求投到无界 common pool。
             // 页级编排等待结果，但不等出站池自身的任务（无同池 join 死锁）。
             int size = gate == null ? 3 : Math.max(1, gate.maxConcurrent());
-            pool = Executors.newFixedThreadPool(size, runnable -> {
+            pool = new java.util.concurrent.ThreadPoolExecutor(size, size, 0L,
+                    java.util.concurrent.TimeUnit.MILLISECONDS,
+                    new java.util.concurrent.ArrayBlockingQueue<>(24), runnable -> {
                 Thread thread = new Thread(runnable, "qwen-assist-chunk");
                 thread.setDaemon(true);
                 return thread;
-            });
+            }, new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
         }
         return pool;
     }
@@ -118,7 +123,6 @@ public class QwenAssistCoordinator {
                 } catch (CancelledException e) {
                     throw e;
                 } catch (Exception e) {
-                    budget.release(1);
                     warnings.add("全局结构请求失败，已回退到已验证几何顺序，不阻塞局部核对");
                 }
             } else {
@@ -133,12 +137,32 @@ public class QwenAssistCoordinator {
         }
         List<IndexedOutcome> outcomes = new ArrayList<>();
         if (!plan.chunks().isEmpty()) {
+            var snapshot = progress == null ? null : progress.latest(bookId, pageNumber);
+            java.util.UUID attemptId = snapshot == null ? null : snapshot.attemptId();
+            if (attemptId != null) {
+                progress.stage(bookId, pageNumber, attemptId, "REVIEW");
+                progress.plan(bookId, pageNumber, attemptId, "TEXT_GROUPS", plan.chunks().size());
+            }
             List<CompletableFuture<IndexedOutcome>> futures = new ArrayList<>();
             for (QwenTaskPlanner.ChunkTask chunk : plan.chunks()) {
-                futures.add(CompletableFuture.supplyAsync(
-                        () -> runChunk(bookId, pageNumber, chunk, parentTexts, regionImages.get(chunk.chunkId()),
-                                overviewImage, foreground, budget, cancelled),
-                        pool()));
+                CompletableFuture<IndexedOutcome> future;
+                java.util.concurrent.atomic.AtomicBoolean started = new java.util.concurrent.atomic.AtomicBoolean();
+                try {
+                    future = CompletableFuture.supplyAsync(() -> {
+                        started.set(true);
+                        if (attemptId != null) progress.inFlight(bookId, pageNumber, attemptId, 1);
+                        try { return runChunk(bookId, pageNumber, chunk, parentTexts, regionImages.get(chunk.chunkId()),
+                                overviewImage, foreground, budget, cancelled); }
+                        finally { /* Completion accounting happens for success, failure and cancellation alike. */ }
+                    }, pool());
+                } catch (java.util.concurrent.RejectedExecutionException full) {
+                    future = CompletableFuture.completedFuture(new IndexedOutcome(chunk.plannedOrder(), chunk,
+                            null, "局部核对队列已满，保留原文"));
+                }
+                futures.add(future.whenComplete((outcome, error) -> {
+                    if (attemptId != null) progress.unitDone(bookId, pageNumber, attemptId,
+                            error == null && outcome != null && outcome.result() != null, started.get());
+                }));
             }
             for (int i = 0; i < futures.size(); i++) {
                 try {
@@ -233,13 +257,12 @@ public class QwenAssistCoordinator {
             return new IndexedOutcome(chunk.plannedOrder(), chunk, result, null);
         } catch (QwenTextReviewClient.TruncatedException truncated) {
             // 输出截断且预算允许：拆更小组重试一次。
-            if (regroupDepth >= 1 || !budget.reserve(1)) {
+            if (regroupDepth >= 1 || budget.remaining() < 2) {
                 return new IndexedOutcome(chunk.plannedOrder(), chunk, null,
                         chunk.chunkId() + " 输出截断且无法再分，保留原文");
             }
             List<QwenTaskPlanner.ChunkTask> halves = splitChunk(chunk);
             if (halves.size() < 2) {
-                budget.release(1);
                 return new IndexedOutcome(chunk.plannedOrder(), chunk, null,
                         chunk.chunkId() + " 输出截断且无法再分，保留原文");
             }

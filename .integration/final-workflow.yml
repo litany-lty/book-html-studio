@@ -1,0 +1,69 @@
+name: Reader integration
+
+on:
+  push:
+    branches: [main, integrate/reader-20260922]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reader-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Build and offline navigation/security guards
+        run: |
+          mvn --batch-mode verify
+          node scripts/verification/probe_api_lifecycle.mjs
+          node scripts/verification/probe_page_progress.mjs
+          node scripts/verification/probe_settings_secrets.mjs
+          node --test scripts/verification/probe_scan_empty.mjs scripts/verification/probe_focus_reading.mjs
+          python3 scripts/security/scan_secrets.py --history --out test-results/integration/secret-scan.json
+      - name: Browser prerequisites
+        run: |
+          python3 -m pip install --disable-pip-version-check playwright==1.51.0
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+          if ! command -v chromium && ! command -v google-chrome; then python3 -m playwright install --with-deps chromium; fi
+      - name: Actual focus UI and guarded scan fallbacks (synthetic API)
+        run: |
+          python3 scripts/verification/browser_focus_reading.py
+          python3 scripts/verification/browser_scan_recovery.py
+      - name: Real server reader and settings smoke (OCR stub, no cloud)
+        run: bash scripts/verification/run_reader_browser.sh
+      - name: Record exact checkout
+        if: always()
+        run: |
+          mkdir -p test-results/integration
+          git rev-parse HEAD > test-results/integration/tested-sha.txt
+          git rev-parse HEAD^{tree} > test-results/integration/tested-tree.txt
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reader-integration-${{ github.sha }}
+          path: |
+            test-results/
+            target/surefire-reports/
+          retention-days: 7
+          if-no-files-found: warn
