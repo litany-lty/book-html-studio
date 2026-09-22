@@ -1,0 +1,107 @@
+name: Apply verified reader audit
+
+on:
+  push:
+    branches: [audit/reader-verified-7aae566-20260922]
+    paths:
+      - '.audit-staging/**'
+      - '.github/workflows/apply-reader-audit.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-reader-verified-7aae566
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.repository == 'litany-lty/book-html-studio' && github.ref == 'refs/heads/audit/reader-verified-7aae566-20260922'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: audit/reader-verified-7aae566-20260922
+          fetch-depth: 1
+      - name: Apply exact content-verified patch
+        shell: python
+        run: |
+          import gzip, hashlib, json, pathlib, subprocess
+          packed = b''.join(pathlib.Path(f'.audit-staging/{i}.bin').read_bytes() for i in range(13))
+          raw = gzip.decompress(packed)
+          assert len(raw) == 112989
+          assert hashlib.sha256(raw).hexdigest() == 'a4ab720f9e8ab9ab62b1437b4b87b3bb2d169bc56f97848e0c5eb9ce2f68a8b9', 'manifest digest mismatch'
+          manifest = json.loads(raw)
+          assert manifest['version'] == 1 and len(manifest['files']) == 39
+          root = pathlib.Path.cwd().resolve()
+          prepared = []
+          for item in manifest['files']:
+              name = item['path']
+              p = pathlib.Path(name)
+              assert not p.is_absolute() and '..' not in p.parts
+              assert name == '.gitignore' or name.startswith(('src/main/', 'src/test/', 'docs/verification/', 'scripts/verification/'))
+              assert not p.is_symlink() and p.resolve().is_relative_to(root)
+              old = p.read_bytes() if p.exists() else b''
+              assert (hashlib.sha256(old).hexdigest() if p.exists() else None) == item['before'], f'concurrent content change: {name}'
+              lines = old.decode('utf-8').splitlines(keepends=True)
+              for start, end, replacement in reversed(item['edits']):
+                  assert 0 <= start <= end <= len(lines)
+                  lines[start:end] = [replacement]
+              new = ''.join(lines).encode('utf-8')
+              assert hashlib.sha256(new).hexdigest() == item['after'], f'output digest mismatch: {name}'
+              prepared.append((p, new))
+          for p, content in prepared:
+              p.parent.mkdir(parents=True, exist_ok=True)
+              p.write_bytes(content)
+          subprocess.run(['git', 'add', '--', *[str(p) for p, _ in prepared]], check=True)
+          print('Verified and staged 39 exact file changes; no credentials or source content printed.')
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Verify scripts and secret guard
+        run: |
+          bash -n run.sh
+          bash -n scripts/verification/run_reader_stream_browser.sh
+          for file in src/main/resources/static/*.js src/main/resources/export/*.js scripts/*.mjs; do node --check "$file"; done
+          node scripts/verification/probe_display.js
+          node scripts/verification/probe_job_scope.js
+          node scripts/verification/probe_page_progress.mjs
+          node scripts/verification/probe_reader_streaming.mjs
+          python3 -m pip install --disable-pip-version-check OpenCC==1.4.2
+          python3 -m py_compile scripts/verification/*.py
+          python3 scripts/verification/shadow_eval.py --selftest
+          python3 -m unittest discover -s scripts/verification -p 'test_*.py'
+          python3 scripts/verification/scan_secrets.py --report test-results/security/applied.json
+      - name: Java regression and package
+        run: mvn --batch-mode -Djava.awt.headless=true verify
+      - name: Commit verified changes to audit branch only
+        run: |
+          git diff --cached --check
+          test "$(git diff --cached --name-only | wc -l)" -eq 39
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(reader): prioritize streaming pages, ground OCR in book context, harden secrets and progress'
+          git push origin HEAD:refs/heads/audit/reader-verified-7aae566-20260922
+          mkdir -p test-results/audit
+          git rev-parse HEAD > test-results/audit/verified-commit.txt
+      - name: Synthetic browser verification (no cloud keys)
+        run: |
+          python3 -m pip install --disable-pip-version-check playwright==1.57.0
+          bash scripts/verification/run_reader_stream_browser.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reader-verified-audit-${{ github.sha }}
+          path: |
+            target/surefire-reports/
+            test-results/
+          retention-days: 7

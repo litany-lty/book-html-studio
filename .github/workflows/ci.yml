@@ -11,8 +11,11 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Record tested SHA
         run: |
           echo "testedCommit=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
@@ -38,6 +41,8 @@ jobs:
           done
           node scripts/verification/probe_display.js
           node scripts/verification/probe_job_scope.js
+          node scripts/verification/probe_page_progress.mjs
+          node scripts/verification/probe_reader_streaming.mjs
       - name: Python verification tests
         shell: bash
         run: |
@@ -46,7 +51,11 @@ jobs:
           python3 scripts/verification/shadow_eval.py --selftest
           python3 -m unittest discover -s scripts/verification -p 'test_*.py'
       - name: Test and package
-        run: mvn --batch-mode verify
+        run: mvn --batch-mode -Djava.awt.headless=true verify
+      - name: Synthetic reader browser smoke (no cloud credentials)
+        run: |
+          python3 -m pip install --disable-pip-version-check playwright==1.57.0
+          bash scripts/verification/run_reader_stream_browser.sh
       - name: Build manifest
         run: |
           python3 scripts/verification/build_manifest.py --jar target/book-html-studio.jar --out test-results/build
@@ -63,7 +72,7 @@ jobs:
       - name: Untested items (explicit NOT_RUN/BLOCKED, not simulated)
         if: always()
         run: |
-          echo "NOT_RUN: online real-browser CDP (needs GUI/displays, see scripts/verification/cdp_*.py)"
+          echo "NOT_RUN: comprehensive CDP matrix; this run covers the isolated reader-stream browser smoke only"
           echo "NOT_RUN: file:// offline IDB restore/backup-import (needs real browser profile)"
           echo "NOT_RUN: SHADOW_LIVE real-model runs (needs SHADOW_LIVE=1 + dataset + TYPESAFE_API_KEY)"
-          echo "BLOCKED: none (Ubuntu unit CI); platform-specific faults recorded per-run, not closed by this CI"
+          echo "Browser/toolchain failures, if any, are recorded by their steps; unit tests do not close them."
