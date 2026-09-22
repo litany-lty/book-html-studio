@@ -12,15 +12,18 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class HeadingTextTest {
     @Test
-    void usesInferencePlaceholderOriginalAndEmptyReplacementWithoutChangingIssues() {
+    void originalPolicyNeverAcceptsInferenceEvenWhenSimplified() {
         ContentIssue inferred = issue("i1", "suspected", 1, 2, false, null, "候");
         ContentIssue unreadable = issue("i2", "unreadable", 2, 3, false, null, null);
         ContentIssue suspected = issue("i3", "suspected", 3, 4, false, null, null);
         ContentIssue removed = issue("i4", "suspected", 4, 5, true, "", null);
         Block block = block("甲乙丙丁戊", "甲乙丙丁戊", List.of(inferred, unreadable, suspected, removed));
 
-        assertEquals("甲候□丁", HeadingText.display(block, true));
+        // U3/CONS-01：原文模式 + 简体也不接受未确认推测；缺字保留原转录。
+        assertEquals("甲乙丙丁", HeadingText.display(block, true));
         assertEquals("甲乙丙丁", HeadingText.display(block, false));
+        // 辅助模式才允许候选（调用方负责未确认标记）。
+        assertEquals("甲候丙丁", HeadingText.displayAssisted(block, true));
         assertFalse(inferred.resolved());
         assertEquals("甲乙丙丁戊", block.original());
     }
@@ -32,15 +35,18 @@ class HeadingTextTest {
         ContentIssue invalid = new ContentIssue("invalid", "unreadable", 4, 8, 4, 8, "", false, null, null);
         Block block = block("甲乙", "A甲乙", List.of(overlap, invalid, first));
 
-        assertEquals("A候乙", HeadingText.display(block, true));
+        assertEquals("A甲乙", HeadingText.display(block, true));
+        assertEquals("A候乙", HeadingText.displayAssisted(block, true));
         assertEquals("甲乙", HeadingText.display(block, false));
     }
 
     @Test
-    void pageTitleUsesCurrentReadingCandidateWithoutChangingReviewState() {
+    void pageTitleUsesOriginalByDefaultAndCandidateOnlyWhenAssisted() {
         ContentIssue preface = issue("preface", "suspected", 0, 4, false, null, "【前言】");
         Page inferred = page(6, block("【咖啡】", "【咖啡】", List.of(preface)));
-        assertEquals("【前言】", HeadingText.pageTitle(inferred));
+        // U3：原文模式目录与标题不补推测字。
+        assertEquals("【咖啡】", HeadingText.pageTitle(inferred));
+        assertEquals("【前言】", HeadingText.pageTitle(inferred, HeadingText.EvidenceMode.ASSISTED));
         assertFalse(preface.resolved());
 
         ContentIssue resolved = issue("resolved", "suspected", 0, 4, true, "【前言】", null);

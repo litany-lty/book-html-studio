@@ -444,6 +444,20 @@ public class BookStore {
         Path p = candidatePath(id, page);
         return Files.exists(p) ? read(p, Page.class, "候选数据损坏") : null;
     }
+    /**
+     * U3：展示层 sidecar（画像 / 人工覆盖）的原子读写辅助，复用目录单写锁。
+     * 存的是派生索引与人工选择，不是原文；删 sidecar 可重建（人工覆盖需保留）。
+     */
+    public Path layoutProfilePath(String id) { return bookDir(id).resolve("layout-profile.json"); }
+    public Path presentationOverridesPath(String id) { return bookDir(id).resolve("presentation-overrides.json"); }
+    public <T> T readSidecar(Path path, Class<T> type) {
+        return Files.exists(path) ? read(path, type, "展示索引数据损坏") : null;
+    }
+    public <T> void writeSidecar(Path path, T value) throws IOException {
+        synchronized (dirLock) {
+            atomic(path, value);
+        }
+    }
     /** 首次成功结果缺失原始快照时补留（与旧 writePage preserveOriginal 语义一致）。 */
     public void preserveOriginal(String id, Page page) throws IOException {
         synchronized (dirLock) {

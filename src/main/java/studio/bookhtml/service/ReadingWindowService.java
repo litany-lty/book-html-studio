@@ -7,6 +7,7 @@ import org.springframework.stereotype.Service;
 import studio.bookhtml.api.*;
 import studio.bookhtml.config.SettingsService;
 import studio.bookhtml.domain.Book;
+import studio.bookhtml.domain.BookLayoutProfile;
 import studio.bookhtml.domain.Page;
 import studio.bookhtml.store.BookStore;
 
@@ -28,6 +29,7 @@ public class ReadingWindowService {
     private final BookStore store;
     private final JobService jobs;
     private final SettingsService settings;
+    private BookPresentationService presentation;
     private final Clock clock;
     private final Duration settle;
     private final ScheduledExecutorService dispatcher;
@@ -54,6 +56,12 @@ public class ReadingWindowService {
             return thread;
         });
         dispatcher.scheduleWithFixedDelay(this::safeTick, 100, 100, TimeUnit.MILLISECONDS);
+    }
+
+    /** U3：统一投影注入后，随读增量目录按已发布 profileRevision 取投影，不再孤立推断。 */
+    @Autowired(required = false)
+    public void setPresentation(BookPresentationService presentation) {
+        this.presentation = presentation;
     }
 
     public synchronized ReadingWindowResponse update(String bookId, ReadingWindowRequest request) {
@@ -453,12 +461,16 @@ public class ReadingWindowService {
 
     private ReadingWindowResponse snapshot(Session s) {
         List<ReadingWindowResponse.PageState> pages = new ArrayList<>();
+        // U3：一次快照共用同一画像构建，避免每页重复扫描；画像更新影响前页时由
+        // profileRevision 触发目录更新，旧单页逻辑不反灌（见 app.js）。
+        BookLayoutProfile profile = presentation == null ? null : presentation.buildProfile(s.bookId);
         for (int n = s.fromPage; n <= s.toPage; n++) {
             Page page = store.readPage(s.bookId, n);
             pages.add(new ReadingWindowResponse.PageState(n, page == null ? "MISSING" : page.status(),
                     page == null ? null : page.revision(), page == null ? "页面数据缺失" : page.error(),
                     page == null ? null : BookService.summary(page),
-                    page == null ? List.of() : OutlineService.fromPages(List.of(page))));
+                    page == null ? List.of() : snapshotOutline(s.bookId, page, profile),
+                    profile == null ? 0 : profile.profileRevision()));
         }
         List<Integer> procList = new ArrayList<>(s.processingPages);
         procList.sort((a, b) -> {
@@ -470,6 +482,15 @@ public class ReadingWindowService {
         return new ReadingWindowResponse(s.sessionId, s.sequence, s.enabled, s.status, s.centerPage,
                 s.fromPage, s.toPage, primaryProcessing, List.copyOf(s.queued), List.copyOf(pages),
                 s.message, List.copyOf(procList));
+    }
+
+    /** U3：随读增量目录使用统一投影；未注入投影走旧适配器（保守兼容）。 */
+    private List<OutlineService.OutlineEntry> snapshotOutline(String bookId, Page page,
+                                                             BookLayoutProfile profile) {
+        if (presentation == null || profile == null) {
+            return OutlineService.fromPages(List.of(page));
+        }
+        return presentation.outlineForPages(bookId, List.of(page), profile);
     }
 
     private void disable(Session s, String status, String message) {

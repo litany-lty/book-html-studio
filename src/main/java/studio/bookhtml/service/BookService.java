@@ -21,8 +21,11 @@ import java.util.*;
 @Service
 public class BookService {
     private final BookStore store; private final PdfService pdf; private final AppProperties config; private final OutlineService outlines;
+    private BookPresentationService presentation;
     public BookService(BookStore store,PdfService pdf,AppProperties config){this(store,pdf,config,new OutlineService(store));}
     @Autowired public BookService(BookStore store,PdfService pdf,AppProperties config,OutlineService outlines){this.store=store;this.pdf=pdf;this.config=config;this.outlines=outlines;}
+    /** U3：投影注入后，摘要标题使用统一投影；未注入走旧适配器（保守兼容）。 */
+    @Autowired(required=false) public void setPresentation(BookPresentationService presentation){this.presentation=presentation;}
     public Book upload(MultipartFile file) {
         if(file==null||file.isEmpty())throw new ApiException(HttpStatus.BAD_REQUEST,"请选择 PDF 文件");
         String original=Optional.ofNullable(file.getOriginalFilename()).orElse("book.pdf");
@@ -68,7 +71,9 @@ public class BookService {
         } catch (ApiException e) { throw e; }
         catch (IOException e) { throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "更新书架失败"); }
     }
-    public List<PageSummary> pages(String id){Book b=store.readBook(id);List<PageSummary> result=new ArrayList<>(b.totalPages());for(int n=1;n<=b.totalPages();n++){Page p=requirePage(id,n);result.add(summary(p));}return result;}
+    public List<PageSummary> pages(String id){Book b=store.readBook(id);List<PageSummary> result=new ArrayList<>(b.totalPages());for(int n=1;n<=b.totalPages();n++){Page p=requirePage(id,n);result.add(pageSummary(id,p));}return result;}
+    /** U3：同一投影结果选择页面代表标题；无标题回到“第 N 页”，不冒用书眉。 */
+    public PageSummary pageSummary(String id,Page p){if(presentation==null)return summary(p);return presentation.pageSummary(id,p);}
     public List<OutlineService.OutlineEntry> outline(String id){return outlines.outline(id);}
     public Page page(String id,int number){Book b=store.readBook(id);validatePage(number,b.totalPages());return requirePage(id,number);}
     public Page update(String id,int n,PageUpdateRequest request){Page old=page(id,n);if("PROCESSING".equals(old.status()))throw new ApiException(HttpStatus.CONFLICT,"本页正在识别，请等待完成或先取消任务再校对");

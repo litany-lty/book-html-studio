@@ -41,7 +41,7 @@ class OutlineServiceTest {
     }
 
     @Test
-    void usesCandidateAndSavedReplacementWhileDroppingConfirmedEmptyHeading() {
+    void usesOriginalTextWhileKeepingSavedReplacementAndDroppingConfirmedEmptyHeading() {
         ContentIssue candidate = new ContentIssue("candidate", "suspected", 0, 2, 0, 2,
                 "原图", false, null, "前言");
         ContentIssue resolved = new ContentIssue("resolved", "suspected", 0, 2, 0, 2,
@@ -53,7 +53,8 @@ class OutlineServiceTest {
                 heading("resolved", 1, 2, "咖啡", "咖啡", "paddle", List.of(resolved)),
                 heading("removed", 2, 2, "咖啡", "咖啡", "paddle", List.of(removed)))));
 
-        assertEquals(List.of("前言", "序言"), entries.stream().map(OutlineService.OutlineEntry::title).toList());
+        // U3/CONS-01：原文模式目录不补未确认推测（“前言”为推测，不收录），已确认替换保留。
+        assertEquals(List.of("咖啡", "序言"), entries.stream().map(OutlineService.OutlineEntry::title).toList());
     }
 
     private static Page page(int number, String status, Block... blocks) {

@@ -62,6 +62,17 @@ public class ExportService {
         this.decisionCoordinator = decisionCoordinator;
     }
 
+    private BookPresentationService presentation;
+
+    /**
+     * U3：导出冻结画像。未注入走旧适配器（保守兼容）；注入后使用导出开始时冻结的
+     * 同一书籍画像，再按导出页范围筛选——不因只导出两页使重复书眉证据失效。
+     */
+    @Autowired(required = false)
+    public void setPresentation(BookPresentationService presentation) {
+        this.presentation = presentation;
+    }
+
     /**
      * J10：有界脱敏的推荐摘要。只含展示必需字段（候选、来源类别、推荐状态、基线引用、
      * 规则/模型版本摘要）；密钥、原始 HTTP 头、供应商调试数据、完整远端请求 body、
@@ -225,6 +236,9 @@ public class ExportService {
         List<OutlineService.OutlineEntry> outlineSource = new ArrayList<>();
         Map<Integer, Integer> exportedNumbers = new LinkedHashMap<>();
         List<Integer> writtenPages = new ArrayList<>();
+        // U3：导出开始时冻结同一书籍画像，再按所选页筛选。
+        studio.bookhtml.domain.BookLayoutProfile frozenProfile =
+                presentation == null ? null : presentation.buildProfile(bookId);
         int exportIndex = 0;
         for (int sourceNumber : selected) {
             exportIndex++;
@@ -244,8 +258,11 @@ public class ExportService {
             } else {
                 exported.put("issueImages", Map.of());
             }
-            // 目录：单页复用 fromPages，保证与在线一致；重映射为连续页码
-            for (OutlineService.OutlineEntry e : OutlineService.fromPages(List.of(page))) {
+            // 目录：使用冻结画像按页投影，保证与在线一致；重映射为连续页码
+            List<OutlineService.OutlineEntry> pageOutline = (presentation == null || frozenProfile == null)
+                    ? OutlineService.fromPages(List.of(page))
+                    : presentation.outlineForPages(bookId, List.of(page), frozenProfile);
+            for (OutlineService.OutlineEntry e : pageOutline) {
                 outlineSource.add(new OutlineService.OutlineEntry(exportedNumbers.get(e.pageNumber()), e.blockId(), e.title(), e.level()));
             }
             // 轻量搜索索引：只留页码与截断文本，全文仍在分页文件中；触顶后仅停止收录
@@ -483,7 +500,11 @@ public class ExportService {
         for (int index = 0; index < pages.size(); index++) {
             exportedPageNumbers.put(pages.get(index).pageNumber(), index + 1);
         }
-        payload.put("outline", OutlineService.fromPages(pages).stream()
+        // U3：同一冻结画像 + 导出页范围筛选（选页导出仍用全书证据）。
+        List<OutlineService.OutlineEntry> frozenOutline =
+                (presentation == null) ? OutlineService.fromPages(pages)
+                        : presentation.outlineForPages(source.id(), pages, presentation.buildProfile(source.id()));
+        payload.put("outline", frozenOutline.stream()
                 .map(entry -> new OutlineService.OutlineEntry(exportedPageNumbers.get(entry.pageNumber()),
                         entry.blockId(), entry.title(), entry.level()))
                 .toList());

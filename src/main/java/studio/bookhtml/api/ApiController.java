@@ -31,6 +31,9 @@ public class ApiController {
     private SettingsService settings;
     public ApiController(BookService books,JobService jobs,ExportService export,AppProperties config,QwenOcrClient qwen,MiniMaxVisionClient miniMax,PaddleOcrClient paddle,QwenLayoutClient qwenAssist,QwenAssistProperties qwenAssistConfig,IssueImageService issueImages,ObjectMapper json,PaddleAiStudioClient aiStudio,PaddleAiStudioProperties aiStudioConfig,BaiduPpOcrClient ppocr,PpOcrProperties ppocrConfig){this.books=books;this.jobs=jobs;this.export=export;this.config=config;this.qwen=qwen;this.miniMax=miniMax;this.paddle=paddle;this.qwenAssist=qwenAssist;this.qwenAssistConfig=qwenAssistConfig;this.issueImages=issueImages;this.json=json;this.aiStudio=aiStudio;this.aiStudioConfig=aiStudioConfig;this.ppocr=ppocr;this.ppocrConfig=ppocrConfig;}
     @org.springframework.beans.factory.annotation.Autowired public void setSettings(SettingsService settings){this.settings=settings;}
+    private BookPresentationService presentation;
+    /** U3：投影注入后页面载荷附带只读展示投影；未注入走旧适配器（保守兼容）。 */
+    @org.springframework.beans.factory.annotation.Autowired(required=false) public void setPresentation(BookPresentationService presentation){this.presentation=presentation;}
     @GetMapping("/config") public Map<String,Object> config(){
         SettingsService.State s=settings==null?null:settings.state();
         boolean studio=s==null?aiStudio.configured():!s.paddleAccessToken().isBlank();
@@ -44,7 +47,8 @@ public class ApiController {
                         Map.of("id","paddle-aistudio","configured",studio,"model","PaddleOCR-VL-1.6","endpoint","https://paddleocr.aistudio-app.com/api/v2/ocr/jobs","credentialType","Access Token"),
                         Map.of("id","ppocr","configured",baidu,"model","PP-OCRv6","endpoint","https://aip.baidubce.com/rest/2.0/ocr/v1/pp_ocrv5","credentialType","API Key + Secret Key")),
                 "qwenAssist",Map.of("configured",qwenAssist.configured(),"model",qwenAssistConfig.getModel(),"assistEnabled",qwenAssistConfig.isEnabled()),
-                "maxUploadMb",config.maxUploadMb());
+                "maxUploadMb",config.maxUploadMb(),
+                "capabilities",Map.of("schemaVersion",2,"presentationV2",presentation!=null));
     }
     private static String safeEndpoint(String value){try{java.net.URI uri=java.net.URI.create(value);if(uri.getHost()==null||!("https".equalsIgnoreCase(uri.getScheme())||"http".equalsIgnoreCase(uri.getScheme())))return "";return new java.net.URI(uri.getScheme(),null,uri.getHost(),uri.getPort(),uri.getPath(),null,null).toString();}catch(Exception ignored){return "";}}
     @GetMapping("/books") public List<Book> list(){return books.list();}
@@ -53,6 +57,23 @@ public class ApiController {
     @PatchMapping("/books/{id}/library") public Book updateLibrary(@PathVariable String id,@RequestBody LibraryUpdateRequest request){return jobs.updateLibrary(id,request.title(),request.archived());}
     @GetMapping("/books/{id}/pages") public List<PageSummary> pages(@PathVariable String id){return books.pages(id);}
     @GetMapping("/books/{id}/outline") public List<OutlineService.OutlineEntry> outline(@PathVariable String id){return books.outline(id);}
+    /**
+     * U3：目录 v2 对象（schemaVersion/bookId/outlineRevision/profileRevision/entries）。
+     * 缺省与 schemaVersion=1 保留旧数组；不静默改变旧客户端预期。
+     */
+    @GetMapping(value="/books/{id}/outline", params="schemaVersion=2")
+    public Map<String,Object> outlineV2(@PathVariable String id){
+        List<OutlineService.OutlineEntry> entries=books.outline(id);
+        long profileRevision=presentationProfileRevision(id);
+        Map<String,Object> result=new LinkedHashMap<>();
+        result.put("schemaVersion",2);result.put("bookId",id);
+        result.put("outlineRevision",profileRevision);result.put("profileRevision",profileRevision);
+        result.put("entries",entries);return result;
+    }
+    private long presentationProfileRevision(String id){
+        if(presentation==null)return 0;
+        try{return presentation.buildProfile(id).profileRevision();}catch(RuntimeException e){return 0;}
+    }
     @GetMapping("/books/{id}/pages/{n}") public Map<String,Object> page(@PathVariable String id,@PathVariable int n){return pagePayload(id,books.page(id,n));}
     @GetMapping(value="/books/{id}/pages/{n}/image",produces=MediaType.IMAGE_PNG_VALUE) public byte[] image(@PathVariable String id,@PathVariable int n,@RequestParam(defaultValue="1800")@Min(196) int width){return books.image(id,n,width);}
     @GetMapping(value="/books/{id}/pages/{n}/figures/{blockId}",produces=MediaType.IMAGE_PNG_VALUE) public byte[] figure(@PathVariable String id,@PathVariable int n,@PathVariable String blockId){return books.figure(id,n,blockId);}
@@ -74,6 +95,8 @@ public class ApiController {
     @GetMapping("/books/{id}/search") public List<Map<String,Object>> search(@PathVariable String id,@RequestParam String q){return books.search(id,q);}
     @GetMapping(value="/books/{id}/export",produces="application/zip") public void export(@PathVariable String id,@RequestParam(required=false)String pages,HttpServletResponse response)throws IOException{Book book=books.get(id);String ascii="book-"+book.id()+".zip";response.setHeader(HttpHeaders.CONTENT_DISPOSITION,"attachment; filename=\""+ascii+"\"; filename*=UTF-8''"+java.net.URLEncoder.encode(book.title()+".zip",StandardCharsets.UTF_8).replace("+","%20"));export.writeZip(id,response.getOutputStream(),pages);}
     private Map<String,Object> pagePayload(String bookId,Page page){Page readingPage=ReadingStructureNormalizer.normalize(page);LinkedHashMap<String,Object>payload=json.convertValue(readingPage,new TypeReference<>(){});LinkedHashMap<String,Object>metadata=new LinkedHashMap<>();
+        // U3：规范 Page 字段 + 只读展示投影（阅读器消费展示决策，编辑器处理真实保存对象）。
+        if(presentation!=null){try{PagePresentation view=presentation.project(bookId,page);payload.put("presentation",json.convertValue(view,new TypeReference<LinkedHashMap<String,Object>>(){}));}catch(RuntimeException ignored){}}
         // 阶段2：正文读取只返回轻量疑点索引与证据状态，不触发高清渲染；点击疑字后按需请求精确证据
         issueImages.summarize(page).forEach((issueId,snippet)->{String src="/api/books/"+UriUtils.encodePathSegment(bookId,StandardCharsets.UTF_8)+"/pages/"+page.pageNumber()+"/issues/"+UriUtils.encodePathSegment(issueId,StandardCharsets.UTF_8)+"/image";metadata.put(issueId,Map.of("mode",snippet.mode(),"glyphCount",snippet.glyphCount(),"bbox",snippet.bbox(),"boxes",snippet.boxes(),"src",src,"contextBbox",snippet.contextBbox(),"contextSrc",src+"?context=true","pending",true));});payload.put("issueImages",metadata);return payload;}
 }

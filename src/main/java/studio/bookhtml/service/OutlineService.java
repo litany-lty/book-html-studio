@@ -16,12 +16,22 @@ public class OutlineService {
     private static final String PAGE_TOKEN = "(?:[0-9]{1,5}|[〇○零一二三四五六七八九十百千兩两廿卅]{1,8})";
 
     private final BookStore store;
+    private BookPresentationService presentation;
 
     public OutlineService(BookStore store) {
         this.store = store;
     }
 
+    /** U3：统一书籍画像投影。未注入时回退旧适配器（保守兼容）。 */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setPresentation(BookPresentationService presentation) {
+        this.presentation = presentation;
+    }
+
     public List<OutlineEntry> outline(String bookId) {
+        if (presentation != null) {
+            return presentation.outline(bookId);
+        }
         Book book = store.readBook(bookId);
         List<Page> pages = new ArrayList<>(book.totalPages());
         for (int pageNumber = 1; pageNumber <= book.totalPages(); pageNumber++) {

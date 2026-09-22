@@ -20,5 +20,11 @@ public record ReadingWindowResponse(UUID sessionId, long sequence, boolean enabl
     }
 
     public record PageState(int pageNumber, String status, Integer revision, String error,
-                            PageSummary summary, List<OutlineService.OutlineEntry> outline) {}
+                            PageSummary summary, List<OutlineService.OutlineEntry> outline,
+                            long profileRevision) {
+        public PageState(int pageNumber, String status, Integer revision, String error,
+                         PageSummary summary, List<OutlineService.OutlineEntry> outline) {
+            this(pageNumber, status, revision, error, summary, outline, 0);
+        }
+    }
 }
