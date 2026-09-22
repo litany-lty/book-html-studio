@@ -34,6 +34,8 @@ jobs:
           pathlib.Path(os.environ['RUNNER_TEMP'], 'reader-audit.patch').write_bytes(patch)
           PY
           git apply --index --unidiff-zero "$RUNNER_TEMP/reader-audit.patch"
+          echo '196bd111ba487acb747a99f394106ecae5858b6f4432afad03db74634c90c092  .audit-transfer/scanner-amendment.patch' | sha256sum --check --status
+          git apply --index .audit-transfer/scanner-amendment.patch
           git diff --cached --check
       - uses: actions/setup-java@v6
         with:
@@ -109,6 +111,8 @@ jobs:
           pathlib.Path(os.environ['RUNNER_TEMP'], 'reader-audit.patch').write_bytes(patch)
           PY
           git apply --index --unidiff-zero "$RUNNER_TEMP/reader-audit.patch"
+          echo '196bd111ba487acb747a99f394106ecae5858b6f4432afad03db74634c90c092  .audit-transfer/scanner-amendment.patch' | sha256sum --check --status
+          git apply --index .audit-transfer/scanner-amendment.patch
           git diff --cached --check
           test "$(git write-tree)" = "$TESTED_TREE"
           target='refs/heads/audit/reader-stream-context-security-20260922'
