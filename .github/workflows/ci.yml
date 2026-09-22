@@ -11,8 +11,14 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      LC_ALL: C.UTF-8
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Record tested SHA
         run: |
           echo "testedCommit=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
@@ -38,6 +44,7 @@ jobs:
           done
           node scripts/verification/probe_display.js
           node scripts/verification/probe_job_scope.js
+          node scripts/verification/probe_page_progress.mjs
       - name: Python verification tests
         shell: bash
         run: |
@@ -45,8 +52,20 @@ jobs:
           python3 -m py_compile scripts/verification/*.py
           python3 scripts/verification/shadow_eval.py --selftest
           python3 -m unittest discover -s scripts/verification -p 'test_*.py'
+      - name: Redacted credential scan (tracked files and reachable history)
+        run: python3 scripts/security/scan_secrets.py --history --out test-results/secret-scan.json
       - name: Test and package
-        run: mvn --batch-mode verify
+        env:
+          MAVEN_OPTS: -Djava.awt.headless=true -Dfile.encoding=UTF-8
+        run: mvn --batch-mode -DargLine="-Djava.awt.headless=true -Dfile.encoding=UTF-8" verify
+      - name: Install browser driver and CJK system fonts
+        run: |
+          python3 -m pip install --disable-pip-version-check playwright==1.57.0
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+          if ! command -v google-chrome >/dev/null && ! command -v chromium >/dev/null; then python3 -m playwright install --with-deps chromium; fi
+      - name: Isolated reader browser regression (no cloud calls)
+        run: bash scripts/verification/run_reader_browser.sh
       - name: Build manifest
         run: |
           python3 scripts/verification/build_manifest.py --jar target/book-html-studio.jar --out test-results/build
@@ -63,7 +82,7 @@ jobs:
       - name: Untested items (explicit NOT_RUN/BLOCKED, not simulated)
         if: always()
         run: |
-          echo "NOT_RUN: online real-browser CDP (needs GUI/displays, see scripts/verification/cdp_*.py)"
+          echo "NOT_RUN: real-cloud OCR accuracy/load benchmark (synthetic browser smoke is a separate executed step)"
           echo "NOT_RUN: file:// offline IDB restore/backup-import (needs real browser profile)"
           echo "NOT_RUN: SHADOW_LIVE real-model runs (needs SHADOW_LIVE=1 + dataset + TYPESAFE_API_KEY)"
-          echo "BLOCKED: none (Ubuntu unit CI); platform-specific faults recorded per-run, not closed by this CI"
+          echo "Read actual step outcomes for this run; NOT_RUN items above are not certified by unit tests"
