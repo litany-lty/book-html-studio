@@ -76,6 +76,10 @@ export const api = {
   decisionAccept: (id, n, issueId, decisionId, body, timeoutMs) => request(`/books/${encodeURIComponent(id)}/pages/${n}/issues/${encodeURIComponent(issueId)}/decisions/${encodeURIComponent(decisionId)}/accept`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, timeoutMs ?? 30000),
   revisions: (id, n) => request(`/books/${encodeURIComponent(id)}/pages/${n}/revisions`),
   revertPage: (id, n, revision, expectedRevision) => request(`/books/${encodeURIComponent(id)}/pages/${n}/revert`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(expectedRevision == null ? { revision } : { revision, expectedRevision }) }),
+  // U3：展示层人工覆盖（只改目录/展示角色，不算全文人工校对）。
+  presentationOverrides: (id, n) => request(`/books/${encodeURIComponent(id)}/pages/${n}/presentation-overrides`),
+  applyPresentationOverride: (id, n, body) => request(`/books/${encodeURIComponent(id)}/pages/${n}/presentation-overrides`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  previewOverrideScope: (id, n, blockId) => request(`/books/${encodeURIComponent(id)}/pages/${n}/presentation-overrides/preview?blockId=${encodeURIComponent(blockId)}`),
   search: (id, query) => request(`/books/${encodeURIComponent(id)}/search?q=${encodeURIComponent(query)}`),
   exportUrl: id => `${API_ROOT}/books/${encodeURIComponent(id)}/export`
 };

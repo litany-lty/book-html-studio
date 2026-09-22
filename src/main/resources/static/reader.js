@@ -187,6 +187,20 @@ function isPageNumberOrFolioSymbol(block, allBlocks) {
 
 function renderReading(container, ctx) {
   const { book, page, blocks, script, fontSize, lineHeight } = ctx;
+  // U3：消费统一展示投影；未取得投影用保守兼容路径（人工块不隐藏）。
+  const presentationMap = new Map();
+  for (const view of (page.presentation?.blocks || [])) {
+    if (view && view.blockId && !presentationMap.has(view.blockId)) presentationMap.set(view.blockId, view);
+  }
+  const viewOf = block => presentationMap.get(block.id);
+  const hiddenByProjection = block => {
+    const view = viewOf(block);
+    if (!view || view.showInReading !== false) return false;
+    // 人工内容保护：已校对/手工块不受阅读层隐藏。
+    if (block.reviewed || block.source === 'manual') return false;
+    return true;
+  };
+  const joinableByProjection = block => viewOf(block)?.allowJoinNext !== false;
   const flow = document.createElement('div');
   const pageImageSrc = api.pageImage(book.id, page.pageNumber);
   flow.className = 'reading-flow';
@@ -197,6 +211,7 @@ function renderReading(container, ctx) {
   let paragraph = null;
   const advertisements = [];
   [...blocks].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).forEach(block => {
+    if (hiddenByProjection(block)) { previousPlain = null; paragraph = null; return; }
     if (block.type === 'advertisement') { advertisements.push(block); previousPlain = null; paragraph = null; return; }
     if (block.type === 'page-number' || isPageNumberOrFolioSymbol(block, blocks)) return;
     const text = blockText(block, script);
@@ -224,7 +239,7 @@ function renderReading(container, ctx) {
       return;
     }
     if (!text) return;
-    if (readingLayout.canJoin(previousPlain, block, previousText, text) && paragraph) {
+    if (joinableByProjection(block) && readingLayout.canJoin(previousPlain, block, previousText, text) && paragraph) {
       appendIssueAwareText(paragraph, block, page, script, ctx.onIssueSelect, pageImageSrc, ctx.evidence);
       previousPlain = block; previousText = text;
       return;

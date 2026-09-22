@@ -31,6 +31,8 @@ let readingSnapshot = null;
 let deferredReady = null;
 const readingMetadataSignatures = new Map();
 const readingMetadataVersions = new Map();
+// U3：随读增量目录按画像版本取投影；旧响应不得把已排除书眉写回目录。
+const readingMetadataProfiles = new Map();
 
 function currentPageProtected() {
   return Boolean(state.dirty || state.conflict || currentSaveInFlight());
@@ -123,6 +125,11 @@ function mergeReadingMetadata(snapshot) {
       else state.summaries.splice(number - 1, 0, summary);
     }
     if (Array.isArray(info.outline)) {
+      // U3：画像更新影响前页时，以 profileRevision 触发轻量目录更新；旧响应不反灌。
+      const incomingProfile = Number(info.profileRevision || 0);
+      const knownProfile = readingMetadataProfiles.get(number) || 0;
+      if (incomingProfile < knownProfile) continue;
+      readingMetadataProfiles.set(number, incomingProfile);
       const current = state.outline.filter(entry => Number(entry.pageNumber) === number);
       if (!sameOutline(current, info.outline)) outlineUpdates.set(number, info.outline);
     }
@@ -854,6 +861,7 @@ function renderReview() {
   $('#mark-reviewed').checked = Boolean(state.reviewedDraft);
   $('#save-page').disabled = !state.dirty || Boolean(state.conflict) || Boolean(currentSaveInFlight());
   renderDecisionSection();
+  renderPageStructure();
   renderEditor($('#review-list'), state.blocks, {
     selectedId: state.selectedBlockId,
     uncertainOnly: $('#uncertain-only').checked,
@@ -866,6 +874,93 @@ function renderReview() {
       markDirty(); renderCurrent();
     }
   });
+}
+
+// U3：校对模式“页面结构”。自动判断收起的块可查看并撤销；修改只影响展示与
+// 目录，不改原文，不把整页标为人工校对。默认作用范围为本块。
+function structureRoleLabel(role) {
+  return { RUNNING_HEADER: '疑似书眉', RUNNING_FOOTER: '疑似页脚', BOOK_TITLE: '书名',
+    PRINTED_TOC_ENTRY: '目录页条目', PAGE_NUMBER: '页码', CHAPTER_HEADING: '章节',
+    SECTION_HEADING: '小节', VISUAL: '图/表/公式', CAPTION: '图注', DECORATION: '装饰',
+    BODY: '正文', FOOTNOTE: '脚注', UNKNOWN: '未确定' }[role] || role || '未确定';
+}
+
+function renderPageStructure() {
+  const host = $('#page-structure-list');
+  const section = $('#page-structure');
+  if (!host || !section) return;
+  host.replaceChildren();
+  const views = state.page?.presentation?.blocks || [];
+  const blocks = new Map((state.blocks || []).map(b => [b.id, b]));
+  const interesting = views.filter(view => {
+    if (!view || !view.blockId) return false;
+    if (view.showInReading === false) return true;
+    const block = blocks.get(view.blockId);
+    return block?.type === 'heading' && view.includeInOutline === false;
+  });
+  $('#page-structure-count').textContent = interesting.length ? `${interesting.length} 项` : '';
+  section.hidden = interesting.length === 0 && !state.page;
+  if (!interesting.length) {
+    const empty = document.createElement('p');
+    empty.className = 'side-empty';
+    empty.textContent = '本页没有被收起的结构，可直接阅读。';
+    host.append(empty);
+    return;
+  }
+  for (const view of interesting) {
+    const block = blocks.get(view.blockId);
+    const text = (block?.simplified || block?.original || '').slice(0, 60);
+    const item = document.createElement('div');
+    item.className = 'structure-item';
+    const head = document.createElement('div');
+    head.className = 'structure-item-head';
+    const label = document.createElement('strong');
+    label.textContent = text || view.blockId;
+    const role = document.createElement('span');
+    role.className = 'structure-role';
+    role.textContent = `${structureRoleLabel(view.role)}${view.evidenceLevel === 'MANUAL' ? ' · 人工' : ''}`;
+    head.append(label, role);
+    const reasons = document.createElement('p');
+    reasons.className = 'structure-reasons';
+    reasons.textContent = `依据：${(view.reasonCodes || []).join('、') || '自动判断'}`;
+    const actions = document.createElement('div');
+    actions.className = 'structure-actions';
+    const addButton = (caption, action, confirmText) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'button quiet';
+      button.textContent = caption;
+      button.addEventListener('click', async () => {
+        if (confirmText && !window.confirm(confirmText)) return;
+        await applyStructureOverride(view, action);
+      });
+      actions.append(button);
+    };
+    addButton('加入目录', 'INCLUDE_IN_OUTLINE');
+    addButton('不作为目录', 'EXCLUDE_FROM_OUTLINE');
+    addButton('标为书眉/页脚', view.role === 'RUNNING_FOOTER' ? 'MARK_RUNNING_FOOTER' : 'MARK_RUNNING_HEADER');
+    addButton('恢复自动判断', 'CLEAR_OVERRIDE');
+    item.append(head, reasons, actions);
+    host.append(item);
+  }
+}
+
+async function applyStructureOverride(view, action) {
+  if (!state.book || !state.page) return;
+  try {
+    await api.applyPresentationOverride(state.book.id, state.currentPage, {
+      expectedRevision: state.page.revision,
+      blockId: view.blockId,
+      sourceHash: view.sourceHash,
+      action,
+      scope: 'BLOCK'
+    });
+    state.pageCache.delete(state.currentPage);
+    await goToPage(state.currentPage, { force: true });
+    await refreshOutline(state.book.id);
+  } catch (error) {
+    showError(error);
+  }
 }
 
 // J08：候选比较面板（独立作用域，不复用 saveInFlight；建议不改 page，不写 issues）。
@@ -1192,7 +1287,7 @@ async function goToPage(n, options = {}) {
 async function selectBook(id) {
   if (hasDirtyChanges()) { $('#book-select').value = state.book?.id || ''; return; }
   void readingWindow.stop({ silent: true });
-  readingMetadataSignatures.clear(); readingMetadataVersions.clear();
+  readingMetadataSignatures.clear(); readingMetadataVersions.clear(); readingMetadataProfiles.clear();
   deferredReady = null;
   renderReadingWindowStatus(null);
   const requestId = ++bookRequest;

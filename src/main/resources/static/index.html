@@ -65,7 +65,7 @@
         <button class="tab" data-left-tab="search" role="tab" aria-selected="false">搜索</button>
         <button class="tab" data-left-tab="bookmarks" role="tab" aria-selected="false">书签</button>
       </div>
-      <section data-left-panel="contents"><div class="side-heading"><h2>正文标题</h2><span id="toc-count"></span></div><nav id="toc-list" class="toc-list" aria-label="正文标题目录"></nav></section>
+      <section data-left-panel="contents"><div class="side-heading"><h2>正文标题</h2><span id="toc-count"></span></div><nav id="toc-list" class="toc-list" aria-label="正文标题目录"></nav><p class="toc-footnote">目录会随已识别页面更新；暂未识别到章节可先按页阅读。</p></section>
       <section data-left-panel="search" hidden><form id="search-form" class="search-form"><label for="search-input">在繁体与简体中搜索</label><div><input id="search-input" type="search" autocomplete="off" required><button class="button" type="submit">搜索</button></div></form><p id="search-status" class="muted"></p><ol id="search-results" class="search-results"></ol></section>
       <section data-left-panel="bookmarks" hidden><div class="side-heading"><h2>本地书签</h2></div><div id="bookmark-list" class="toc-list"></div></section>
     </aside>
@@ -117,6 +117,7 @@
         <div class="review-actions"><label class="check"><input id="uncertain-only" type="checkbox"><span>只看疑字</span></label><div><button id="add-text" class="button" type="button">框选文字</button><button id="add-figure" class="button" type="button">框选插图</button></div></div>
         <div id="draw-hint" class="inline-message" hidden>请在原稿上拖出一个矩形，按 Esc 取消。</div>
         <div id="review-list" class="review-list"></div>
+        <details id="page-structure" class="page-structure"><summary>页面结构 <span id="page-structure-count"></span></summary><p class="page-structure-note">自动判断收起的页眉/页脚/目录条目可在此查看并撤销；修改只影响展示与目录，不改原文。</p><div id="page-structure-list"></div></details>
         <div class="save-dock"><div class="save-dock-copy"><label class="check"><input id="mark-reviewed" type="checkbox"><span>保存后标为已校对</span></label><span id="review-save-status" class="review-save-status" role="status" aria-live="polite">已保存</span></div><button id="save-page" class="button primary" type="button" disabled>保存整页</button></div>
       </div>
     </aside>

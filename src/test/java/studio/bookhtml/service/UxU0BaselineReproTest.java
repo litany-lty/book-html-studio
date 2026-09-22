@@ -42,6 +42,9 @@ class UxU0BaselineReproTest {
 
     @Test
     void u0f04_duplicateRunningHeaderFloodsOutline() {
+        // 旧适配器 fromPages（无书籍上下文）的行为记录：10 个书眉全部收录。
+        // U3 起生产路径走书籍级投影（见 BookPresentationServiceTest.title01），
+        // 旧适配器仅作 schemaVersion=1 保守兼容保留。本项锁定旧行为，防止静默变化。
         // 10 页相同页顶书名 + 其中 2 页各有一个真正章标题。
         // 当前 OutlineService.fromPages 无跨页书眉识别，应把 10 个书眉全部收录（bug 复现）。
         List<Page> pages = new ArrayList<>();

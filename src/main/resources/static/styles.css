@@ -514,6 +514,19 @@ progress::-moz-progress-bar { background: var(--blue); }
 /* U1：阅读正文默认宽度与字号下限；原稿/大图不强制套文本宽度。 */
 .reading-flow-u1 { max-width: 36em; font-size: max(20px, var(--reading-size, 20px)); line-height: 1.8; }
 @media (max-width: 620px) { .reading-flow-u1 { font-size: max(18px, var(--reading-size, 18px)); } }
+.toc-footnote { margin: 10px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+/* U3：校对模式“页面结构”。只影响展示与目录，不改原文。 */
+.page-structure { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+.page-structure summary { min-height: 38px; display: flex; align-items: center; gap: 6px; color: var(--blue); cursor: pointer; font-size: 12px; }
+.page-structure-note { color: var(--muted); font-size: 11px; line-height: 1.6; }
+.structure-item { border: 1px solid var(--line); border-left: 3px solid var(--line-strong); background: #fff; padding: 8px; margin-bottom: 8px; }
+.structure-item-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.structure-item-head strong { font-size: 12px; overflow-wrap: anywhere; }
+.structure-role { flex: none; color: var(--muted); font-size: 10px; }
+.structure-reasons { margin: 4px 0 6px; color: var(--muted); font-size: 10px; }
+.structure-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.structure-actions .button { min-height: 32px; padding: 4px 8px; font-size: 11px; }
+.quality-diagnostics { margin-left: 8px; color: var(--muted); font-size: 11px; }
 
 /* A1-01：保存冲突常驻比较栏（不随 toast 消失） */
 .conflict-bar { border: 2px solid #a56912; background: #fdf6e7; border-radius: 8px; padding: 10px 12px; margin: 0 0 12px; }
