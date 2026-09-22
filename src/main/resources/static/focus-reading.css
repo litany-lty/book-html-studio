@@ -56,6 +56,8 @@ body.focus-reading .reading-progress {
     max(4px, env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px));
   background: var(--reading-paper);
   box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 body.focus-reading .focus-exit { min-height: 44px; white-space: nowrap; font-size: 12px; }
 .focus-page-zone {

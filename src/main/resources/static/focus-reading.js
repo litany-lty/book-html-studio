@@ -187,7 +187,8 @@ export function initFocusReading({ document: doc = document, model = state, onPr
     if (event.key === 'Escape') {
       event.preventDefault(); event.stopImmediatePropagation(); toggle.click(); return;
     }
-    if (event.shiftKey || event.repeat || selected() || event.target.closest?.(interactive)) return;
+    const onTurnControl = event.target === previous || event.target === next;
+    if (event.shiftKey || event.repeat || selected() || (!onTurnControl && event.target.closest?.(interactive))) return;
     if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       event.preventDefault(); event.stopPropagation(); navigate(event.key === 'ArrowLeft' ? -1 : 1);
     }

@@ -71,7 +71,7 @@ def main():
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(executable_path=os.environ.get('CHROMIUM') or shutil.which('chromium') or shutil.which('google-chrome'), headless=True, args=['--no-sandbox'])
-            context = browser.new_context(viewport={'width': 1440, 'height': 1000}, reduced_motion='reduce')
+            context = browser.new_context(viewport={'width': 1440, 'height': 1000}, reduced_motion='reduce', has_touch=True)
             context.route('**/*', respond)
             page = context.new_page()
             page.on('pageerror', lambda error: errors.append(str(error)))
@@ -100,6 +100,16 @@ def main():
             page.locator('#reader').focus(); page.keyboard.press('ArrowRight')
             page.wait_for_function("document.querySelector('#paper').textContent.includes('第2页')")
             check('arrow_keys_turn_pages', True)
+            page.locator('#focus-next-page').focus(); page.keyboard.press('ArrowRight')
+            page.wait_for_function("document.querySelector('#paper').textContent.includes('第3页')")
+            page.keyboard.press('ArrowLeft')
+            page.wait_for_function("document.querySelector('#paper').textContent.includes('第2页')")
+            check('arrows_still_work_after_clicking_turn_region', True)
+            page.evaluate("import('/store.js').then(({state})=>{state.pageCache.clear(); for(let i=0;i<3;i++)document.querySelector('#focus-next-page').click();})")
+            page.wait_for_function("document.querySelector('#paper').textContent.includes('第5页')")
+            check('rapid_clicks_keep_latest_page', page.locator('#page-jump').input_value() == '5')
+            page.evaluate("for(let i=0;i<3;i++)document.querySelector('#focus-prev-page').click()")
+            page.wait_for_function("document.querySelector('#paper').textContent.includes('第2页')")
             page.evaluate('''() => { const range=document.createRange();range.selectNodeContents(document.querySelector('#paper .reading-flow p'));getSelection().removeAllRanges();getSelection().addRange(range); }''')
             page.click('#focus-next-page')
             check('selected_text_not_accidentally_turned', page.locator('#page-jump').input_value() == '2')
@@ -149,7 +159,20 @@ def main():
               const b=document.querySelector('#paper .reading-flow p').getBoundingClientRect(), l=document.querySelector('#focus-prev-page').getBoundingClientRect(), r=document.querySelector('#focus-next-page').getBoundingClientRect(), f=document.querySelector('#reading-progress').getBoundingClientRect();
               return l.right<=b.left && r.left>=b.right && Math.abs(l.bottom-f.top)<=1 && f.bottom<=innerHeight+1;
             }'''))
+            check('mobile_progress_controls_visible_and_unoccluded', page.evaluate('''() => ['reading-progress-range', 'reading-progress-output', 'focus-exit'].every(id=>{
+              const el=document.getElementById(id), r=el.getBoundingClientRect();
+              const hit=document.elementFromPoint(r.left+r.width/2, r.top+r.height/2);
+              return r.width>0 && r.height>0 && r.top>=0 && r.bottom<=innerHeight && r.left>=0 && r.right<=innerWidth && (hit===el || el.contains(hit));
+            })'''))
+            page.locator('#reader').focus()
             page.screenshot(path=str(OUT / 'mobile-focus.png'))
+            region = page.locator('#focus-next-page').bounding_box()
+            page.touchscreen.tap(region['x']+region['width']/2, region['y']+180)
+            page.wait_for_function("document.querySelector('#paper').textContent.includes('第5页')")
+            region = page.locator('#focus-prev-page').bounding_box()
+            page.touchscreen.tap(region['x']+region['width']/2, region['y']+180)
+            page.wait_for_function("document.querySelector('#paper').textContent.includes('第4页')")
+            check('mobile_touch_regions_turn_pages', True)
             page.locator('#reader').evaluate('el=>el.scrollTop=el.scrollHeight')
             check('last_line_clear_of_footer', page.evaluate("document.querySelector('#paper .reading-flow').getBoundingClientRect().bottom <= document.querySelector('#reading-progress').getBoundingClientRect().top"))
             page.locator('#reader').evaluate('el=>el.scrollTop=0')
