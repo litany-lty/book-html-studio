@@ -152,16 +152,16 @@ function render(settings) {
   setSelectValue(field('jevModel'), settings.jev?.model, 'jev-1.13.0');
   field('jevBudgetUnits').value = settings.jev?.budgetUnits || '';
   field('jevAllowCloudData').checked = Boolean(settings.jev?.allowCloudData);
-  field('paddleAccessToken').value = settings.ocr?.paddleAiStudio?.accessToken || '';
-  if (settings.ocr?.paddleAiStudio?.accessTokenSet) field('paddleAccessToken').placeholder = '•••••••• （服务端已保存凭据）';
-  field('ppocrApiKey').value = settings.ocr?.ppocr?.apiKey || '';
-  if (settings.ocr?.ppocr?.apiKeySet) field('ppocrApiKey').placeholder = '•••••••• （服务端已保存凭据）';
-  field('ppocrSecretKey').value = settings.ocr?.ppocr?.secretKey || '';
-  if (settings.ocr?.ppocr?.secretKeySet) field('ppocrSecretKey').placeholder = '•••••••• （服务端已保存凭据）';
-  field('qwenApiKey').value = settings.qwen?.apiKey || '';
-  if (settings.qwen?.apiKeySet) field('qwenApiKey').placeholder = '•••••••• （服务端已保存凭据）';
-  field('jevApiKey').value = settings.jev?.apiKey || '';
-  if (settings.jev?.apiKeySet) field('jevApiKey').placeholder = '•••••••• （服务端已保存凭据）';
+  field('paddleAccessToken').value = ''; // Stored credentials never leave the server.
+  field('paddleAccessToken').placeholder = settings.ocr?.paddleAiStudio?.accessTokenSet ? '已配置；留空保留，填写替换' : '尚未配置';
+  field('ppocrApiKey').value = ''; // Stored credentials never leave the server.
+  field('ppocrApiKey').placeholder = settings.ocr?.ppocr?.apiKeySet ? '已配置；留空保留，填写替换' : '尚未配置';
+  field('ppocrSecretKey').value = ''; // Stored credentials never leave the server.
+  field('ppocrSecretKey').placeholder = settings.ocr?.ppocr?.secretKeySet ? '已配置；留空保留，填写替换' : '尚未配置';
+  field('qwenApiKey').value = ''; // Stored credentials never leave the server.
+  field('qwenApiKey').placeholder = settings.qwen?.apiKeySet ? '已配置；留空保留，填写替换' : '尚未配置';
+  field('jevApiKey').value = ''; // Stored credentials never leave the server.
+  field('jevApiKey').placeholder = settings.jev?.apiKeySet ? '已配置；留空保留，填写替换' : '尚未配置';
   document.querySelectorAll('.password-toggle-btn').forEach(btn => {
     const input = field(btn.dataset.target);
     if (input) input.type = 'password';

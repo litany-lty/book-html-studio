@@ -21,7 +21,8 @@ import java.util.concurrent.*;
 @Service
 public class JobService {
     private final BookStore store;private final BookService books;private final PageProcessor processor;
-    private final ExecutorService worker=Executors.newFixedThreadPool(8,r->{Thread t=new Thread(r,"book-html-worker");t.setDaemon(true);return t;});
+    private final ExecutorService worker=new ThreadPoolExecutor(8,8,0L,TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(16),r->{Thread t=new Thread(r,"book-html-worker");t.setDaemon(true);return t;},new ThreadPoolExecutor.AbortPolicy());
     private Running active;
     private final Map<Integer, Running> activeReserved = new ConcurrentHashMap<>();
     // U2：页面级 attempt 登记（调度用；最终写入权限仍以 BookStore 锁内校验为准）。
@@ -38,7 +39,16 @@ public class JobService {
     /** U4：阶段事件聚合（测试可注入；缺省关闭，不影响正式保存）。 */
     @org.springframework.beans.factory.annotation.Autowired(required=false) public void setProgress(ProcessingProgressService progress){this.progress=progress;}
     @PostConstruct void recover(){store.recoverInterruptedJobs();reconcileAttemptIntents();}
-    @PreDestroy void close(){worker.shutdownNow();cancelAllReserved();}
+    @PreDestroy void close(){
+        cancelAllReserved();
+        synchronized(this){
+            if(active!=null){active.cancelled=true;if(active.thread!=null)active.thread.interrupt();
+                else if(active.lease!=null)active.lease.close();}
+        }
+        worker.shutdown();
+        try{if(!worker.awaitTermination(5,TimeUnit.SECONDS)){worker.shutdownNow();worker.awaitTermination(1,TimeUnit.SECONDS);}}
+        catch(InterruptedException interrupted){worker.shutdownNow();Thread.currentThread().interrupt();}
+    }
     public synchronized void reserveReading(UUID reservation,String bookId){
         if(readingReservation!=null||active!=null||!activeReserved.isEmpty())throw new ApiException(HttpStatus.CONFLICT,"已有识别任务或阅读窗口正在运行");
         if(store.readBook(bookId).archived())throw new ApiException(HttpStatus.CONFLICT,"本书已归档，请先恢复后再识别");
@@ -75,17 +85,17 @@ public class JobService {
             // U2：只标记取消并中断，不提前从登记表删除。物理槽与登记在 worker
             // 收尾（finally）时释放；取消后仍可恢复旧可读版本（mayRestore）。
             running.cancelled = true;
-            if (running.future != null) running.future.cancel(true);
+
             if (running.thread != null) running.thread.interrupt();
         }
     }
     private synchronized void cancelAllReserved() {
         for (Running running : new HashSet<>(activeReserved.values())) {
             running.cancelled = true;
-            if (running.future != null) running.future.cancel(true);
+
             if (running.thread != null) running.thread.interrupt();
         }
-        activeReserved.clear();
+        // Registrations are removed by the physical worker's finally, not logical cancellation.
     }
     /** Serialize library archiving with both batch admission and reading-window reservation. */
     public synchronized Book updateLibrary(String bookId,String title,Boolean archived){
@@ -95,7 +105,7 @@ public class JobService {
         return books.updateLibrary(bookId,title,archived);
     }
     public synchronized Job submitReserved(UUID reservation,String bookId,JobRequest request){
-        if(readingReservation==null||!readingReservation.equals(reservation))throw new ApiException(HttpStatus.CONFLICT,"阅读窗口预约已失效");
+        if(readingReservation==null||!readingReservation.equals(reservation)||!Objects.equals(readingReservationBookId,bookId))throw new ApiException(HttpStatus.CONFLICT,"阅读窗口预约已失效");
         if(active!=null)throw new ApiException(HttpStatus.CONFLICT,"已有识别任务正在运行");
         Book book=store.readBook(bookId);
         if(book.archived())throw new ApiException(HttpStatus.CONFLICT,"本书已归档，请先恢复后再识别");
@@ -103,11 +113,14 @@ public class JobService {
         if(settings!=null&&!List.of("paddle-aistudio","ppocr").contains(provider))throw new ApiException(HttpStatus.BAD_REQUEST,"新任务仅支持 AI Studio 与 PP-OCRv6 通道");
         String layout=request.layout()==null?"auto":request.layout();
         List<Integer> pages=PageRanges.parse(request.pages(),book.totalPages());
+        if(pages.size()!=1)throw new ApiException(HttpStatus.BAD_REQUEST,"随读每次只允许提交一页");
+        if(activeReserved.size()>=6&&!activeReserved.containsKey(pages.get(0)))
+            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS,"随读处理已达到并发上限");
         String fingerprint=bookId+"|"+pages+"|"+provider+"|"+layout+"|"+request.splitSpreads()+"|"+request.force()+"|"+request.assistEnabled();
         for(int p:pages){
             Running existing=activeReserved.get(p);
-            if(existing!=null&&!existing.cancelled){
-                if(existing.fingerprint.equals(fingerprint))return store.readJob(bookId);
+            if(existing!=null){
+                if(!existing.cancelled&&existing.fingerprint.equals(fingerprint))return store.readJob(bookId);
                 throw new ApiException(HttpStatus.CONFLICT,"已有识别任务正在运行或正在取消");
             }
         }
@@ -143,7 +156,8 @@ public class JobService {
                                              studio.bookhtml.api.PageReprocessRequest request,
                                              String provider, String layout,
                                              boolean splitSpreads, boolean assist) {
-        if (readingReservation == null || !readingReservation.equals(reservation))
+        if (readingReservation == null || !readingReservation.equals(reservation)
+                || !Objects.equals(readingReservationBookId, bookId))
             throw new ApiException(HttpStatus.CONFLICT, "阅读窗口预约已失效");
         Book book = store.readBook(bookId);
         if (book.archived()) throw new ApiException(HttpStatus.CONFLICT, "本书已归档，请先恢复后再识别");
@@ -190,7 +204,6 @@ public class JobService {
         Job queued = submitReserved(reservation, bookId, jobRequest);
         operationFingerprints.put(operationKey, fingerprint);
         operationJobs.put(operationKey, queued);
-        registerAttempt(bookId, pageNumber, currentRev, List.of("JOB_START", "JOB_BASELINE", "JOB_ENHANCEMENT", "JOB_RESTORE"));
         return queued;
     }
 
@@ -377,8 +390,11 @@ public class JobService {
                 String message="第 "+pageNumber+" 页在识别开始前已被更新，已保留较新版本，跳过本页";
                 errors.add(message);completed++;writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",completed,pages.size(),pageNumber,null,List.copyOf(errors)));continue;
             }
+            UUID attemptId = progress == null ? null : progress.begin(running.bookId,pageNumber,baselineRev);
+            if(attemptId!=null)progress.stage(running.bookId,pageNumber,attemptId,"OCR");
             try{
                 ProcessingResult result=processor.process(running.bookId,pageNumber,provider,layout,split,assist,()->running.cancelled||Thread.currentThread().isInterrupted());
+                if(attemptId!=null)progress.stage(running.bookId,pageNumber,attemptId,"VALIDATING");
                 Page page=mergeUnresolvedIssues(old,result.page());
                 if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
                 if(!stillCurrent(running,initial.id()))return;
@@ -389,6 +405,7 @@ public class JobService {
                 if(isSignificantRegression(baseline,page)||(!confirmedNoText&&isEmptyResult(page))){
                     String message="第 "+pageNumber+" 页重识别来源文字少于旧记录的 60%（或为空），已拒绝覆盖并保留较完整结果";
                     errors.add(message);
+                    if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"FAILED","RESULT_REJECTED",true);
                     try{store.writeCandidate(running.bookId,page);}catch(IOException ignored){}
                     Page fallback;
                     if("READY".equals(baseline.status())){
@@ -406,7 +423,9 @@ public class JobService {
                 }else{
                     // A1-04：先提交成功结果，通过后再补原始快照；被拒绝的结果不写快照
                     try {
-                        store.commitPage(running.bookId,page,baselineRev+1,CommitActor.JOB,initial.id(),CommitOp.JOB_COMPLETE);
+                        Page committed=store.commitPage(running.bookId,page,baselineRev+1,CommitActor.JOB,initial.id(),CommitOp.JOB_COMPLETE);
+                        if(attemptId!=null){progress.baselinePublished(running.bookId,pageNumber,attemptId,BookStore.revisionOrZero(committed),false);
+                            progress.finish(running.bookId,pageNumber,attemptId,"SUCCEEDED","BATCH_PAGE_COMPLETE",false);}
                         try{store.preserveOriginal(running.bookId,page);}catch(IOException ignored){}
                     } catch (PageConflictException conflict) {
                         String message="第 "+pageNumber+" 页在识别期间已被手工保存，已保留手工版本，识别候选另存备查";
@@ -416,6 +435,7 @@ public class JobService {
                 }
             }
             catch(CancelledException e){
+                if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"CANCELLED","PROCESSING_CANCELLED",true);
                 if(!stillCurrent(running,initial.id()))return;
                 // 恢复旧状态为新版本，不降低可读性；并发写入优先保留
                 try {
@@ -423,6 +443,7 @@ public class JobService {
                 } catch (PageConflictException ignored) { }
                 throw e;}
             catch(Exception e){
+                if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"FAILED","PROCESSING_FAILED",true);
                 if(!stillCurrent(running,initial.id()))return;
                 String detail=safeDetail(e);String message="第 "+pageNumber+" 页处理失败"+(detail==null?"":"："+detail);errors.add(message);
                 // 阶段1：普通失败不降低已有有效页的可读状态——旧 READY 保持 READY，仅追加警告；并发写入优先保留
@@ -436,6 +457,8 @@ public class JobService {
                 try {
                     store.commitPage(running.bookId,failed,baselineRev+1,CommitActor.JOB,initial.id(),CommitOp.JOB_RESTORE);
                 } catch (PageConflictException ignored) { }
+            } finally {
+                if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"INTERRUPTED","PAGE_NOT_PUBLISHED",true);
             }
             completed++;writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",completed,pages.size(),pageNumber,null,List.copyOf(errors)));
         }
@@ -449,8 +472,9 @@ public class JobService {
     catch(Exception e){writeIfCurrent(running,initial.id(),statusJob(initial,"FAILED",completed,pages.size(),null,"任务执行失败",List.copyOf(errors)));}
     finally{synchronized(this){if(active==running)active=null;if(running.lease!=null)running.lease.close();}}}
     private void runReserved(Running running,UUID reservation,String expectedJobId,List<Integer> pages,String provider,String layout,boolean split,boolean force,boolean assist){
-        synchronized(this){if(!Objects.equals(readingReservation,reservation)||running.cancelled)return;running.started=true;running.thread=Thread.currentThread();}
+        synchronized(this){running.started=true;running.thread=Thread.currentThread();}
         try{
+            if(!Objects.equals(readingReservation,reservation)||running.cancelled) return;
             for(int pageNumber:pages){
                 if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
                 if(!mayRestore(running,reservation,expectedJobId)){completeIntent(running.bookId,pageNumber,"INTERRUPTED");return;}
@@ -459,19 +483,25 @@ public class JobService {
                 int baselineRev=BookStore.revisionOrZero(old);
                 Page baseline=force?strongestBaseline(old,store.readOriginalPage(running.bookId,pageNumber)):old;
                 if("READY".equals(old.status())&&!force)continue;
-                Page processing=new Page(old.pageNumber(),old.width(),old.height(),"PROCESSING",provider,old.blocks(),old.warnings(),old.reviewed(),null,old.sourceRecords(),null);
-                try {
-                    store.commitPage(running.bookId,processing,baselineRev,CommitActor.JOB,expectedJobId,CommitOp.JOB_START);
-                } catch (PageConflictException | IOException conflict) {
-                    continue;
+                // A retry is a separate attempt: keep the currently displayed revision untouched.
+                // Fresh pages retain the existing JOB_START transaction; both paths use CAS below.
+                int processingRev = baselineRev;
+                if (!force) {
+                    Page processing=new Page(old.pageNumber(),old.width(),old.height(),"PROCESSING",provider,old.blocks(),old.warnings(),old.reviewed(),null,old.sourceRecords(),null);
+                    try {
+                        Page started = store.commitPage(running.bookId,processing,baselineRev,CommitActor.JOB,expectedJobId,CommitOp.JOB_START);
+                        processingRev = BookStore.revisionOrZero(started);
+                    } catch (PageConflictException | IOException conflict) {
+                        completeIntent(running.bookId,pageNumber,"INTERRUPTED");
+                        continue;
+                    }
                 }
                 // U4 跨 catch 可见：基线已发布时，取消不再恢复旧版（基线即有效可读版）。
                 boolean pageBaselinePublished = false;
+                UUID attemptId = progress == null ? null : progress.begin(running.bookId, pageNumber, baselineRev);
                 try{
                     // U4：两阶段。基线（OCR/原生）先行发布可读；增强（Qwen 整理/局部核对）
                     // 只产候选，经门与版本校验后最多发布一次。任一阶段取消/失败不丢基线。
-                    UUID attemptId = progress == null ? null
-                            : progress.begin(running.bookId, pageNumber, baselineRev);
                     boolean baselinePublishedThisPage = false;
                     int publishedRev = baselineRev;
                     Page publishedPage = old;
@@ -498,17 +528,17 @@ public class JobService {
                             fallback=new Page(old.pageNumber(),old.width(),old.height(),"FAILED",old.provider(),old.blocks(),List.copyOf(warnings),old.reviewed(),message,old.sourceRecords(),null);
                         }
                         try {
-                            store.commitPage(running.bookId,fallback,baselineRev+1,CommitActor.JOB,expectedJobId,CommitOp.JOB_RESTORE);
+                            store.commitPage(running.bookId,fallback,processingRev,CommitActor.JOB,expectedJobId,CommitOp.JOB_RESTORE);
                         } catch (PageConflictException | IOException ignored) {}
                         if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"FAILED","BASELINE_REJECTED",true);
                     }else{
                         try {
                             if(attemptId!=null)progress.stage(running.bookId,pageNumber,attemptId,"PUBLISHING");
-                            Page committed=store.commitPage(running.bookId,baselinePage,baselineRev+1,CommitActor.JOB,expectedJobId,CommitOp.JOB_BASELINE);
+                            Page committed=store.commitPage(running.bookId,baselinePage,processingRev,CommitActor.JOB,expectedJobId,CommitOp.JOB_BASELINE);
                             try{store.preserveOriginal(running.bookId,committed);}catch(IOException ignored){}
                             baselinePublishedThisPage = true;
                             pageBaselinePublished = true;
-                            publishedRev = baselineRev + 1;
+                            publishedRev = BookStore.revisionOrZero(committed);
                             publishedPage = committed;
                             completeIntent(running.bookId, pageNumber, "BASELINE_PUBLISHED");
                             if(attemptId!=null)progress.baselinePublished(running.bookId,pageNumber,attemptId,publishedRev,false);
@@ -547,9 +577,10 @@ public class JobService {
                             } else {
                                 try {
                                     if(attemptId!=null)progress.stage(running.bookId,pageNumber,attemptId,"PUBLISHING");
-                                    store.commitPage(running.bookId,enrichedPage,publishedRev+1,CommitActor.JOB,expectedJobId,CommitOp.JOB_ENHANCEMENT);
-                                    completeIntent(running.bookId, pageNumber, "SUCCEEDED");
-                                    if(attemptId!=null){progress.baselinePublished(running.bookId,pageNumber,attemptId,publishedRev+1,true);progress.finish(running.bookId,pageNumber,attemptId,"SUCCEEDED","ENHANCED",false);}
+                                    Page enhancedCommitted = store.commitPage(running.bookId,enrichedPage,publishedRev,CommitActor.JOB,expectedJobId,CommitOp.JOB_ENHANCEMENT);
+                                    completeIntent(running.bookId, pageNumber, enriched.complete()?"SUCCEEDED":"PARTIAL");
+                                    if(attemptId!=null){progress.baselinePublished(running.bookId,pageNumber,attemptId,BookStore.revisionOrZero(enhancedCommitted),true);progress.finish(running.bookId,pageNumber,attemptId,enriched.complete()?"SUCCEEDED":"PARTIAL",
+                                            enriched.complete()?"ENHANCED":"ENHANCEMENT_PARTIAL",!enriched.complete());}
                                 } catch (PageConflictException manualKept) {
                                     // U4：人工在此期间保存，人工版本优先；增强保留为过期候选。
                                     try{store.writeCandidate(running.bookId,enrichedPage);}catch(IOException ignored){}
@@ -578,6 +609,7 @@ public class JobService {
                     }
                 }
                 catch(CancelledException e){
+                    if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"CANCELLED","PROCESSING_CANCELLED",true);
                     // U2：取消后仍可恢复旧可读版本（mayRestore 不因 cancelled 返回 false）。
                     // U4：基线已发布时不恢复旧版（基线即有效可读版），只收尾。
                     if(!mayRestore(running,reservation,expectedJobId))return;
@@ -586,11 +618,12 @@ public class JobService {
                         throw e;
                     }
                     try {
-                        store.commitPage(running.bookId,new Page(old.pageNumber(),old.width(),old.height(),old.status(),old.provider(),old.blocks(),old.warnings(),old.reviewed(),old.error(),old.sourceRecords(),null),baselineRev+1,CommitActor.JOB,expectedJobId,CommitOp.JOB_RESTORE);
+                        store.commitPage(running.bookId,new Page(old.pageNumber(),old.width(),old.height(),old.status(),old.provider(),old.blocks(),old.warnings(),old.reviewed(),old.error(),old.sourceRecords(),null),processingRev,CommitActor.JOB,expectedJobId,CommitOp.JOB_RESTORE);
                         completeIntent(running.bookId, pageNumber, "CANCELLED");
                     } catch (PageConflictException | IOException ignored) { }
                     throw e;}
                 catch(Exception e){
+                    if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"FAILED","PROCESSING_FAILED",true);
                     // U2：失败回退保留旧可读版本；归属校验通过即恢复，不因取消而跳过。
                     if(!mayRestore(running,reservation,expectedJobId))return;
                     String detail=safeDetail(e);String message="第 "+pageNumber+" 页处理失败"+(detail==null?"":"："+detail);
@@ -602,9 +635,12 @@ public class JobService {
                         failed=new Page(old.pageNumber(),old.width(),old.height(),"FAILED",provider,old.blocks(),old.warnings(),old.reviewed(),message,old.sourceRecords(),null);
                     }
                     try {
-                        store.commitPage(running.bookId,failed,baselineRev+1,CommitActor.JOB,expectedJobId,CommitOp.JOB_RESTORE);
+                        store.commitPage(running.bookId,failed,processingRev,CommitActor.JOB,expectedJobId,CommitOp.JOB_RESTORE);
                         completeIntent(running.bookId, pageNumber, "FAILED");
                     } catch (PageConflictException | IOException ignored) { }
+                } finally {
+                    // An early return or loss of ownership must not leave a RUNNING progress forever.
+                    if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"INTERRUPTED","ATTEMPT_ENDED",true);
                 }
             }
         }catch(CancelledException|CancellationException ignored){}

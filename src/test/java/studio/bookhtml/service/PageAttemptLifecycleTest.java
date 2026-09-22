@@ -280,7 +280,7 @@ class PageAttemptLifecycleTest {
                 List.of(text("b1", "t")), List.of(), false, null,
                 List.of(text("b1", "t"))), false);
         List<String> providers = new CopyOnWriteArrayList<>();
-        CountDownLatch entered = new CountDownLatch(3);
+        CountDownLatch entered = new CountDownLatch(2);
         CountDownLatch release = new CountDownLatch(1);
         when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {

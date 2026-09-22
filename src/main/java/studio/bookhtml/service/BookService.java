@@ -45,6 +45,9 @@ public class BookService {
     }
     public List<Book> list(){return store.listBooks().stream().map(this::refresh).toList();}
     public Book get(String id){return refresh(store.readBook(id));}
+    /** First paint uses persisted metadata; exact aggregate counts arrive with page summaries. */
+    public Book readingMetadata(String id){return store.readBook(id);}
+    public List<Book> readingLibrary(){return store.listBooks();}
     /** Called under JobService's task lock when archiving, to serialize task admission with the metadata write. */
     Book updateLibrary(String id, String requestedTitle, Boolean archived) {
         if ((requestedTitle == null) == (archived == null))

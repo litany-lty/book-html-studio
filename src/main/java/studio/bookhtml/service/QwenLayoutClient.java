@@ -44,6 +44,10 @@ import java.util.function.BooleanSupplier;
 
 @Component
 public class QwenLayoutClient {
+    private BookContextService bookContext;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    public void setBookContext(BookContextService context) { this.bookContext = context; }
+
     // U5：连接复用。不为每个子请求重新创建 HttpClient。
     // U5：连接复用。不为每个子请求重新创建 HttpClient。
     private static final HttpClient SHARED_HTTP = HttpClient.newBuilder()
@@ -354,6 +358,7 @@ public class QwenLayoutClient {
                 + "suggestion 只是人工校对建议，绝不替换 original。版面偏好=" + safeLayout(layout)
                 + "。sourceBlocks=" + json.writeValueAsString(safeSources)
                 + "\nregion_id=full-overview; full_page_normalized_bbox=[0,0,1,1]";
+        prompt += BookContextService.POLICY + " bookContext=" + (bookContext == null ? "{}" : bookContext.current());
         List<Map<String, Object>> content = visionContent(image, prompt, MAX_TOTAL_IMAGE_BYTES);
         Map<String, Object> body = Map.of(
                 "model", config.getModel(),

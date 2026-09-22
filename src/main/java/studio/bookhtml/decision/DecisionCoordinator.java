@@ -38,6 +38,10 @@ import studio.bookhtml.store.BookStore;
  */
 @Service
 public class DecisionCoordinator {
+    private studio.bookhtml.service.BookContextService bookContext;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    public void setBookContext(studio.bookhtml.service.BookContextService context) { this.bookContext = context; }
+
     public static final String ENDPOINT_IDENTITY = "typesafe-systemone-v1-2026-09-21";
     public static final String ENDPOINT_URL = "https://api.typesafe.ai/v1/systemone";
     public static final String PROVIDER_CONTRACT_VERSION = "v1-2026-09-21";
@@ -757,7 +761,9 @@ public class DecisionCoordinator {
             }
 
             // 状态构建与快照先行持久化
-            List<String> neighbors = neighborTexts(page, block, 2);
+            List<String> neighbors = new ArrayList<>(neighborTexts(page, block, 2));
+            if (bookContext != null) neighbors.add(studio.bookhtml.service.BookContextService.POLICY
+                    + " bookContext=" + bookContext.forPage(bookId, page.pageNumber()));
             DecisionStateBuilder.BuiltState built;
             try {
                 built = stateBuilder.build(ref, frozenOriginal, set, neighbors, false,

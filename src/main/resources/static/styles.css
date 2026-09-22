@@ -1290,3 +1290,13 @@ input, select, textarea, .button, .upload-button, .segmented,
   .editor-field input, .editor-field select, .bbox-grid input, .issue-workbench select { min-height: 44px; }
   .reader-primary-actions .button { min-width: 44px; }
 }
+
+/* Reader audit: bounded, non-overlay status; percentages do not steal reading attention. */
+.page-head > div:first-child { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; min-width: 0; }
+.page-processing-progress { display: inline-block; min-inline-size: 7.6em; font-size: .75rem; line-height: 1.6;
+  font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted, #66645f); }
+.page-processing-progress[hidden] { display: none !important; }
+.page-processing-progress[data-state="settled"] { font-weight: 500; }
+@media (prefers-reduced-motion: reduce) {
+  .page-processing-progress, .page-save-status, .page-head { animation: none !important; transition: none !important; }
+}

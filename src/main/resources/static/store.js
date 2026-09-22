@@ -1,35 +1,5 @@
+import { PageCache } from './page-cache.js';
 export const PAGE_CACHE_LIMIT = 16;
-
-class LruPageCache extends Map {
-  constructor(limit, isProtected) {
-    super();
-    this.limit = limit;
-    this.isProtected = isProtected;
-  }
-  get(key) {
-    if (!super.has(key)) return undefined;
-    const value = super.get(key);
-    super.delete(key);
-    super.set(key, value);
-    return value;
-  }
-  set(key, value) {
-    super.delete(key);
-    super.set(key, value);
-    // 阶段2：有界缓存——淘汰最久未使用页，当前页与未保存草稿所在页不得淘汰
-    while (super.size > this.limit) {
-      let evicted = false;
-      for (const oldest of super.keys()) {
-        if (typeof this.isProtected === 'function' && this.isProtected(oldest)) continue;
-        super.delete(oldest);
-        evicted = true;
-        break;
-      }
-      if (!evicted) break;
-    }
-    return this;
-  }
-}
 
 export const state = {
   config: null,
@@ -62,15 +32,16 @@ export const state = {
   evidenceMode: 'confirmed',
   assistMap: {},
   job: null,
-  // 阶段2：已读页有限 LRU（默认 8 页，可调整的暂定参数）；当前页不得淘汰
-  pageCache: new LruPageCache(PAGE_CACHE_LIMIT, key => key === state.currentPage)
+  // Cached JSON: at most 16 pages / 12 MiB estimated; prefer retaining the current page.
+  pageCache: new PageCache(PAGE_CACHE_LIMIT, 12 * 1024 * 1024, key => key === state.currentPage)
 };
 
 const key = (bookId, suffix) => `paper-studio:${bookId}:${suffix}`;
 
 export function loadPreferences(bookId) {
   try {
-    return JSON.parse(localStorage.getItem(key(bookId, 'reading')) || '{}');
+    const value = JSON.parse(localStorage.getItem(key(bookId, 'reading')) || '{}');
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   } catch (_) { return {}; }
 }
 
@@ -80,7 +51,10 @@ export function savePreferences(bookId, value) {
 }
 
 export function getBookmarks(bookId) {
-  try { return JSON.parse(localStorage.getItem(key(bookId, 'bookmarks')) || '[]'); }
+  try {
+    const value = JSON.parse(localStorage.getItem(key(bookId, 'bookmarks')) || '[]');
+    return Array.isArray(value) ? [...new Set(value.filter(n => Number.isSafeInteger(n) && n > 0))] : [];
+  }
   catch (_) { return []; }
 }
 

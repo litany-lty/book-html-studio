@@ -13,7 +13,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.BooleanSupplier;
 
 /**
@@ -29,6 +32,8 @@ public class QwenAssistCoordinator {
     private QwenTextReviewClient reviewClient;
     private QwenLayoutClient structureClient;
     private TraditionalConverter converter;
+    private ProcessingProgressService progress;
+    @Autowired(required=false) public void setProgress(ProcessingProgressService progress) { this.progress = progress; }
 
     private volatile ExecutorService pool;
 
@@ -57,11 +62,12 @@ public class QwenAssistCoordinator {
             // U5：独立有界出站池；禁止把付费模型请求投到无界 common pool。
             // 页级编排等待结果，但不等出站池自身的任务（无同池 join 死锁）。
             int size = gate == null ? 3 : Math.max(1, gate.maxConcurrent());
-            pool = Executors.newFixedThreadPool(size, runnable -> {
+            pool = new ThreadPoolExecutor(size, size, 0L, TimeUnit.MILLISECONDS,
+                    new ArrayBlockingQueue<>(gate == null ? 24 : gate.maxQueued()), runnable -> {
                 Thread thread = new Thread(runnable, "qwen-assist-chunk");
                 thread.setDaemon(true);
                 return thread;
-            });
+            }, new ThreadPoolExecutor.AbortPolicy());
         }
         return pool;
     }
@@ -118,12 +124,18 @@ public class QwenAssistCoordinator {
                 } catch (CancelledException e) {
                     throw e;
                 } catch (Exception e) {
-                    budget.release(1);
                     warnings.add("全局结构请求失败，已回退到已验证几何顺序，不阻塞局部核对");
                 }
             } else {
                 warnings.add("调用预算不足，跳过全局结构请求，使用已验证几何顺序");
             }
+        }
+
+        var attempt = progress == null ? null : progress.latest(bookId, pageNumber);
+        java.util.UUID progressId = attempt == null ? null : attempt.attemptId();
+        if (progressId != null) {
+            progress.stage(bookId, pageNumber, progressId, "REVIEW");
+            progress.plan(bookId, pageNumber, progressId, "REVIEW_CHUNK", plan.chunks().size());
         }
 
         // 2. 局部核对并发（有界池），按计划顺序收集。
@@ -135,10 +147,24 @@ public class QwenAssistCoordinator {
         if (!plan.chunks().isEmpty()) {
             List<CompletableFuture<IndexedOutcome>> futures = new ArrayList<>();
             for (QwenTaskPlanner.ChunkTask chunk : plan.chunks()) {
-                futures.add(CompletableFuture.supplyAsync(
-                        () -> runChunk(bookId, pageNumber, chunk, parentTexts, regionImages.get(chunk.chunkId()),
-                                overviewImage, foreground, budget, cancelled),
-                        pool()));
+                try {
+                    futures.add(CompletableFuture.supplyAsync(() -> {
+                        if (progressId != null) progress.inFlight(bookId, pageNumber, progressId, 1);
+                        boolean ok = false;
+                        try {
+                            IndexedOutcome out = runChunk(bookId, pageNumber, chunk, parentTexts,
+                                    regionImages.get(chunk.chunkId()), overviewImage, foreground, budget, cancelled);
+                            ok = out.result() != null;
+                            return out;
+                        } finally {
+                            if (progressId != null) progress.unitDone(bookId, pageNumber, progressId, ok);
+                        }
+                    }, pool()));
+                } catch (RejectedExecutionException full) {
+                    if (progressId != null) progress.unitDone(bookId, pageNumber, progressId, false);
+                    futures.add(CompletableFuture.completedFuture(new IndexedOutcome(chunk.plannedOrder(), chunk,
+                            null, "核对队列已满，本组保留原文")));
+                }
             }
             for (int i = 0; i < futures.size(); i++) {
                 try {
@@ -152,6 +178,7 @@ public class QwenAssistCoordinator {
             outcomes.sort(Comparator.comparingInt(IndexedOutcome::order));
         }
 
+        if (cancelled.getAsBoolean()) throw new CancelledException();
         // 3. 确定性合并：结构修改与文字疑点分开；普通核对不改写 original。
         Map<String, Block> merged = new HashMap<>(byId);
         int succeeded = 0, failed = 0;

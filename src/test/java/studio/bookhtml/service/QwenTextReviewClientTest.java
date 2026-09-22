@@ -160,7 +160,7 @@ class QwenTextReviewClientTest {
                 png(), null, true, budget, () -> false);
         assertEquals(1, result.findings().size());
         assertEquals(2, calls.get(), "429 重试受总预算约束");
-        assertEquals(before - 1, budget.remaining(), "重试不重复预留预算");
+        assertEquals(before - 2, budget.remaining(), "每次实际请求（包括 429 重试）都消耗预算");
         assertEquals(0, gate.inFlight(), "槽位已释放");
     }
 
@@ -196,4 +196,54 @@ class QwenTextReviewClientTest {
         assertEquals(1, calls.get(), "缓存命中不调用");
         assertEquals(1, second.findings().size());
     }
+    @Test void bodyDeadlineClosesAnOtherwiseBlockedStreamAndReleasesPermit() {
+        class BlockingBody extends InputStream {
+            private boolean closed;
+            @Override public synchronized int read() throws java.io.IOException {
+                while (!closed) try { wait(); } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt(); throw new java.io.IOException("interrupted");
+                }
+                throw new java.io.IOException("closed");
+            }
+            @Override public synchronized void close() { closed = true; notifyAll(); }
+        }
+        var body = new BlockingBody();
+        HttpResponse<InputStream> response = httpResponse(200, "");
+        when(response.body()).thenReturn(body);
+        var props = config(); props.setTimeoutSeconds(1);
+        var gate = new QwenRequestGate(props);
+        var client = new QwenTextReviewClient(props, json, request -> response);
+        client.setRequestGate(gate);
+        assertTimeoutPreemptively(java.time.Duration.ofSeconds(4), () ->
+            assertThrows(OcrException.class, () -> client.reviewChunk(chunk("deadline", "s", "甲乙"),
+                Map.of("s", "甲乙"), png(), null, true, gate.newBudget(), () -> false)));
+        assertEquals(0, gate.inFlight());
+    }
+
+    @Test void retryBackoffLeavesTheOnlyPhysicalSlotAvailable() throws Exception {
+        var props = config(); props.setMaxConcurrentRequests(1);
+        var gate = new QwenRequestGate(props);
+        var responseClosed = new java.util.concurrent.CountDownLatch(1);
+        HttpResponse<InputStream> limited = httpResponse(429, "");
+        when(limited.headers()).thenReturn(HttpHeaders.of(Map.of("Retry-After", List.of("2")), (a,b) -> true));
+        when(limited.body()).thenReturn(new ByteArrayInputStream(new byte[0]) {
+            @Override public void close() { responseClosed.countDown(); }
+        });
+        var calls = new AtomicInteger();
+        var client = new QwenTextReviewClient(props, json, request -> calls.incrementAndGet() == 1
+                ? limited : httpResponse(200, envelope("backoff", "[]")));
+        client.setRequestGate(gate);
+        var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            var future = executor.submit(() -> client.reviewChunk(chunk("backoff", "s", "甲乙"),
+                    Map.of("s", "甲乙"), png(), null, true, gate.newBudget(), () -> false));
+            assertTrue(responseClosed.await(2, java.util.concurrent.TimeUnit.SECONDS));
+            try (var ignored = gate.acquire(true, java.time.Duration.ofMillis(800))) {
+                assertNotNull(ignored); assertFalse(future.isDone(), "retry is still backing off without a permit");
+            }
+            future.get(4, java.util.concurrent.TimeUnit.SECONDS);
+            assertEquals(2, calls.get());
+        } finally { executor.shutdownNow(); }
+    }
+
 }

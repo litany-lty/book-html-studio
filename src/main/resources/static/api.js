@@ -21,7 +21,7 @@ async function request(path, options = {}, timeout = 30000) {
       failure.body = body;
       throw failure;
     }
-    return response.status === 204 ? null : response.json();
+    return response.status === 204 ? null : await response.json();
   } catch (error) {
     // 阶段2：快速翻页丢弃过时请求——外部取消不提示超时，后端仍以自身预算为准
     if (error.name === 'AbortError' && externalSignal?.aborted) {
@@ -46,8 +46,8 @@ export const api = {
   config: () => request('/config'),
   settings: () => request('/settings'),
   saveSettings: (body, csrfToken) => request('/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Settings-Token': csrfToken }, body: JSON.stringify(body) }),
-  books: () => request('/books'),
-  book: id => request(`/books/${encodeURIComponent(id)}`),
+  books: () => request('/books?reading=true'),
+  book: id => request(`/books/${encodeURIComponent(id)}?reading=true`),
   updateLibraryBook: (id, body) => request(`/books/${encodeURIComponent(id)}/library`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   bookUsage: (id, cursor = null, limit = 50, asOf = null, signal, offset = null) => request(`/books/${encodeURIComponent(id)}/usage?${new URLSearchParams({ limit: String(limit), ...(cursor ? { cursor } : offset != null ? { offset: String(offset) } : {}), ...(asOf ? { asOf } : {}) })}`, signal ? { signal } : {}),
   upload(file) {
@@ -57,7 +57,8 @@ export const api = {
   },
   pages: id => request(`/books/${encodeURIComponent(id)}/pages`),
   outline: id => request(`/books/${encodeURIComponent(id)}/outline`),
-  page: (id, n, signal) => request(`/books/${encodeURIComponent(id)}/pages/${n}`, signal ? { signal } : {}),
+  page: (id, n, signal) => request(`/books/${encodeURIComponent(id)}/pages/${n}?reading=true`, signal ? { signal } : {}),
+  pageProcessing: (id, n, signal) => request(`/books/${encodeURIComponent(id)}/pages/${n}/processing`, signal ? { signal } : {}),
   issueMetadata: (id, n, issueId, signal) => request(`/books/${encodeURIComponent(id)}/pages/${n}/issues/${encodeURIComponent(issueId)}`, signal ? { signal } : {}),
   pageImage: (id, n, width = 1800) => `${API_ROOT}/books/${encodeURIComponent(id)}/pages/${n}/image?width=${width}`,
   figureImage: (id, n, blockId) => `${API_ROOT}/books/${encodeURIComponent(id)}/pages/${n}/figures/${encodeURIComponent(blockId)}`,

@@ -1,3 +1,4 @@
+import { createPageProgress } from './page-progress.js';
 import { api } from './api.js';
 import { state, loadPreferences, savePreferences, getBookmarks, setBookmarks, cloneBlocks, isSameSession, canonicalJson } from './store.js';
 import { renderPaper, qualityOf, statusMessage } from './reader.js';
@@ -12,6 +13,7 @@ import { recordAnchor, restoreAnchor } from './reading-anchor.js';
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
+const pageProgress = createPageProgress({ api, state, element: $('#page-processing-progress') });
 const activeJobs = new Set(['QUEUED', 'RUNNING', 'CANCELLING']);
 const readerNavigation = globalThis.BookReaderNavigation;
 let cancelDrawing = null;
@@ -69,6 +71,7 @@ function renderReadingWindowStatus(snapshot = readingSnapshot) {
   // U4：当前页真实阶段来自后端事件（非计时推测）；未知剩余工作量不显示百分比。
   const centerInfo = (snapshot?.pages || []).find(p => Number(p.pageNumber) === state.currentPage);
   const proc = centerInfo?.processing || null;
+  if (proc) pageProgress.accept(proc);
   const stageLabels = { PREPARING: '正在准备', OCR: '正在识别文字', STRUCTURE: '正在整理版面', REVIEW: '正在核对疑字', VALIDATING: '正在校验', PUBLISHING: '正在发布' };
   const stageText = proc && proc.lifecycle === 'RUNNING' && stageLabels[proc.stage] ? stageLabels[proc.stage] : null;
   $('#reading-window-status').textContent = deferredReady && state.book && deferredReady.bookId === state.book.id && deferredReady.page === state.currentPage
@@ -586,13 +589,11 @@ async function reloadCurrentPage() {
   // 保留已有 blocks 供视觉平滑过渡，不闪烁、不退回原图
   state.page = {
     ...state.page,
-    status: 'PROCESSING',
-    isReprocessing: true,
-    error: null
+    isReprocessing: true
   };
   if (state.pageCache.has(pageNum)) {
     const cached = state.pageCache.get(pageNum);
-    state.pageCache.set(pageNum, { ...cached, status: 'PROCESSING', isReprocessing: true });
+    state.pageCache.set(pageNum, { ...cached, isReprocessing: true });
   }
 
   renderCurrent();
@@ -696,6 +697,19 @@ async function refreshOutline(bookId = state.book?.id) {
     if (requestId !== outlineRequest || state.book?.id !== bookId) return false;
     state.outline = Array.isArray(outline) ? outline : [];
     state.outlineStatus = 'ready'; renderToc();
+    // A full profile may have completed after the fast first paint. Refresh only its presentation,
+    // without resetting editor identity, draft text, selection, focus or the reading position.
+    const number = state.currentPage, epoch = state.editorEpoch;
+    if (state.page && !currentPageProtected()) void api.page(bookId, number).then(fresh => {
+      if (requestId !== outlineRequest || state.book?.id !== bookId || state.currentPage !== number ||
+          state.editorEpoch !== epoch || currentPageProtected() || fresh.revision !== state.page?.revision ||
+          Number(fresh.presentation?.profileRevision || 0) <= Number(state.page?.presentation?.profileRevision || 0)) return;
+      const root = $('#reader'), anchor = recordAnchor(root), scrollTop = root.scrollTop;
+      state.page = {...state.page, presentation: fresh.presentation};
+      state.pageCache.set(number, state.page); renderCurrent(false);
+      requestAnimationFrame(() => { if (state.book?.id === bookId && state.currentPage === number &&
+          !restoreAnchor(root, anchor)) root.scrollTop = scrollTop; });
+    }).catch(() => {});
     return true;
   } catch (_) {
     if (requestId !== outlineRequest || state.book?.id !== bookId) return false;
@@ -1167,6 +1181,7 @@ function syncOverlays() {
 
 function renderCurrent(full = true) {
   if (!state.page || !state.book) return;
+  pageProgress.select();
   const paper = $('#paper');
   const message = renderPaper(paper, {
     book: state.book,
@@ -1268,6 +1283,7 @@ async function goToPage(n, options = {}) {
     resetConvertingState(n);
     renderJobHeading();
     if (!readingWindow.active()) renderReadingWindowStatus(null);
+    pageProgress.select();
     readingWindow.navigated();
   } else if (!readingWindow.active()) readingWindow.prefetch();
   const requestId = ++pageRequest, bookId = state.book.id;
@@ -1292,7 +1308,8 @@ async function goToPage(n, options = {}) {
     if (cached) void api.page(bookId, n, fetchSignal).then(fresh => {
       if (requestId !== pageRequest || state.book?.id !== bookId || state.currentPage !== n) return;
       if (olderRevision(fresh, state.page) || olderRevision(fresh, state.pageCache.get(n)) ||
-          (fresh.revision === cached.revision && fresh.status === cached.status)) return;
+          (fresh.revision === cached.revision && fresh.status === cached.status &&
+           Number(fresh.presentation?.profileRevision || 0) <= Number(cached.presentation?.profileRevision || 0))) return;
       if (fresh.status === 'READY') acceptReadyPage(n, fresh);
       else if (!currentPageProtected()) state.pageCache.set(n, fresh);
     }).catch(error => {
@@ -1336,28 +1353,40 @@ async function selectBook(id) {
   // J08：切书换作用域，辅助推荐映射清空
   state.assistMap = {};
   if (!id) {
-    state.book = null; state.summaries = []; state.focus = false; document.body.classList.remove('focus-reading'); $('#workspace').classList.add('is-empty'); $('#empty-state').hidden = false; $('#reader-shell').hidden = true; renderBookMeta(); renderToc(); return;
+    state.book = null; pageProgress.select(); state.summaries = []; state.focus = false; document.body.classList.remove('focus-reading'); $('#workspace').classList.add('is-empty'); $('#empty-state').hidden = false; $('#reader-shell').hidden = true; renderBookMeta(); renderToc(); return;
   }
   try {
-    const [book, summaries] = await Promise.all([api.book(id), api.pages(id)]);
+    const book = await api.book(id);
     if (requestId !== bookRequest) return;
-    state.book = book; state.summaries = Array.isArray(summaries) ? summaries : []; $('#book-select').value = id;
+    state.book = book; state.summaries = []; $('#book-select').value = id;
     $('#workspace').classList.remove('is-empty'); $('#empty-state').hidden = true; $('#reader-shell').hidden = false;
     renderBookMeta(); renderBookmarks();
     const finiteDefault = Math.min(20, book.totalPages);
     if (!$('#all-pages').checked) $('#page-range').value = finiteDefault > 1 ? `1-${finiteDefault}` : '1';
     const prefs = loadPreferences(id);
     state.view = ['original', 'facsimile', 'reading'].includes(prefs.view) ? prefs.view : 'reading';
-    state.script = prefs.script === 'original' ? 'original' : 'simplified'; state.fontSize = Number(prefs.fontSize || 20); state.lineHeight = Number(prefs.lineHeight || 1.8); state.focus = Boolean(prefs.focus);
+    state.script = prefs.script === 'original' ? 'original' : 'simplified'; state.fontSize = Math.min(40, Math.max(12, Number(prefs.fontSize) || 20)); state.lineHeight = Math.min(3, Math.max(1.2, Number(prefs.lineHeight) || 1.8)); state.focus = Boolean(prefs.focus);
     // J08：阅读依据默认保真（已确认）；旧偏好无此项，不迁移、不把旧显示当自动确认授权
     state.evidenceMode = prefs.evidenceMode === 'assisted' ? 'assisted' : 'confirmed'; state.assistMap = {};
     $('#font-size').value = state.fontSize; $('#font-output').value = state.fontSize; $('#line-height').value = state.lineHeight; $('#line-output').value = state.lineHeight;
-    const page = Math.min(book.totalPages, Math.max(1, Number(prefs.page || 1)));
+    const page = Math.min(book.totalPages, Math.max(1, (Number.isFinite(Number(prefs.page)) ? Math.trunc(Number(prefs.page)) : 1)));
     state.currentPage = page;
-    const outlinePromise = refreshOutline(id);
+    pageProgress.select();
+    // Current page gets the network/disk first; whole-book metadata is not on its critical path.
     await goToPage(page, { force: true, restoreScroll: true, scrollTop: prefs.scrollTop, skipSavePosition: true });
     if (requestId !== bookRequest) return;
-    await Promise.all([refreshJob(), outlinePromise]);
+    const summariesPromise = api.pages(id).then(summaries => {
+      if (requestId !== bookRequest || state.book?.id !== id) return;
+      const current = new Map(state.summaries.map(page => [Number(page.pageNumber), page]));
+      state.summaries = (Array.isArray(summaries) ? summaries : []).map(page => {
+        const newer = current.get(Number(page.pageNumber));
+        return newer && olderRevision(page, newer) ? newer : page;
+      });
+      state.book.processedPages = state.summaries.filter(p => p.status === 'READY').length;
+      state.book.reviewedPages = state.summaries.filter(p => p.reviewed).length;
+      renderBookMeta(); renderToc();
+    });
+    await Promise.all([refreshJob(), refreshOutline(id), summariesPromise]);
     if (requestId !== bookRequest) return;
     // U2/SAFE-12：选书不自动启动云端随读。页面图片外发须经用户在任务入口的明确授权
     // （授权绑定本次任务）；自动启动会绕过授权并与“默认关闭不识别”的验收冲突。
@@ -1377,6 +1406,7 @@ function validateRange(value, total) {
 
 function renderJob(job) {
   state.job = job;
+  pageProgress.refresh();
   const active = activeJobs.has(job.status);
   $('#job-progress').hidden = job.status === 'IDLE';
   $('#cancel-job').hidden = !active;
@@ -1478,7 +1508,8 @@ async function refreshBookData(id = state.book?.id, requestId = bookRequest) {
   const [book, summaries] = await Promise.all([api.book(id), api.pages(id)]);
   if (!jobSessionMatches(id, requestId)) return;
   const protectedPage = currentPageProtected() && state.page ? state.page : null;
-  state.book = book; state.books = state.books.map(item => item.id === id ? book : item); state.summaries = summaries; state.pageCache.clear();
+  state.book = {...book, processedPages: summaries.filter(p => p.status === 'READY').length,
+    reviewedPages: summaries.filter(p => p.reviewed).length}; state.books = state.books.map(item => item.id === id ? state.book : item); state.summaries = summaries; state.pageCache.clear();
   if (protectedPage) state.pageCache.set(state.currentPage, protectedPage);
   renderBooks(); renderBookMeta(); renderToc();
   await refreshOutline(id);

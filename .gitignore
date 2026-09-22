@@ -11,3 +11,19 @@
 *.iml
 __pycache__/
 *.pyc
+
+# Never version local credentials, private keys, dumps or verification output.
+.env.*
+!.env.example
+.envrc
+.settings/
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+/test-results/
+/audit-evidence/
+/credentials.json
+/service-account*.json

@@ -32,8 +32,8 @@ class SettingsControllerTest {
         MockHttpServletRequest get = request("GET");
         Map<String, Object> initial = controller.get(get).getBody();
         String token = (String) initial.get("csrfToken");
-        assertTrue(json.writeValueAsString(initial).contains("env-studio-secret"));
-        assertEquals("env-studio-secret", ((Map<?, ?>)((Map<?, ?>) initial.get("ocr")).get("paddleAiStudio")).get("accessToken"));
+        assertFalse(json.writeValueAsString(initial).contains("env-studio-secret"));
+        assertFalse(((Map<?, ?>)((Map<?, ?>) initial.get("ocr")).get("paddleAiStudio")).containsKey("accessToken"));
         assertTrue(json.writeValueAsString(initial).contains("accessTokenSet"));
         assertEquals("no-store", controller.get(get).getHeaders().getCacheControl());
 
@@ -42,7 +42,10 @@ class SettingsControllerTest {
         put.addHeader("X-Settings-Token", token);
         put.addHeader("Origin", "http://127.0.0.1:18765");
         put.setContent("{\"revision\":0,\"ocr\":{\"paddleAiStudio\":{\"accessToken\":\"\"},\"ppocr\":{\"apiKey\":\"new-key\"}},\"qwen\":{\"region\":\"ap-southeast-1\",\"workspaceId\":\"llm-123\"}}".getBytes(StandardCharsets.UTF_8));
-        assertEquals(1L, controller.put(put).getBody().get("revision"));
+        Map<String, Object> updated = controller.put(put).getBody();
+        assertEquals(1L, updated.get("revision"));
+        assertFalse(json.writeValueAsString(updated).contains("new-key"));
+        assertFalse(json.writeValueAsString(updated).contains("env-studio-secret"));
         assertEquals("env-studio-secret", settings.state().paddleAccessToken());
         assertEquals("new-key", settings.state().ppocrApiKey());
         assertEquals("https://llm-123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
@@ -158,6 +161,13 @@ class SettingsControllerTest {
         assertEquals(3L, jev.getMonetaryBudgetMinor());
         assertTrue(jev.isAllowCloudData());
         assertEquals("jev-key", jev.getApiKey());
+        String publicView = json.writeValueAsString(settings.view());
+        assertFalse(publicView.contains("qwen-key"));
+        assertFalse(publicView.contains("jev-key"));
+        assertFalse(publicView.contains("env-studio-secret"));
+        assertFalse(publicView.contains("\"apiKey\""));
+        assertFalse(publicView.contains("\"secretKey\""));
+        assertFalse(settings.state().toString().contains("jev-key"));
         settings.update(json.readTree("{\"revision\":1,\"jev\":{\"enabled\":false}}"));
         assertEquals("OFF", jev.getMode());
         assertFalse(gate.check(new DecisionOutboundGate.GateRequest(

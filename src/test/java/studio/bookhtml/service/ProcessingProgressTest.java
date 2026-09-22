@@ -121,6 +121,8 @@ class ProcessingProgressTest {
         assertTrue(snap.canRead());
         enrichRelease.countDown();
         await(() -> "增强正文1".equals(store.readPage(book.id(), 1).blocks().get(0).original()));
+        // The durable page is visible just before its independent in-memory progress event.
+        await(() -> "SUCCEEDED".equals(progress.latest(book.id(), 1).lifecycle()));
         ProcessingSnapshot done = progress.latest(book.id(), 1);
         assertEquals("ENHANCED", done.contentAvailability());
         assertEquals("SUCCEEDED", done.lifecycle());

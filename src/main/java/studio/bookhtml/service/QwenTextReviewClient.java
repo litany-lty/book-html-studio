@@ -35,11 +35,22 @@ import java.util.function.BooleanSupplier;
  */
 @Component
 public class QwenTextReviewClient {
-    static final String PROMPT_VERSION = "qwen-review-v1";
+    private BookContextService bookContext;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    public void setBookContext(BookContextService context) { this.bookContext = context; }
+
+    static final String PROMPT_VERSION = "qwen-review-v2-book-context";
     private static final int MAX_RESPONSE_BYTES = 512 * 1024;
     private static final int MAX_TEXT = 1000;
     private static final int MAX_CACHE_ENTRIES = 128;
 
+    private static final java.util.concurrent.ScheduledThreadPoolExecutor BODY_WATCHDOG = bodyWatchdog();
+    private static java.util.concurrent.ScheduledThreadPoolExecutor bodyWatchdog() {
+        var pool = new java.util.concurrent.ScheduledThreadPoolExecutor(2, r -> {
+            Thread thread = new Thread(r, "qwen-body-deadline"); thread.setDaemon(true); return thread;
+        });
+        pool.setRemoveOnCancelPolicy(true); return pool;
+    }
     private static final HttpClient SHARED_HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10)).build();
     private static HttpResponse<InputStream> sharedSend(HttpRequest request) throws Exception {
@@ -108,17 +119,20 @@ public class QwenTextReviewClient {
         if (!configured()) throw new ApiException(HttpStatus.BAD_REQUEST, "Qwen 局部核对尚未配置");
         if (task == null || task.ownedRanges().isEmpty())
             throw new ApiException(HttpStatus.BAD_REQUEST, "核对组缺少写入区间");
-        if (!budget.reserve(1)) throw new OcrException("页面调用预算不足，剩余范围保留原文，明确部分增强");
+
         {
             Map<String, String> slices = sliceTexts(task, parentTexts);
             // U5：缓存身份含调用方书/页；身份变化不误命中。无上下文时退化为文本键（测试直调）。
             UsageContext.Value caller = UsageContext.current();
-            String cacheKey = cacheKey(task, slices, caller == null ? null
-                    : caller.bookId() + ":" + caller.pageNumber());
+            String contextJson = bookContext == null ? "{}" : bookContext.current();
+            // Freeze the evidence for the cache key AND physical request, including image bytes.
+            String identity = (caller == null ? "" : caller.bookId() + ":" + caller.pageNumber())
+                    + "|" + contextJson + "|" + parentTexts + "|" + task.contextRanges()
+                    + "|" + imageDigest(regionImage) + "|" + imageDigest(overviewImage);
+            String cacheKey = cacheKey(task, slices, identity);
             synchronized (cache) {
                 ReviewResult hit = cache.get(cacheKey);
                 if (hit != null) {
-                    budget.release(1);
                     if (usage != null) {
                         try { usage.cacheReused("qwen", config.getModel()); }
                         catch (Exception ignored) {}
@@ -126,27 +140,31 @@ public class QwenTextReviewClient {
                     return hit;
                 }
             }
-            OcrException lastRetryable = null;
             for (int attempt = 0; attempt <= 2; attempt++) {
+                if (cancelled.getAsBoolean()) throw new CancelledException();
                 QwenRequestGate.Permit permit = acquire(foreground);
-                if (permit == null) throw new OcrException("Qwen 并发队列已满，剩余范围保留原文");
+                if (gate != null && permit == null) throw new OcrException("Qwen 并发队列已满，剩余范围保留原文");
+                long delay;
                 try {
-                    return executeOnce(task, slices, parentTexts, regionImage, overviewImage, cancelled, cacheKey);
+                    if (cancelled.getAsBoolean()) throw new CancelledException();
+                    if (!budget.reserve(1)) throw new OcrException("页面调用预算不足，剩余范围保留原文，明确部分增强");
+                    return executeOnce(task, slices, parentTexts, regionImage, overviewImage, cancelled, cacheKey, contextJson);
                 } catch (RateLimitedException rateLimited) {
-                    if (attempt >= 2 || cancelled.getAsBoolean()) throw new OcrException(
-                            "Qwen 请求频率受限且重试预算用尽，剩余范围保留原文");
-                    sleepWithoutSlot(rateLimited.retryAfterMillis());
-                    lastRetryable = new OcrException("Qwen 请求频率受限");
+                    if (attempt >= 2) throw new OcrException("Qwen 请求频率受限，剩余范围保留原文");
+                    delay = rateLimited.retryAfterMillis();
+                } catch (CancelledException e) {
+                    throw e;
                 } catch (OcrException e) {
                     throw e;
                 } catch (Exception e) {
                     throw new OcrException("Qwen 局部核对请求失败");
                 } finally {
-                    // U5：成功/失败都释放；退避等待发生在释放之后（不持槽 sleep）。
                     closeQuietly(permit);
                 }
+                // Every retry consumes a physical-call budget, and backoff never holds a slot.
+                sleepWithoutSlot(delay);
             }
-            throw lastRetryable == null ? new OcrException("Qwen 局部核对请求失败") : lastRetryable;
+            throw new OcrException("Qwen 局部核对请求失败");
         }
     }
 
@@ -209,16 +227,17 @@ public class QwenTextReviewClient {
     private ReviewResult executeOnce(QwenTaskPlanner.ChunkTask task, Map<String, String> slices,
                                      Map<String, String> parentTexts,
                                      byte[] regionImage, byte[] overviewImage,
-                                     BooleanSupplier cancelled, String cacheKey) throws Exception {
+                                     BooleanSupplier cancelled, String cacheKey, String contextJson) throws Exception {
         if (cancelled.getAsBoolean()) throw new CancelledException();
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(Math.max(1, config.getTimeoutSeconds()));
-        HttpRequest request = request(task, slices, parentTexts, regionImage, overviewImage);
+        HttpRequest request = request(task, slices, parentTexts, regionImage, overviewImage, contextJson);
         String attemptId = null;
         boolean responseSeen = false, parsed = false;
         if (usage != null) {
             try { attemptId = usage.start("qwen", config.getModel()); }
             catch (Exception e) { attemptId = null; }
         }
+        try {
         HttpResponse<InputStream> response = transport.send(request);
         if (response == null) throw new OcrException("Qwen 局部核对未返回响应");
         responseSeen = true;
@@ -254,8 +273,9 @@ public class QwenTextReviewClient {
                 cache.put(cacheKey, result);
             }
             return result;
+        }
         } finally {
-            if (usage != null && attemptId != null && responseSeen && !parsed) {
+            if (usage != null && attemptId != null && !parsed) {
                 try { usage.failed(attemptId); } catch (Exception ignored) {}
             }
         }
@@ -342,6 +362,12 @@ public class QwenTextReviewClient {
         }
     }
 
+    private static String imageDigest(byte[] bytes) {
+        if (bytes == null) return "none";
+        try { return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)); }
+        catch (java.security.NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
+    }
+
     private String cacheKey(QwenTaskPlanner.ChunkTask task, Map<String, String> sliceTexts,
                               String callerIdentity) {
         StringBuilder raw = new StringBuilder(config.getModel()).append('|')
@@ -364,6 +390,13 @@ public class QwenTextReviewClient {
     HttpRequest request(QwenTaskPlanner.ChunkTask task, Map<String, String> slices,
                         Map<String, String> parentTexts,
                         byte[] regionImage, byte[] overviewImage) throws Exception {
+        return request(task, slices, parentTexts, regionImage, overviewImage,
+                bookContext == null ? "{}" : bookContext.current());
+    }
+
+    private HttpRequest request(QwenTaskPlanner.ChunkTask task, Map<String, String> slices,
+                        Map<String, String> parentTexts, byte[] regionImage, byte[] overviewImage,
+                        String contextJson) throws Exception {
         if (regionImage == null || regionImage.length == 0)
             throw new ApiException(HttpStatus.BAD_REQUEST, "核对组缺少区域图");
         List<Map<String, Object>> owned = new ArrayList<>();
@@ -404,6 +437,7 @@ public class QwenTextReviewClient {
                 + "quote 必须与该范围逐字相等。只用于理解的上下文标为 readOnly，不得对其产生发现。"
                 + "owned=" + json.writeValueAsString(owned)
                 + "; context=" + json.writeValueAsString(context);
+        prompt += BookContextService.POLICY + " bookContext=" + contextJson;
         List<Map<String, Object>> content = new ArrayList<>();
         content.add(Map.of("type", "text", "text", prompt));
         content.add(Map.of("type", "text", "text",
@@ -436,23 +470,37 @@ public class QwenTextReviewClient {
     private static long parseRetryAfterMillis(String value) {
         if (value == null) return 1_000;
         try {
-            return Math.min(10_000, Long.parseLong(value.strip()) * 1_000);
+            return Math.max(0, Math.min(10, Long.parseLong(value.strip()))) * 1_000;
         } catch (NumberFormatException e) {
             return 1_000;
         }
     }
 
     private static byte[] readBody(InputStream body, long deadline, BooleanSupplier cancelled) throws Exception {
-        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-        byte[] buffer = new byte[32 * 1024];
-        int read;
-        while ((read = body.read(buffer)) != -1) {
+        if (body == null) throw new OcrException("Qwen 局部核对响应为空");
+        var closed = new java.util.concurrent.atomic.AtomicBoolean();
+        var watcher = BODY_WATCHDOG.scheduleWithFixedDelay(() -> {
+            if ((System.nanoTime() >= deadline || cancelled.getAsBoolean()) && closed.compareAndSet(false, true)) {
+                try { body.close(); } catch (Exception ignored) { }
+            }
+        }, 0, 100, TimeUnit.MILLISECONDS);
+        try {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[32 * 1024];
+            while (true) {
+                if (cancelled.getAsBoolean()) throw new CancelledException();
+                if (System.nanoTime() >= deadline) throw new UnknownOutcomeException("Qwen 局部核对读取超时，远端结果未知");
+                int read = body.read(buffer);
+                if (read < 0) break;
+                out.write(buffer, 0, read);
+                if (out.size() > MAX_RESPONSE_BYTES) throw new OcrException("Qwen 局部核对返回内容过大");
+            }
             if (cancelled.getAsBoolean()) throw new CancelledException();
-            if (System.nanoTime() > deadline) throw new UnknownOutcomeException("Qwen 局部核对读取超时，远端结果未知");
-            out.write(buffer, 0, read);
-            if (out.size() > MAX_RESPONSE_BYTES) break;
+            if (System.nanoTime() >= deadline) throw new UnknownOutcomeException("Qwen 局部核对读取超时，远端结果未知");
+            return out.toByteArray();
+        } finally {
+            watcher.cancel(false);
         }
-        return out.toByteArray();
     }
 
     private static String stripFence(String text) {

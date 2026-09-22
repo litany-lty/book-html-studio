@@ -24,7 +24,8 @@ public record ProcessingSnapshot(int schemaVersion,
                                  boolean canRead,
                                  boolean canStop,
                                  boolean canRetry,
-                                 String messageCode) {
+                                 String messageCode,
+                                 @com.fasterxml.jackson.annotation.JsonProperty("percent") int percent) {
     // 内容可用性：ORIGINAL_ONLY / OCR_READABLE / ENHANCED / MANUAL
     // 任务生命周期：QUEUED / RUNNING / DRAINING / SUCCEEDED / PARTIAL / FAILED / CANCELLED / INTERRUPTED
     // 当前阶段：PREPARING / OCR / STRUCTURE / REVIEW / VALIDATING / PUBLISHING
@@ -36,12 +37,16 @@ public record ProcessingSnapshot(int schemaVersion,
                              int cancelled,
                              int inFlight) {}
 
+    /** A monotone, event-based workflow completion percentage, not OCR accuracy or an ETA. */
+    @com.fasterxml.jackson.annotation.JsonProperty("progressBasis")
+    public String progressBasis() { return "WORKFLOW_MILESTONES"; }
+
     public static ProcessingSnapshot idle(String bookId, int pageNumber, int publishedRevision,
                                           String availability) {
         Instant now = Instant.now();
         return new ProcessingSnapshot(2, bookId, pageNumber, null, 0, "SUCCEEDED", "PUBLISHING",
                 availability, publishedRevision, now, now, now,
                 new UnitCounts("PAGE", 1, 1, 0, 0, 0, 0),
-                true, false, false, "IDLE_NO_TASK");
+                true, false, false, "IDLE_NO_TASK", 100);
     }
 }
