@@ -1,7 +1,7 @@
 name: Reader safety and streaming contracts
 on:
   push:
-    branches: [main, audit/reader-stream-context-security-20260922]
+    branches: [main, audit/reader-priority-context-progress-20260922]
   pull_request:
 permissions:
   contents: read
