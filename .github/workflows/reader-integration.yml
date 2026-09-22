@@ -91,7 +91,7 @@ jobs:
       - name: Publish only the exact verified source tree on the integration branch
         run: |
           python3 .integration/apply.py
-          test "$(git write-tree)" = '40134261c9f8fd00d4b6686d4ed1df8c85069b9b'
+          test "$(git write-tree)" = 'ce7df5b0750a70a6fdfc7856af44426e95b875da'
           branch='refs/heads/integrate/reader-20260922'
           test "$(git ls-remote origin "$branch" | cut -f1)" = "$GITHUB_SHA"
           git config user.name 'github-actions[bot]'

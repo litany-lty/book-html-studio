@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-EXPECTED_TREE = '40134261c9f8fd00d4b6686d4ed1df8c85069b9b'
+EXPECTED_TREE = 'ce7df5b0750a70a6fdfc7856af44426e95b875da'
 stage = Path('.integration')
 compressed = base64.b64decode(''.join((stage / f'part{i}.b64').read_text() for i in range(4)), validate=True)
 if hashlib.sha256(compressed).hexdigest() != '659276781f928b1397314842d43af69f6e7d293e766b357a8c36821e70647494':
