@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import studio.bookhtml.domain.Block;
 import studio.bookhtml.domain.Book;
+import studio.bookhtml.domain.BookLayoutProfile;
 import studio.bookhtml.domain.Page;
 import studio.bookhtml.domain.ContentIssue;
 import studio.bookhtml.store.BookStore;
@@ -17,6 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -301,6 +303,59 @@ class ExportServiceTest {
         assertTrue(app.contains("p.sourcePageNumber||state.page"));
         verify(store, never()).readPage("selection", 1);
         verify(store, never()).readPage("selection", 3);
+    }
+
+    @Test
+    void exportsSelectedPagesWithFrozenBookProfileExcludingRunningHeaders() throws Exception {
+        // U3-CONS-05/U6：只导出 2、5 页，仍使用冻结的全书画像；书眉不当标题，且与在线一致。
+        BookService books = mock(BookService.class);
+        BookStore store = mock(BookStore.class);
+        PdfService pdf = mock(PdfService.class);
+        ExportService service = new ExportService(books, store, pdf, new ObjectMapper());
+        BookPresentationService presentation = new BookPresentationService(store);
+        presentation.setOverrides(new PresentationOverrideService(store));
+        service.setPresentation(presentation);
+        Book book = new Book("frozen", "样本书", "source.pdf", 10, Instant.EPOCH, Instant.EPOCH, 0, 0);
+        when(books.get("frozen")).thenReturn(book);
+        when(store.readBook("frozen")).thenReturn(book);
+        Path source = tempDirectory.resolve("frozen.pdf");
+        Files.writeString(source, "%PDF-sample");
+        when(store.pdf("frozen")).thenReturn(source);
+        for (int n = 1; n <= 10; n++) {
+            List<Block> blocks = new ArrayList<>();
+            blocks.add(new Block("h-" + n, "heading", 0, new double[]{0.1, 0.02, 0.8, 0.04},
+                    "horizontal-tb", "紙頁工坊", "紙頁工坊", 0.9, false, false, 2, "paddle",
+                    List.of("h-" + n), null, new double[]{10, 20, 50, 10}, List.of()));
+            if (n == 2) {
+                blocks.add(new Block("ch-2", "heading", 1, new double[]{0.1, 0.4, 0.8, 0.06},
+                        "horizontal-tb", "第二章", "第二章", 0.9, false, false, 1, "paddle",
+                        List.of("ch-2"), null, new double[]{10, 40, 50, 10}, List.of()));
+            }
+            blocks.add(new Block("b-" + n, "text", 2, new double[]{0.1, 0.6, 0.5, 0.1},
+                    "horizontal-tb", "正文" + n, "正文" + n, 0.9, false, false, null, "paddle",
+                    List.of("b-" + n), null, new double[]{10, 60, 50, 10}, List.of()));
+            Page page = new Page(n, 600, 800, "READY", "paddle", List.copyOf(blocks), List.of(),
+                    false, null, List.copyOf(blocks));
+            when(store.readPage("frozen", n)).thenReturn(page);
+        }
+        when(pdf.render(source, 2, 1800)).thenReturn(new BufferedImage(120, 160, BufferedImage.TYPE_INT_RGB));
+        when(pdf.render(source, 5, 1800)).thenReturn(new BufferedImage(120, 160, BufferedImage.TYPE_INT_RGB));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        service.writeZip("frozen", output, "2,5");
+        String data = text(unzip(output.toByteArray()), "assets/book.js");
+        // 只断言目录数组段（其后搜索索引保留源文本是合规的，不得为降噪删源索引）。
+        int outlineStart = data.indexOf("\"outline\":[");
+        assertTrue(outlineStart >= 0, "导出包含目录数组");
+        int outlineEnd = data.indexOf(']', outlineStart);
+        String outlineJson = data.substring(outlineStart, outlineEnd);
+        assertFalse(outlineJson.contains("紙頁工坊"), "选页导出仍用冻结全书画像，书眉不当标题");
+        assertTrue(outlineJson.contains("第二章"), "真章节保留并重映射");
+        // 在线同一冻结画像按页筛选结果一致（目录、页眉处理、正文顺序一致）。
+        BookLayoutProfile frozen = presentation.buildProfile("frozen");
+        List<OutlineService.OutlineEntry> online = presentation.outlineForPages("frozen",
+                List.of(store.readPage("frozen", 2), store.readPage("frozen", 5)), frozen);
+        assertEquals(1, online.size());
+        assertEquals("第二章", online.get(0).title());
     }
 
     private static Map<String, byte[]> unzip(byte[] bytes) throws Exception {
