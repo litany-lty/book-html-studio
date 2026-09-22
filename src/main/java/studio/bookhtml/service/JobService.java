@@ -29,14 +29,20 @@ public class JobService {
     private final Map<Integer, Running> activeReserved = new ConcurrentHashMap<>();
     // U2：页面级 attempt 登记（调度用；最终写入权限仍以 BookStore 锁内校验为准）。
     private final Map<String, PageAttempt> pageAttempts = new ConcurrentHashMap<>();
-    // U2：重处理操作幂等（reservation:operationId → 请求指纹），同 ID 同参数返回同一任务。
-    private final Map<String, String> operationFingerprints = new ConcurrentHashMap<>();
-    private final Map<String, Job> operationJobs = new ConcurrentHashMap<>();
+    private final java.time.Clock operationClock;
+    private static final java.time.Duration OPERATION_RETENTION = java.time.Duration.ofDays(30);
+    private record PendingOperation(String key, String fingerprint) {}
     private UUID readingReservation;
     private String readingReservationBookId;
     private SettingsService settings;
     private ProcessingProgressService progress;
-    public JobService(BookStore store,BookService books,PageProcessor processor){this.store=store;this.books=books;this.processor=processor;}
+    @org.springframework.beans.factory.annotation.Autowired
+    public JobService(BookStore store,BookService books,PageProcessor processor){
+        this(store, books, processor, java.time.Clock.systemUTC());
+    }
+    JobService(BookStore store, BookService books, PageProcessor processor, java.time.Clock clock) {
+        this.store=store; this.books=books; this.processor=processor; this.operationClock=Objects.requireNonNull(clock);
+    }
     @org.springframework.beans.factory.annotation.Autowired public void setSettings(SettingsService settings){this.settings=settings;}
     /** U4：阶段事件聚合（测试可注入；缺省关闭，不影响正式保存）。 */
     @org.springframework.beans.factory.annotation.Autowired(required=false) public void setProgress(ProcessingProgressService progress){this.progress=progress;}
@@ -145,6 +151,10 @@ public class JobService {
         return books.updateLibrary(bookId,title,archived);
     }
     public synchronized Job submitReserved(UUID reservation, String bookId, JobRequest request) {
+        return submitReserved(reservation, bookId, request, null);
+    }
+
+    private Job submitReserved(UUID reservation, String bookId, JobRequest request, PendingOperation operation) {
         requireOpen();
         if (!Objects.equals(readingReservation, reservation) || !Objects.equals(readingReservationBookId, bookId))
             throw new ApiException(HttpStatus.CONFLICT, "阅读窗口预约已失效");
@@ -167,7 +177,7 @@ public class JobService {
         }
         SettingsService.Lease lease = settings == null ? null : settings.beginWork();
         Running running = new Running(bookId, fingerprint, lease);
-        String expectedJobId = "reading:" + reservation + ":" + (pages.isEmpty() ? "0" : pages.get(0));
+        String expectedJobId = "reading:" + reservation + ":" + (pages.isEmpty() ? "0" : pages.get(0)) + ":" + UUID.randomUUID();
         Job queued = new Job(expectedJobId, "RUNNING", 0, pages.size(), pages.isEmpty() ? null : pages.get(0),
                 null, List.of(), Instant.now(), List.copyOf(pages), provider, layout,
                 request.splitSpreads(), request.force(), request.assistEnabled(), fingerprint);
@@ -176,7 +186,7 @@ public class JobService {
             for (int page : pages) {
                 Page published = store.readPage(bookId, page);
                 PageAttempt attempt = registerAttempt(bookId, page, BookStore.revisionOrZero(published),
-                        List.of("JOB_BASELINE", "JOB_ENHANCEMENT", "JOB_COMPLETE", "JOB_RESTORE"));
+                        List.of("JOB_BASELINE", "JOB_ENHANCEMENT", "JOB_COMPLETE", "JOB_RESTORE"), operation, queued);
                 running.attempts.put(page, attempt);
                 activeReserved.put(page, running);
                 if (progress != null) progress.begin(attempt, BookStore.revisionOrZero(published),
@@ -225,7 +235,9 @@ public class JobService {
                                              studio.bookhtml.api.PageReprocessRequest request,
                                              String provider, String layout,
                                              boolean splitSpreads, boolean assist) {
-        if (readingReservation == null || !readingReservation.equals(reservation))
+        requireOpen();
+        if (readingReservation == null || !readingReservation.equals(reservation)
+                || !Objects.equals(readingReservationBookId, bookId))
             throw new ApiException(HttpStatus.CONFLICT, "阅读窗口预约已失效");
         Book book = store.readBook(bookId);
         if (book.archived()) throw new ApiException(HttpStatus.CONFLICT, "本书已归档，请先恢复后再识别");
@@ -235,18 +247,24 @@ public class JobService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "缺少 clientOperationId");
         if (request.clientOperationId().length() > 200 || request.expectedRevision() == null || request.expectedRevision() < 0)
             throw new ApiException(HttpStatus.BAD_REQUEST, "操作 ID 或期望版本无效");
-        String operationKey = bookId + ":" + reservation + ":" + request.clientOperationId();
+        // Book scope is stable across browser reservations and process restarts.
+        // Do not persist raw client IDs or use them as filesystem paths.
+        String operationKey = requestFingerprint(bookId, request.clientOperationId());
         String fingerprint = requestFingerprint(bookId, String.valueOf(pageNumber), provider, layout,
                 String.valueOf(splitSpreads), String.valueOf(assist), String.valueOf(request.expectedRevision()),
                 String.valueOf(request.explicitOverwriteAuthorization()), request.provider(), String.valueOf(request.assist()));
-        String known = operationFingerprints.get(operationKey);
+        PageAttempt.Journal journal = readJournal(bookId);
+        ReprocessOperation known = journal.operations().get(operationKey);
         if (known != null) {
-            if (!known.equals(fingerprint))
+            if (!known.fingerprint().equals(fingerprint))
                 throw new ApiException(HttpStatus.CONFLICT, "相同操作 ID 但参数不一致，已拒绝");
-            return operationJobs.get(operationKey);
+            if (!operationClock.instant().isBefore(known.expiresAt()))
+                throw new ApiException(HttpStatus.GONE, "操作记录已过期，请确认后使用新操作 ID；未重新派发");
+            return known.response();
         }
-        if (operationFingerprints.size() >= 4096)
-            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "操作记录容量已满，请停止任务并重启后使用新操作 ID");
+        // Never evict old IDs and silently interpret them as permission to charge again.
+        if (journal.operations().size() >= PageAttempt.Journal.MAX_OPERATIONS)
+            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "本书操作回执容量已满，需归档维护；重启不会清空幂等保护");
         Page current = store.readPage(bookId, pageNumber);
         if (current == null) throw new ApiException(HttpStatus.NOT_FOUND, "页面不存在");
         // U2：先判人工保护（授权问题），再判版本新鲜度。MANUAL/已校对页默认不覆盖；
@@ -262,18 +280,18 @@ public class JobService {
         String channel = provider == null ? "paddle-aistudio" : provider;
         JobRequest jobRequest = new JobRequest(String.valueOf(pageNumber), channel, layout,
                 splitSpreads, true, assist);
-        Job queued = submitReserved(reservation, bookId, jobRequest);
-        operationFingerprints.put(operationKey, fingerprint);
-        operationJobs.put(operationKey, queued);
-        return queued;
+        return submitReserved(reservation, bookId, jobRequest, new PendingOperation(operationKey, fingerprint));
     }
 
     private PageAttempt registerAttempt(String bookId, int pageNumber, int expectedRevision, List<String> allowedOps) {
+        return registerAttempt(bookId, pageNumber, expectedRevision, allowedOps, null, null);
+    }
+
+    private PageAttempt registerAttempt(String bookId, int pageNumber, int expectedRevision,
+                                       List<String> allowedOps, PendingOperation operation, Job response) {
         String key = bookId + ":" + pageNumber;
-        PageAttempt prev;
         synchronized (pageAttempts) {
-            prev = pageAttempts.get(key);
-            if (prev == null) prev = readJournal(bookId).intents().get(key);
+            PageAttempt prev = readJournal(bookId).intents().get(key);
             String sourceHash = null;
             try {
                 Page page = store.readPage(bookId, pageNumber);
@@ -284,7 +302,7 @@ public class JobService {
             PageAttempt next = (prev != null && prev.bookId().equals(bookId) && prev.pageNumber() == pageNumber)
                     ? prev.nextGeneration(expectedRevision, sourceHash, allowedOps)
                     : PageAttempt.register(bookId, pageNumber, expectedRevision, sourceHash, allowedOps);
-            persistIntent(bookId, next); // fail closed before dispatch if the durable identity cannot be written
+            persistIntent(bookId, next, operation, response); // identity + replay receipt precede dispatch in one atomic file
             pageAttempts.put(key, next);
             return next;
         }
@@ -294,11 +312,20 @@ public class JobService {
      * U4：恢复意图持久化（IN_PROGRESS → 终态）。写持久化意图 → 原子页提交 →
      * 更新完成标记；自动恢复不重发云请求，不重复收费。
      */
-    private void persistIntent(String bookId, PageAttempt attempt) {
+    private void persistIntent(String bookId, PageAttempt attempt, PendingOperation operation, Job response) {
         try {
-            java.util.Map<String, PageAttempt> intents = new java.util.LinkedHashMap<>(readJournal(bookId).intents());
+            PageAttempt.Journal current = readJournal(bookId);
+            Map<String, PageAttempt> intents = new LinkedHashMap<>(current.intents());
+            Map<String, ReprocessOperation> operations = new LinkedHashMap<>(current.operations());
             intents.put(attempt.key(), attempt);
-            store.writeSidecar(store.pageAttemptsPath(bookId), new PageAttempt.Journal(intents));
+            if (operation != null) {
+                if (operations.containsKey(operation.key())) throw new IllegalStateException("operation already registered");
+                Instant accepted = operationClock.instant();
+                operations.put(operation.key(), new ReprocessOperation(bookId, operation.fingerprint(),
+                        attempt.attemptId(), attempt.generation(), response, accepted,
+                        accepted.plus(OPERATION_RETENTION), "RUNNING"));
+            }
+            store.writeSidecar(store.pageAttemptsPath(bookId), new PageAttempt.Journal(intents, operations));
         } catch (Exception failure) {
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "任务身份记录保存失败，未派发云请求");
         }
@@ -317,7 +344,7 @@ public class JobService {
                 var intents = new LinkedHashMap<>(journal.intents());
                 PageAttempt completed = current.withLifecycle(lifecycle);
                 intents.put(owner.key(), completed);
-                store.writeSidecar(store.pageAttemptsPath(running.bookId), new PageAttempt.Journal(intents));
+                store.writeSidecar(store.pageAttemptsPath(running.bookId), journal.withIntents(intents));
                 pageAttempts.computeIfPresent(owner.key(), (key, value) -> value.attemptId().equals(owner.attemptId()) ? completed : value);
             } catch (Exception failure) {
                 if (progress != null) progress.finish(running.bookId, pageNumber, owner.attemptId(),
@@ -330,7 +357,19 @@ public class JobService {
         try {
             PageAttempt.Journal journal =
                     store.readSidecar(store.pageAttemptsPath(bookId), PageAttempt.Journal.class);
-            return journal == null ? PageAttempt.Journal.empty() : journal;
+            if (journal == null) return PageAttempt.Journal.empty();
+            for (var entry : journal.intents().entrySet()) {
+                PageAttempt a = entry.getValue();
+                if (!bookId.equals(a.bookId()) || !entry.getKey().equals(a.key()) || a.pageNumber() < 1
+                        || a.attemptId() == null || a.runId() == null || a.generation() < 1
+                        || a.expectedRevision() < 0 || a.startedAt() == null || a.updatedAt() == null
+                        || a.lifecycle() == null) throw new IllegalStateException("invalid attempt identity");
+            }
+            for (var entry : journal.operations().entrySet()) {
+                if (!entry.getKey().matches("[0-9a-f]{64}") || !bookId.equals(entry.getValue().bookId()))
+                    throw new IllegalStateException("invalid operation ownership");
+            }
+            return journal;
         } catch (RuntimeException e) {
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "任务身份记录不可读，未派发云请求");
         }
@@ -341,6 +380,7 @@ public class JobService {
      * INTERRUPTED；无法证明所有权不覆盖；绝不重新发送云请求。
      */
     public synchronized void reconcileAttemptIntents() {
+        if (active != null || !activeReserved.isEmpty()) return; // Startup reconciliation never settles live workers.
         List<String> bookIds;
         try {
             bookIds = store.listBooks().stream().map(Book::id).toList();
@@ -361,9 +401,13 @@ public class JobService {
                     changed = true;
                 } catch (RuntimeException ignored) {}
             }
-            if (changed) {
+            PageAttempt.Journal reconciled = journal.withIntents(intents);
+            Map<String, ReprocessOperation> operations = new LinkedHashMap<>(reconciled.operations());
+            operations.replaceAll((key, receipt) -> receipt.terminal() ? receipt
+                    : receipt.finish("INTERRUPTED", operationClock.instant()));
+            if (changed || !operations.equals(journal.operations())) {
                 try {
-                    store.writeSidecar(store.pageAttemptsPath(bookId), new PageAttempt.Journal(intents));
+                    store.writeSidecar(store.pageAttemptsPath(bookId), new PageAttempt.Journal(intents, operations));
                 } catch (Exception ignored) {}
             }
         }

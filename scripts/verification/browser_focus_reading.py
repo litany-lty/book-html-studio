@@ -98,6 +98,16 @@ def main():
             page.wait_for_selector('body.focus-reading #paper .reading-flow')
             check('parsed_reading_not_source_image', page.locator('#paper .original-frame').count() == 0)
             check('chrome_hidden', all(page.locator(s).is_hidden() for s in ['.topbar', '#job-panel', '.reader-toolbar', '.page-head', '.pagination', '#toc-panel', '#review-panel']))
+            geometry = page.evaluate("""() => ({reader:document.querySelector('#reader').getBoundingClientRect().toJSON(),
+              footer:document.querySelector('#reading-progress').getBoundingClientRect().toJSON(),
+              viewport:[innerWidth,innerHeight],devicePixelRatio,bodyClass:document.body.className})""")
+            (OUT/'initial-geometry.json').write_text(json.dumps(geometry,indent=2)+'\n',encoding='utf-8')
+            page.screenshot(path=str(OUT / 'initial-focus.png'))
+            details = page.evaluate("""() => ({elements:['body','#workspace','#reader','#reading-progress'].map(selector=>{
+              const el=document.querySelector(selector),s=getComputedStyle(el); return {selector,rect:el.getBoundingClientRect().toJSON(),
+                height:s.height,display:s.display,position:s.position,left:s.left,right:s.right,flex:s.flex,padding:s.padding,inline:el.getAttribute('style'),
+                matches:el.matches('body.focus-reading *')};}),sheets:[...document.styleSheets].map(s=>({href:s.href,rules:s.cssRules.length}))})""")
+            (OUT/'layout-details.json').write_text(json.dumps(details,indent=2)+'\n',encoding='utf-8')
             check('full_viewport_and_bottom_progress', page.evaluate('''() => {
               const r=document.querySelector('#reader').getBoundingClientRect(), p=document.querySelector('#reading-progress').getBoundingClientRect();
               return r.top===0 && Math.abs(r.height-innerHeight)<=1 && Math.abs(p.bottom-innerHeight)<=1 && p.width===innerWidth;
