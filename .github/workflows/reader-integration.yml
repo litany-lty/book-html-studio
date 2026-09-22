@@ -1,0 +1,34 @@
+name: Reader integration
+
+on:
+  push:
+    branches: [integrate/reader-20260922]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Capture immutable integration inputs (no configuration or credentials)
+        run: |
+          mkdir -p test-results/integration-input
+          git cat-file -e 44b57c220f338db80c5707d1401dace55c80ab4a^{commit}
+          git cat-file -e 26714f275d49b296d83cad1b677a73019381db69^{commit}
+          git cat-file -e 1665c623aa0041577cca75447669f21684840792^{commit}
+          git cat-file -e 23d0e03a827a964fc807036d226c9e3b8e0909d6^{commit}
+          git show-ref > test-results/integration-input/refs.txt
+          git bundle create test-results/integration-input/repository.bundle --all
+          git bundle verify test-results/integration-input/repository.bundle
+          sha256sum test-results/integration-input/repository.bundle > test-results/integration-input/sha256.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reader-integration-input-${{ github.sha }}
+          path: test-results/integration-input/
+          retention-days: 1
