@@ -160,7 +160,7 @@ class QwenTextReviewClientTest {
                 png(), null, true, budget, () -> false);
         assertEquals(1, result.findings().size());
         assertEquals(2, calls.get(), "429 重试受总预算约束");
-        assertEquals(before - 1, budget.remaining(), "重试不重复预留预算");
+        assertEquals(before - 2, budget.remaining(), "每次物理 HTTP 尝试均计入硬预算");
         assertEquals(0, gate.inFlight(), "槽位已释放");
     }
 

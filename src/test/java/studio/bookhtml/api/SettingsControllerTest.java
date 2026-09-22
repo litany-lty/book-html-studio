@@ -32,8 +32,8 @@ class SettingsControllerTest {
         MockHttpServletRequest get = request("GET");
         Map<String, Object> initial = controller.get(get).getBody();
         String token = (String) initial.get("csrfToken");
-        assertTrue(json.writeValueAsString(initial).contains("env-studio-secret"));
-        assertEquals("env-studio-secret", ((Map<?, ?>)((Map<?, ?>) initial.get("ocr")).get("paddleAiStudio")).get("accessToken"));
+        assertFalse(json.writeValueAsString(initial).contains("env-studio-secret"));
+        assertNull(((Map<?, ?>)((Map<?, ?>) initial.get("ocr")).get("paddleAiStudio")).get("accessToken"));
         assertTrue(json.writeValueAsString(initial).contains("accessTokenSet"));
         assertEquals("no-store", controller.get(get).getHeaders().getCacheControl());
 

@@ -4,149 +4,152 @@ import org.springframework.stereotype.Service;
 import studio.bookhtml.domain.ProcessingSnapshot;
 
 import java.time.Instant;
-import java.util.List;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * U4：阶段和单位事件聚合。不负责正式页保存；有界、可恢复终态摘要。
- * 事件只接真实代码入口/出口（派发、处理开始/结束、提交、前端获取成功）。
- */
+/** Real, process-local events only. Telemetry must never authorize or block a page commit. */
 @Service
 public class ProcessingProgressService {
     private static final int MAX_TRACKED = 512;
+    private static final Set<String> TERMINAL = Set.of(
+            "SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "INTERRUPTED");
+    private final Map<UUID, Entry> entries = new LinkedHashMap<>();
+    private final Map<PageKey, UUID> latestAttempts = new LinkedHashMap<>();
 
-    private final Map<String, Entry> entries = new ConcurrentHashMap<>();
+    private record PageKey(String bookId, int pageNumber) {}
 
     private static final class Entry {
-        final String bookId;
-        final int pageNumber;
+        final PageKey page;
         final UUID attemptId;
-        volatile long snapshotVersion;
-        volatile String lifecycle = "RUNNING";
-        volatile String stage = "PREPARING";
-        volatile String availability = "ORIGINAL_ONLY";
-        volatile int publishedRevision;
         final Instant startedAt = Instant.now();
-        volatile Instant stageStartedAt = Instant.now();
-        volatile Instant lastProgressAt = Instant.now();
-        volatile String unitKind = "PAGE";
-        volatile int total;
-        volatile int succeeded;
-        volatile int failed;
-        volatile int skipped;
-        volatile int cancelled;
-        volatile int inFlight;
-        volatile boolean canRead;
-        volatile boolean canStop = true;
-        volatile boolean canRetry;
-        volatile String messageCode = "PROCESSING_STARTED";
+        Instant stageStartedAt = startedAt, lastProgressAt = startedAt;
+        long version;
+        String lifecycle = "RUNNING", stage = "PREPARING", availability = "ORIGINAL_ONLY";
+        String unitKind = "STAGE", messageCode = "PROCESSING_STARTED";
+        int publishedRevision, total = 1, succeeded, failed, skipped, cancelled, inFlight;
+        boolean canRead, canStop = true, canRetry;
 
-        Entry(String bookId, int pageNumber, UUID attemptId, int publishedRevision) {
-            this.bookId = bookId;
-            this.pageNumber = pageNumber;
+        Entry(PageKey page, UUID attemptId, int revision) {
+            this.page = page;
             this.attemptId = attemptId;
-            this.publishedRevision = publishedRevision;
+            this.publishedRevision = revision;
         }
+        int done() { return succeeded + failed + skipped + cancelled; }
+        void advanced() { lastProgressAt = Instant.now(); version++; }
     }
 
-    private static String key(String bookId, int pageNumber, UUID attemptId) {
-        return bookId + ":" + pageNumber + ":" + attemptId;
-    }
-
-    /** 新 attempt 开始（派发时调用）。 */
-    public UUID begin(String bookId, int pageNumber, int publishedRevision) {
+    /** Creation order, not event count, determines the latest attempt. */
+    public synchronized UUID begin(String bookId, int pageNumber, int publishedRevision) {
         if (entries.size() >= MAX_TRACKED) {
-            entries.entrySet().removeIf(e ->
-                    List.of("SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "INTERRUPTED")
-                            .contains(e.getValue().lifecycle));
+            Iterator<Map.Entry<UUID, Entry>> iterator = entries.entrySet().iterator();
+            while (iterator.hasNext() && entries.size() >= MAX_TRACKED) {
+                Map.Entry<UUID, Entry> item = iterator.next();
+                if (!TERMINAL.contains(item.getValue().lifecycle)) continue;
+                latestAttempts.remove(item.getValue().page, item.getKey());
+                iterator.remove();
+            }
         }
+        // Losing optional telemetry is safer than growing without bound or rejecting OCR.
+        if (entries.size() >= MAX_TRACKED) return null;
         UUID attemptId = UUID.randomUUID();
-        entries.put(key(bookId, pageNumber, attemptId),
-                new Entry(bookId, pageNumber, attemptId, publishedRevision));
+        PageKey page = new PageKey(bookId, pageNumber);
+        entries.put(attemptId, new Entry(page, attemptId, Math.max(0, publishedRevision)));
+        latestAttempts.put(page, attemptId);
         return attemptId;
     }
 
-    public void stage(String bookId, int pageNumber, UUID attemptId, String stage) {
-        Entry e = entries.get(key(bookId, pageNumber, attemptId));
-        if (e == null) return;
-        e.stage = stage;
-        e.stageStartedAt = Instant.now();
-        e.lastProgressAt = Instant.now();
-        e.snapshotVersion++;
+    private Entry active(String bookId, int pageNumber, UUID attemptId) {
+        Entry entry = entries.get(attemptId);
+        return entry != null && entry.page.equals(new PageKey(bookId, pageNumber))
+                && !TERMINAL.contains(entry.lifecycle) ? entry : null;
     }
 
-    public void plan(String bookId, int pageNumber, UUID attemptId, String unitKind, int total) {
-        Entry e = entries.get(key(bookId, pageNumber, attemptId));
-        if (e == null) return;
-        e.unitKind = unitKind;
-        e.total = total;
-        e.lastProgressAt = Instant.now();
-        e.snapshotVersion++;
+    public synchronized void stage(String bookId, int pageNumber, UUID attemptId, String stage) {
+        Entry entry = active(bookId, pageNumber, attemptId);
+        if (entry == null || stage == null || stage.equals(entry.stage)) return;
+        entry.stage = stage;
+        entry.stageStartedAt = Instant.now();
+        // Each stage starts with one completion checkpoint. A fixed chunk plan can replace it.
+        entry.unitKind = "STAGE";
+        entry.total = 1;
+        entry.succeeded = entry.failed = entry.skipped = entry.cancelled = entry.inFlight = 0;
+        entry.advanced();
     }
 
-    public void unitDone(String bookId, int pageNumber, UUID attemptId, boolean ok) {
-        Entry e = entries.get(key(bookId, pageNumber, attemptId));
-        if (e == null) return;
-        if (ok) e.succeeded++; else e.failed++;
-        if (e.inFlight > 0) e.inFlight--;
-        e.lastProgressAt = Instant.now();
-        e.snapshotVersion++;
+    public synchronized void plan(String bookId, int pageNumber, UUID attemptId, String kind, int total) {
+        if (total < 0) throw new IllegalArgumentException("negative work total");
+        Entry entry = active(bookId, pageNumber, attemptId);
+        if (entry == null) return;
+        if (kind != null && kind.equals(entry.unitKind) && total == entry.total) return;
+        entry.unitKind = kind == null ? "STAGE" : kind;
+        entry.total = total;
+        entry.succeeded = entry.failed = entry.skipped = entry.cancelled = entry.inFlight = 0;
+        entry.advanced();
     }
 
-    public void inFlight(String bookId, int pageNumber, UUID attemptId, int delta) {
-        Entry e = entries.get(key(bookId, pageNumber, attemptId));
-        if (e == null) return;
-        e.inFlight = Math.max(0, e.inFlight + delta);
-        e.snapshotVersion++;
+    public synchronized void unitDone(String bookId, int pageNumber, UUID attemptId, boolean ok) {
+        Entry entry = active(bookId, pageNumber, attemptId);
+        if (entry == null || entry.done() >= entry.total) return;
+        if (ok) entry.succeeded++; else entry.failed++;
+        if (entry.inFlight > 0) entry.inFlight--;
+        entry.advanced();
     }
 
-    /** 可读基线落盘后调用：此前内存里拿到结果不算可读。 */
-    public void baselinePublished(String bookId, int pageNumber, UUID attemptId,
-                                  int revision, boolean enhanced) {
-        Entry e = entries.get(key(bookId, pageNumber, attemptId));
-        if (e == null) return;
-        e.publishedRevision = revision;
-        e.availability = enhanced ? "ENHANCED" : "OCR_READABLE";
-        e.canRead = true;
-        e.lastProgressAt = Instant.now();
-        e.snapshotVersion++;
+    public synchronized void inFlight(String bookId, int pageNumber, UUID attemptId, int delta) {
+        Entry entry = active(bookId, pageNumber, attemptId);
+        if (entry == null) return;
+        int next = (int) Math.max(0L, Math.min((long) entry.total - entry.done(), (long) entry.inFlight + delta));
+        if (next == entry.inFlight) return;
+        entry.inFlight = next;
+        entry.version++; // A queue/heartbeat change is not completed work.
     }
 
-    public void finish(String bookId, int pageNumber, UUID attemptId, String lifecycle,
-                       String messageCode, boolean canRetry) {
-        Entry e = entries.get(key(bookId, pageNumber, attemptId));
-        if (e == null) return;
-        e.lifecycle = lifecycle;
-        e.messageCode = messageCode;
-        e.canRetry = canRetry;
-        e.canStop = false;
-        e.inFlight = 0;
-        e.lastProgressAt = Instant.now();
-        e.snapshotVersion++;
+    /** Called only AFTER a durable commit. Never equate a received model response with publication. */
+    public synchronized void baselinePublished(String bookId, int pageNumber, UUID attemptId,
+                                                int revision, boolean enhanced) {
+        Entry entry = active(bookId, pageNumber, attemptId);
+        if (entry == null) return;
+        entry.publishedRevision = revision;
+        entry.availability = enhanced ? "ENHANCED" : "OCR_READABLE";
+        entry.canRead = true;
+        entry.advanced();
     }
 
-    public ProcessingSnapshot snapshot(String bookId, int pageNumber, UUID attemptId) {
-        Entry e = entries.get(key(bookId, pageNumber, attemptId));
-        if (e == null) return null;
-        return new ProcessingSnapshot(2, e.bookId, e.pageNumber, e.attemptId, e.snapshotVersion,
-                e.lifecycle, e.stage, e.availability, e.publishedRevision, e.startedAt,
-                e.stageStartedAt, e.lastProgressAt,
-                new ProcessingSnapshot.UnitCounts(e.unitKind, e.total, e.succeeded, e.failed,
-                        e.skipped, e.cancelled, e.inFlight),
-                e.canRead, e.canStop, e.canRetry, e.messageCode);
+    public synchronized void finish(String bookId, int pageNumber, UUID attemptId, String lifecycle,
+                                    String messageCode, boolean canRetry) {
+        if (!TERMINAL.contains(lifecycle)) throw new IllegalArgumentException("not a terminal lifecycle");
+        Entry entry = active(bookId, pageNumber, attemptId);
+        if (entry == null) return;
+        entry.lifecycle = lifecycle;
+        entry.messageCode = messageCode;
+        entry.canRetry = canRetry;
+        entry.canStop = false;
+        entry.inFlight = 0;
+        if ("SUCCEEDED".equals(lifecycle)) entry.succeeded += entry.total - entry.done();
+        entry.advanced();
     }
 
-    /** 本页最新 attempt 的快照（按 snapshotVersion 最大）。 */
-    public ProcessingSnapshot latest(String bookId, int pageNumber) {
-        ProcessingSnapshot best = null;
-        String prefix = bookId + ":" + pageNumber + ":";
-        for (Map.Entry<String, Entry> entry : entries.entrySet()) {
-            if (!entry.getKey().startsWith(prefix)) continue;
-            ProcessingSnapshot snap = snapshot(bookId, pageNumber, entry.getValue().attemptId);
-            if (snap != null && (best == null || snap.snapshotVersion() > best.snapshotVersion())) best = snap;
-        }
-        return best;
+    public synchronized ProcessingSnapshot snapshot(String bookId, int pageNumber, UUID attemptId) {
+        Entry entry = entries.get(attemptId);
+        if (entry == null || !entry.page.equals(new PageKey(bookId, pageNumber))) return null;
+        return snapshot(entry);
+    }
+
+    /** O(1), coherent snapshot: concurrent chunks cannot lose increments or tear counters. */
+    public synchronized ProcessingSnapshot latest(String bookId, int pageNumber) {
+        Entry entry = entries.get(latestAttempts.get(new PageKey(bookId, pageNumber)));
+        return entry == null ? null : snapshot(entry);
+    }
+
+    private static ProcessingSnapshot snapshot(Entry entry) {
+        return new ProcessingSnapshot(2, entry.page.bookId(), entry.page.pageNumber(), entry.attemptId,
+                entry.version, entry.lifecycle, entry.stage, entry.availability, entry.publishedRevision,
+                entry.startedAt, entry.stageStartedAt, entry.lastProgressAt,
+                new ProcessingSnapshot.UnitCounts(entry.unitKind, entry.total, entry.succeeded,
+                        entry.failed, entry.skipped, entry.cancelled, entry.inFlight),
+                entry.canRead, entry.canStop, entry.canRetry, entry.messageCode);
     }
 }

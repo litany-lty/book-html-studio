@@ -12,7 +12,7 @@ public class QwenAssistProperties {
     private String model = "qwen3.8-max";
     private int timeoutSeconds = 120;
     // U5：有界小任务并发（工程起点，需基准测试校准；不是供应商官方限额）。
-    private boolean chunkedAssist = false;
+    private boolean chunkedAssist = true;
     private int maxConcurrentRequests = 3;
     private int maxBackgroundRequests = 2;
     private int maxQueuedChunks = 24;

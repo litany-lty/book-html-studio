@@ -11,3 +11,14 @@
 *.iml
 __pycache__/
 *.pyc
+
+# Local credentials, private settings and transient audit/test output.
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+**/.settings/
+/test-results/
+/audit-evidence/

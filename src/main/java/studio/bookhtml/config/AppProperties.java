@@ -44,4 +44,9 @@ public record AppProperties(Path dataDir, long maxUploadMb, int maxPages, int ma
         if (paddleTotalTimeoutSeconds <= 0) paddleTotalTimeoutSeconds = 180;
         if (paddlePollIntervalSeconds <= 0) paddlePollIntervalSeconds = 5;
     }
+    /** Configuration values can contain credentials or signed endpoint URLs. */
+    @Override public String toString() {
+        return "AppProperties[configuration=REDACTED]";
+    }
+
 }

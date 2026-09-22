@@ -5,8 +5,8 @@ export function nearbyPages(center, total) {
   const pages = [];
   // cacheWindow：本地只读缓存范围；processingWindow（云派发）由服务端快照决定。
   for (let offset = 1; offset <= 5; offset++) {
-    if (center - offset >= 1) pages.push(center - offset);
     if (center + offset <= total) pages.push(center + offset);
+    if (center - offset >= 1) pages.push(center - offset);
   }
   return pages;
 }
@@ -63,7 +63,8 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
     const generation = prefetchGeneration;
     prefetchTimer = setTimeout(async () => {
       if (state.book?.id !== bookId || state.currentPage !== center || epoch !== currentEpoch || generation !== prefetchGeneration || readyControllers.length || readyQueue.length) return;
-      const queue = [center, ...nearbyPages(center, total)].filter(page => {
+      if (globalThis.navigator?.connection?.saveData) return;
+      const queue = nearbyPages(center, total).filter(page => {
         const cached = state.pageCache.get(page);
         return !cached || cached.status !== 'READY';
       });
@@ -81,28 +82,29 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
           finally { prefetchControllers = prefetchControllers.filter(item => item !== controller); }
         }
       }
-      await Promise.all([worker(), worker(), worker()]);
-    }, 1000);
+      await Promise.all([worker(), worker()]);
+    }, 200);
   }
 
   function runReadyWorkers() {
     if (readyQueue.length) abortPrefetch();
     while (readyControllers.length < 3 && readyQueue.length) {
       const item = readyQueue.shift();
+      const clearOwnMarker = () => { if (readyInFlight.get(item.pageNumber) === item) readyInFlight.delete(item.pageNumber); };
       const controller = new AbortController();
       readyControllers.push(controller);
       api.page(item.bookId, item.pageNumber, controller.signal).then(page => {
         if (!valid(item.bookId, item.sequence, item.epoch) || cacheIsNewer(state.pageCache.get(item.pageNumber), page)) {
-          readyInFlight.delete(item.pageNumber);
+          clearOwnMarker();
           return;
         }
         // U2：GET 成功且会话有效才记成功标记；缓存与展示仍由 onPageReady 按既有保护处理。
         seenReady.set(item.pageNumber, `${item.pageNumber}:${page.revision}`);
-        readyInFlight.delete(item.pageNumber);
+        clearOwnMarker();
         onPageReady(item.pageNumber, page);
       }).catch(error => {
         // U2：失败/取消清理在途标记，同 revision 仍可重 GET；不重发付费 POST。
-        readyInFlight.delete(item.pageNumber);
+        clearOwnMarker();
         if (valid(item.bookId, item.sequence, item.epoch) && error?.name !== 'StaleRequest') {
           onError(error);
         }
@@ -131,11 +133,12 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
       const key = `${pageNumber}:${info.revision}`;
       if (seenReady.get(pageNumber) === key) continue;
       // U2：在途页不重复入队；成功标记只在 GET 成功后写，失败清理在途后可重 GET。
-      if (readyInFlight.get(pageNumber) === key) continue;
+      if (readyInFlight.get(pageNumber)?.key === key) continue;
       const cached = state.pageCache.get(pageNumber);
       if (cached?.revision === info.revision && cached?.status === 'READY') { seenReady.set(pageNumber, key); continue; }
-      readyInFlight.set(pageNumber, key);
-      readyQueue.push({ bookId: session.bookId, sequence: sequenceAtStart, epoch: epochAtStart, pageNumber });
+      const item = { key, bookId: session.bookId, sequence: sequenceAtStart, epoch: epochAtStart, pageNumber };
+      readyInFlight.set(pageNumber, item);
+      readyQueue.push(item);
     }
     runReadyWorkers();
   }

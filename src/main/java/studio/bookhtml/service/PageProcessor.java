@@ -224,8 +224,8 @@ public class PageProcessor {
         } catch (CancelledException e) {
             throw e;
         } catch (Exception e) {
-            // 可控回滚：分组失败走旧整页路径，不抛错中断增强。
-            return null;
+            // Dispatch may already have consumed quota: never start a second paid pipeline implicitly.
+            return new ChunkedOut(blocks, baseProvider, List.of("分组核对未完整结束，已保留原文；重试需由用户明确发起"));
         }
         List<String> warnings = new ArrayList<>(result.warnings());
         if (result.failedChunks() > 0) {
@@ -294,7 +294,14 @@ public class PageProcessor {
      * （native/paddle/qwen 辅助段），基线已 simplify 的块再次 simplify 安全
      * （由原文重新转简体，幂等）。无原始转录的空白基线直接跳过。
      */
-    public record EnrichResult(List<Block> blocks, String actualProvider, List<String> warnings) {}
+    public record EnrichResult(List<Block> blocks, String actualProvider, List<String> warnings) {
+        public boolean partial() {
+            return warnings != null && warnings.stream().filter(java.util.Objects::nonNull)
+                    .anyMatch(w -> w.contains("失败") || w.contains("未完整") || w.contains("未完成")
+                            || w.contains("延期") || w.contains("deferred") || w.contains("预算")
+                            || w.contains("未配置") || w.contains("跳过"));
+        }
+    }
     public EnrichResult enrichBaseline(String bookId,int pageNumber,Page baseline,String provider,String layout,BooleanSupplier cancelled)throws Exception{
         try(UsageContext.Scope ignored=UsageContext.open(bookId,pageNumber,"ENRICH_PAGE")){
         if(cancelled.getAsBoolean())throw new CancelledException();

@@ -47,7 +47,7 @@ class UxU5QwenBoundedTest {
 
     @Test void u5_conservativeDefaultsAndRollback() throws Exception {
         String config = read("src/main/java/studio/bookhtml/config/QwenAssistProperties.java");
-        assertTrue(config.contains("private boolean chunkedAssist = false"), "U5：分组默认关闭，旧整页为回滚");
+        assertTrue(config.contains("private boolean chunkedAssist = true"), "分组默认启用，但增强仍须任务授权");
         assertTrue(config.contains("maxConcurrentRequests = 3"), "U5：全局 3 为工程起点");
         assertTrue(config.contains("maxPhysicalCallsPerPageAttempt = 8"), "U5：单页尝试预算 8");
         String processor = read("src/main/java/studio/bookhtml/service/PageProcessor.java");

@@ -99,9 +99,11 @@ class ProcessingProgressTest {
                 .thenAnswer(inv -> baselineResult(inv.getArgument(1), "基线正文" + inv.getArgument(1)));
         when(processor.enrichBaseline(eq(book.id()), anyInt(), any(), anyString(), anyString(), any()))
                 .thenAnswer(inv -> {
-                    enrichEntered.countDown();
-                    assertTrue(enrichRelease.await(4, TimeUnit.SECONDS));
                     int n = inv.getArgument(1);
+                    if (n == 1) {
+                        enrichEntered.countDown(); // The barrier belongs to the displayed page, not a neighbour.
+                        assertTrue(enrichRelease.await(4, TimeUnit.SECONDS));
+                    }
                     return new PageProcessor.EnrichResult(List.of(text("e" + n, "增强正文" + n)),
                             "paddle-aistudio+qwen-assist", List.of());
                 });
@@ -121,6 +123,10 @@ class ProcessingProgressTest {
         assertTrue(snap.canRead());
         enrichRelease.countDown();
         await(() -> "增强正文1".equals(store.readPage(book.id(), 1).blocks().get(0).original()));
+        await(() -> {
+            ProcessingSnapshot s = progress.latest(book.id(), 1);
+            return s != null && "SUCCEEDED".equals(s.lifecycle());
+        }); // Durable page publication happens before the terminal telemetry event.
         ProcessingSnapshot done = progress.latest(book.id(), 1);
         assertEquals("ENHANCED", done.contentAvailability());
         assertEquals("SUCCEEDED", done.lifecycle());
@@ -155,8 +161,10 @@ class ProcessingProgressTest {
                 .thenAnswer(inv -> baselineResult(inv.getArgument(1), "基线正文"));
         when(processor.enrichBaseline(eq(book.id()), anyInt(), any(), anyString(), anyString(), any()))
                 .thenAnswer(inv -> {
-                    enrichEntered.countDown();
-                    assertTrue(enrichRelease.await(4, TimeUnit.SECONDS));
+                    if ((int) inv.getArgument(1) == 1) {
+                        enrichEntered.countDown();
+                        assertTrue(enrichRelease.await(4, TimeUnit.SECONDS));
+                    }
                     return new PageProcessor.EnrichResult(List.of(text("e1", "增强改写")),
                             "paddle-aistudio+qwen-assist", List.of());
                 });

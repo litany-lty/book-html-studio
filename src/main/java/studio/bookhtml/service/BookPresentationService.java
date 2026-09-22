@@ -37,12 +37,23 @@ public class BookPresentationService {
     private final BookStore store;
     private PresentationOverrideService overrides;
     // U6：画像内存缓存；失效唯一来源是存储变更通知（保守：任何页/书变更即失效）。
-    private final Map<String, BookLayoutProfile> profileCache = new ConcurrentHashMap<>();
+    private final Map<String, BookLayoutProfile> profileCache = java.util.Collections.synchronizedMap(
+            new LinkedHashMap<>(64, .75f, true) {
+                @Override protected boolean removeEldestEntry(Map.Entry<String, BookLayoutProfile> entry) {
+                    return size() > 64;
+                }
+            });
+    private final AtomicLong changeEpoch = new AtomicLong();
+    private final Object[] profileLocks = java.util.stream.IntStream.range(0, 32)
+            .mapToObj(i -> new Object()).toArray();
     private final AtomicLong cacheHits = new AtomicLong();
 
     public BookPresentationService(BookStore store) {
         this.store = store;
-        store.addChangeListener(profileCache::remove);
+        store.addChangeListener(id -> {
+            changeEpoch.incrementAndGet();
+            profileCache.remove(id);
+        });
     }
 
     @Autowired(required = false)
@@ -123,7 +134,26 @@ public class BookPresentationService {
 
     // ---------- 画像构建 ----------
 
+    /** O(1) foreground fallback. A directory request builds the full profile separately. */
+    public BookLayoutProfile cachedProfile(String bookId) {
+        BookLayoutProfile cached = profileCache.get(bookId);
+        return cached == null ? BookLayoutProfile.empty(bookId, POLICY_VERSION) : cached;
+    }
+
     public BookLayoutProfile buildProfile(String bookId) {
+        synchronized (profileLocks[Math.floorMod(bookId.hashCode(), profileLocks.length)]) {
+            return buildProfileLocked(bookId);
+        }
+    }
+
+    private void cacheIfUnchanged(String bookId, BookLayoutProfile profile, long epoch) {
+        if (changeEpoch.get() != epoch) return;
+        profileCache.put(bookId, profile);
+        if (changeEpoch.get() != epoch) profileCache.remove(bookId, profile);
+    }
+
+    private BookLayoutProfile buildProfileLocked(String bookId) {
+        long epoch = changeEpoch.get();
         // U6：无变更直接返回缓存（失效唯一来源是存储变更通知），避免每页请求全书扫描。
         BookLayoutProfile cached = profileCache.get(bookId);
         if (cached != null) {
@@ -181,7 +211,7 @@ public class BookPresentationService {
                 previous == null ? 1 : previous.profileRevision(),
                 POLICY_VERSION, observed.size(), clusters, java.time.Instant.now());
         if (previous != null && previous.clusterSignature().equals(candidate.clusterSignature())) {
-            profileCache.put(bookId, previous);
+            cacheIfUnchanged(bookId, previous, epoch);
             return previous;
         }
         BookLayoutProfile published = new BookLayoutProfile(bookId,
@@ -192,7 +222,7 @@ public class BookPresentationService {
         } catch (Exception ignored) {
             // sidecar 写失败不阻塞原稿打开；调用方继续使用内存画像。
         }
-        profileCache.put(bookId, published);
+        cacheIfUnchanged(bookId, published, epoch);
         return published;
     }
 

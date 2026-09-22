@@ -275,12 +275,12 @@ class PageAttemptLifecycleTest {
     @Test void safe1011_bothConfiguredStillPrimaryOnlyWithoutParallelAuthorization() throws Exception {
         setup(10);
         settings.update(json.readTree("{\"revision\":0,\"ocr\":{\"ppocr\":{\"apiKey\":\"pp-key\",\"secretKey\":\"pp-secret\"}}}"));
-        // 中心页已就绪，tick 走后台填充，一次占满主通道 3 个槽位。
+        // 可读中心不消耗前台保留槽：只预取两页，当前页重试仍可立即进入。
         store.writePage(book.id(), new Page(1, 600, 800, "READY", "paddle-aistudio",
                 List.of(text("b1", "t")), List.of(), false, null,
                 List.of(text("b1", "t"))), false);
         List<String> providers = new CopyOnWriteArrayList<>();
-        CountDownLatch entered = new CountDownLatch(3);
+        CountDownLatch entered = new CountDownLatch(2);
         CountDownLatch release = new CountDownLatch(1);
         when(processor.processBaseline(eq(book.id()), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                 .thenAnswer(inv -> {
@@ -294,6 +294,7 @@ class PageAttemptLifecycleTest {
         clock.advance(Duration.ofSeconds(1));
         windows.tick();
         assertTrue(entered.await(3, TimeUnit.SECONDS));
+        assertEquals(2, providers.size(), "保留一个当前页槽位");
         assertTrue(providers.stream().allMatch("paddle-aistudio"::equals), "次通道请求数为 0");
         release.countDown();
         // 等待后台写收尾再结束，避免临时目录清理时仍有打开句柄。

@@ -4,150 +4,110 @@ import org.springframework.stereotype.Component;
 import studio.bookhtml.config.QwenAssistProperties;
 
 import java.time.Duration;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * U5：Qwen 共享出站闸门。所有页面、所有 Qwen 辅助种类（结构、局部核对、
- * 目录恢复）共用同一全局上限，不是每页 N 个；旧可达路径无旁路。
- *
- * <p>前台优先但不强杀：后台请求只在空闲额度超过保留量时进入；前台用满全部额度。
- * 429 退避不持槽 sleep（调用方释放后重取）。物理 permit 只在请求与响应流实际
- * 收尾后释放；逻辑取消不等于物理连接结束。
- */
+/** One process-wide bounded gate; refresh never replaces permits held by live requests. */
 @Component
 public class QwenRequestGate {
     private final QwenAssistProperties config;
-    private volatile Semaphore global;
-    private volatile int maxConcurrent;
-    private volatile int maxBackground;
-    private volatile int maxQueued;
-
-    private final AtomicInteger queued = new AtomicInteger();
-    private final AtomicInteger inFlight = new AtomicInteger();
-    private final AtomicInteger maxObservedInFlight = new AtomicInteger();
-    private final AtomicLong physicalCalls = new AtomicLong();
+    private int maxConcurrent, maxBackground, maxQueued;
+    private int queued, foregroundWaiting, inFlight, backgroundInFlight, maxObservedInFlight;
+    private long physicalCalls;
 
     public QwenRequestGate(QwenAssistProperties config) {
         this.config = config;
         refresh();
     }
 
-    /** 配置变更通过版本化快照生效：重建信号量（在途 permit 保留在旧实例上自然收尾）。 */
     public synchronized void refresh() {
-        this.maxConcurrent = Math.max(1, config.getMaxConcurrentRequests());
-        this.maxBackground = Math.max(0, Math.min(config.getMaxBackgroundRequests(), maxConcurrent - 1));
-        this.maxQueued = Math.max(0, config.getMaxQueuedChunks());
-        this.global = new Semaphore(maxConcurrent, true);
+        maxConcurrent = Math.max(1, Math.min(32, config.getMaxConcurrentRequests()));
+        maxBackground = Math.max(0, Math.min(config.getMaxBackgroundRequests(), maxConcurrent - 1));
+        maxQueued = Math.max(0, Math.min(1024, config.getMaxQueuedChunks()));
+        notifyAll(); // Reducing limits drains existing work; it does not mint new permits.
     }
 
-    /** 每页面尝试的物理调用预算（结构 + 局部组 + 目录恢复 + 重试共享）。 */
     public Budget newBudget() {
         return new Budget(Math.max(1, config.getMaxPhysicalCallsPerPageAttempt()));
     }
 
-    /**
-     * 获取执行槽。foreground=true 可用全部额度；background 仅当在途数低于
-     * 后台上限时进入（为当前阅读页保留 1 个）。排队元素只计数，不持有图片。
-     *
-     * @return permit（用完必须 close），超时或队列满返回 null
-     */
-    public Permit acquire(boolean foreground, Duration timeout) throws InterruptedException {
-        if (queued.incrementAndGet() > maxQueued + maxConcurrent) {
-            queued.decrementAndGet();
-            return null;
-        }
-        boolean taken = false;
+    private boolean available(boolean foreground) {
+        return inFlight < maxConcurrent && (foreground
+                || (backgroundInFlight < maxBackground && foregroundWaiting == 0));
+    }
+
+    public synchronized Permit acquire(boolean foreground, Duration timeout) throws InterruptedException {
+        if (Thread.interrupted()) throw new InterruptedException();
+        if (!available(foreground) && queued >= maxQueued) return null;
+        long nanos = timeout == null ? TimeUnit.SECONDS.toNanos(30) : Math.max(1, timeout.toNanos());
+        long deadline = System.nanoTime() + Math.min(nanos, TimeUnit.MINUTES.toNanos(10));
+        queued++;
+        if (foreground) foregroundWaiting++;
         try {
-            if (!foreground && inFlight.get() >= maxBackground) return null;
-            long millis = timeout == null ? 30_000 : Math.max(1, timeout.toMillis());
-            taken = global.tryAcquire(millis, TimeUnit.MILLISECONDS);
-            if (!taken) return null;
-            if (!foreground && inFlight.get() >= maxBackground) {
-                global.release();
-                taken = false;
-                return null;
+            while (!available(foreground)) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) return null;
+                TimeUnit.NANOSECONDS.timedWait(this, remaining);
             }
-            int now = inFlight.incrementAndGet();
-            maxObservedInFlight.accumulateAndGet(now, Math::max);
-            physicalCalls.incrementAndGet();
-            return new Permit();
+            inFlight++;
+            if (!foreground) backgroundInFlight++;
+            maxObservedInFlight = Math.max(maxObservedInFlight, inFlight);
+            physicalCalls++;
+            return new Permit(!foreground, false);
         } finally {
-            queued.decrementAndGet();
-            if (!taken) {
-                // 未取得：调用方不持有任何资源。
+            queued--;
+            if (foreground) foregroundWaiting--;
+            notifyAll();
+        }
+    }
+
+    public synchronized int inFlight() { return inFlight; }
+    public synchronized int maxObservedInFlight() { return maxObservedInFlight; }
+    public synchronized long physicalCalls() { return physicalCalls; }
+    public synchronized int maxConcurrent() { return maxConcurrent; }
+    public synchronized int maxQueued() { return maxQueued; }
+
+    public final class Permit implements AutoCloseable {
+        private final AtomicBoolean closed = new AtomicBoolean();
+        private final boolean background, noop;
+        private Permit(boolean background, boolean noop) { this.background = background; this.noop = noop; }
+        @Override public void close() {
+            if (noop || !closed.compareAndSet(false, true)) return;
+            synchronized (QwenRequestGate.this) {
+                inFlight--;
+                if (background) backgroundInFlight--;
+                QwenRequestGate.this.notifyAll();
             }
         }
     }
 
-    public int inFlight() {
-        return inFlight.get();
-    }
+    public Permit noopPermit() { return new Permit(false, true); }
 
-    public int maxObservedInFlight() {
-        return maxObservedInFlight.get();
-    }
-
-    public long physicalCalls() {
-        return physicalCalls.get();
-    }
-
-    public int maxConcurrent() {
-        return maxConcurrent;
-    }
-
-    /** 物理 permit：只在请求与响应流实际收尾后释放。 */
-    public final class Permit implements AutoCloseable {
-        private boolean closed;
-        private final boolean noop;
-
-        private Permit() {
-            this(false);
-        }
-
-        private Permit(boolean noop) {
-            this.noop = noop;
-        }
-
-        @Override
-        public void close() {
-            if (closed || noop) return;
-            closed = true;
-            inFlight.decrementAndGet();
-            global.release();
-        }
-    }
-
-    /** 无闸门时的空 permit（旧路径/单测直调，测试替身可断言）。 */
-    public Permit noopPermit() {
-        return new Permit(true);
-    }
-
-    /** 调用预算：出站前原子预留；未发出的队列取消可释放，已发出不伪装免费撤销。 */
+    /** Reserve EACH physical outbound attempt, including 429 retries. Never refund a sent request. */
     public static final class Budget {
         private final AtomicInteger remaining;
-
+        private final int total;
         Budget(int total) {
+            if (total <= 0) throw new IllegalArgumentException("non-positive budget");
+            this.total = total;
             this.remaining = new AtomicInteger(total);
         }
-
-        /** 预留 n 次；不足返回 false（调用方明确部分增强，不偷偷追加）。 */
-        public boolean reserve(int n) {
+        public boolean reserve(int count) {
+            if (count <= 0) throw new IllegalArgumentException("non-positive reservation");
             while (true) {
                 int current = remaining.get();
-                if (current < n) return false;
-                if (remaining.compareAndSet(current, current - n)) return true;
+                if (current < count) return false;
+                if (remaining.compareAndSet(current, current - count)) return true;
             }
         }
-
-        public void release(int n) {
-            remaining.addAndGet(n);
+        public void release(int count) {
+            if (count <= 0) throw new IllegalArgumentException("non-positive release");
+            remaining.updateAndGet(current -> {
+                if ((long) current + count > total) throw new IllegalStateException("budget over-release");
+                return current + count;
+            });
         }
-
-        public int remaining() {
-            return remaining.get();
-        }
+        public int remaining() { return remaining.get(); }
     }
 }

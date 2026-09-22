@@ -26,7 +26,7 @@ class UxU2TaskSafetyTest {
         String windows = read("src/main/java/studio/bookhtml/service/ReadingWindowService.java");
         assertFalse(windows.contains("Page.pending("), "U2：重试路径不得再写空 PENDING 清空快照");
         assertTrue(windows.contains("requestReprocess"), "U2：重试经统一准入创建独立 attempt");
-        assertTrue(windows.contains("retryPages"), "U2：显式重试页进入重试集，force 派发但仍受容量/授权约束");
+        assertFalse(windows.contains("retryPages"), "显式重试仅统一准入派发一次，不再通过第二重试集重复提交");
     }
 
     @Test

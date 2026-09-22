@@ -45,6 +45,8 @@ public class BookService {
     }
     public List<Book> list(){return store.listBooks().stream().map(this::refresh).toList();}
     public Book get(String id){return refresh(store.readBook(id));}
+    /** Opening a page must not synchronously scan every page for decorative statistics. */
+    public Book metadata(String id){return store.readBook(id);}
     /** Called under JobService's task lock when archiving, to serialize task admission with the metadata write. */
     Book updateLibrary(String id, String requestedTitle, Boolean archived) {
         if ((requestedTitle == null) == (archived == null))

@@ -63,7 +63,7 @@ public class QwenTaskPlanner {
         List<Block> candidates = new ArrayList<>();
         int skippedAtomic = 0;
         if (blocks != null) {
-            List<Block> sorted = new ArrayList<>(blocks);
+            List<Block> sorted = new ArrayList<>(blocks.stream().filter(java.util.Objects::nonNull).toList());
             sorted.sort(java.util.Comparator.comparingInt(Block::order));
             for (Block block : sorted) {
                 if (block == null || block.id() == null) continue;
@@ -152,7 +152,7 @@ public class QwenTaskPlanner {
                     filtered, chunk.plannedOrder(), chunk.promptVersion(), chunk.policyVersion()));
         }
         // 预算：1 结构 + N 局部 + 预留 1 重试位；超预算的组 deferred（保留原文）。
-        int budget = Math.max(1, 8);
+        int budget = Math.max(1, config.getMaxPhysicalCallsPerPageAttempt());
         List<ChunkTask> deferred = new ArrayList<>();
         List<ChunkTask> executable = new ArrayList<>(withContext);
         while (executable.size() + 2 > budget && executable.size() > 1) {

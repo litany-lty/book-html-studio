@@ -30,9 +30,13 @@ class UxU4ProgressTest {
         assertTrue(jobs.contains("enrichBaseline"), "U4：增强只产候选");
         // 基线落盘（commitPage 成功）之后才宣布可读。
         int commitIdx = jobs.indexOf("CommitOp.JOB_BASELINE");
-        int publishedIdx = jobs.indexOf("baselinePublished(running.bookId");
+        int publishedIdx = jobs.indexOf("baselinePublished(running.bookId", commitIdx);
         assertTrue(commitIdx >= 0 && publishedIdx > commitIdx,
                 "U4：内存收到结果不算完成，落盘才宣布可读");
+        int batchCommitIdx = jobs.indexOf("CommitOp.JOB_COMPLETE");
+        int batchPublishedIdx = jobs.indexOf("baselinePublished(running.bookId");
+        assertTrue(batchCommitIdx >= 0 && batchPublishedIdx > batchCommitIdx
+                && batchPublishedIdx < commitIdx, "批处理同样必须先落盘再发布可读进度");
     }
 
     @Test

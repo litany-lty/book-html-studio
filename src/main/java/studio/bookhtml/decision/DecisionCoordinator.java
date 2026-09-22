@@ -887,7 +887,9 @@ public class DecisionCoordinator {
         } catch (ApiException e) {
             throw e;
         } catch (Exception e) {
-            if ("true".equals(System.getenv("DECISION_DEBUG"))) e.printStackTrace(System.out);
+            // Provider exceptions may contain request headers or signed URLs; never dump them.
+            if ("true".equals(System.getenv("DECISION_DEBUG")))
+                System.err.println("Decision operation failed [INTERNAL_ERROR]; exception details redacted");
             persistTerminal(bookId, withState(running, "FAILED", "DONE",
                     List.of("INTERNAL_ERROR"), null, null));
         }

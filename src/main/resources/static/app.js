@@ -9,6 +9,7 @@ import { createReadingWindow } from './reading-window.js';
 import { createLibrary } from './library.js';
 import { initReaderMode } from './reader-mode.js';
 import { recordAnchor, restoreAnchor } from './reading-anchor.js';
+import { createPageProgress } from './page-progress.js';
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -33,6 +34,19 @@ const readingMetadataSignatures = new Map();
 const readingMetadataVersions = new Map();
 // U3：随读增量目录按画像版本取投影；旧响应不得把已排除书眉写回目录。
 const readingMetadataProfiles = new Map();
+const pageProgress = createPageProgress({ element: $('#page-processing-progress'), api, state,
+  onPublished: async (bookId, number, revision, signal) => {
+    const epoch = state.editorEpoch;
+    const fresh = await api.page(bookId, number, signal);
+    if (state.book?.id === bookId && state.currentPage === number && state.editorEpoch === epoch)
+      acceptReadyPage(number, fresh);
+  }
+});
+function readingInteractionActive() {
+  const selection = window.getSelection?.();
+  return Boolean((selection && !selection.isCollapsed && $('#reader')?.contains(selection.anchorNode)) ||
+    document.activeElement?.closest?.('input, textarea, [contenteditable="true"]'));
+}
 
 function currentPageProtected() {
   return Boolean(state.dirty || state.conflict || currentSaveInFlight());
@@ -69,6 +83,7 @@ function renderReadingWindowStatus(snapshot = readingSnapshot) {
   // U4：当前页真实阶段来自后端事件（非计时推测）；未知剩余工作量不显示百分比。
   const centerInfo = (snapshot?.pages || []).find(p => Number(p.pageNumber) === state.currentPage);
   const proc = centerInfo?.processing || null;
+  if (proc) pageProgress.accept(proc, centerInfo.status);
   const stageLabels = { PREPARING: '正在准备', OCR: '正在识别文字', STRUCTURE: '正在整理版面', REVIEW: '正在核对疑字', VALIDATING: '正在校验', PUBLISHING: '正在发布' };
   const stageText = proc && proc.lifecycle === 'RUNNING' && stageLabels[proc.stage] ? stageLabels[proc.stage] : null;
   $('#reading-window-status').textContent = deferredReady && state.book && deferredReady.bookId === state.book.id && deferredReady.page === state.currentPage
@@ -170,7 +185,7 @@ function acceptReadyPage(pageNumber, page) {
       (pageNumber === state.currentPage && olderRevision(page, state.page))) return;
   const bookId = state.book.id;
   if (pageNumber === state.currentPage) {
-    if (currentPageProtected()) {
+    if (currentPageProtected() || readingInteractionActive()) {
       deferredReady = { bookId, page: pageNumber, revision: page.revision };
       renderReadingWindowStatus();
       return;
@@ -1271,6 +1286,7 @@ async function goToPage(n, options = {}) {
     readingWindow.navigated();
   } else if (!readingWindow.active()) readingWindow.prefetch();
   const requestId = ++pageRequest, bookId = state.book.id;
+  pageProgress.watch();
   // 阶段2：取消上一次未完成的正文请求，后端仍以自身预算为准继续或终止解码
   pageFetchController?.abort();
   pageFetchController = new AbortController();
@@ -1283,6 +1299,7 @@ async function goToPage(n, options = {}) {
     const page = cached || await api.page(bookId, n, fetchSignal);
     if (requestId !== pageRequest || state.book?.id !== bookId) return;
     state.pageCache.set(n, page); state.page = page; state.blocks = cloneBlocks(page.blocks); state.reviewedDraft = Boolean(page.reviewed); renderCurrent();
+    pageProgress.render();
     renderJobHeading();
     const position = options.restoreScroll ? Number(options.scrollTop || 0) : options.preserveScroll ? previousScrollTop : 0;
     requestAnimationFrame(() => { $('#reader').scrollTop = position; });
@@ -1317,6 +1334,7 @@ async function goToPage(n, options = {}) {
 async function selectBook(id) {
   if (hasDirtyChanges()) { $('#book-select').value = state.book?.id || ''; return; }
   void readingWindow.stop({ silent: true });
+  pageProgress.stop();
   readingMetadataSignatures.clear(); readingMetadataVersions.clear(); readingMetadataProfiles.clear();
   deferredReady = null;
   renderReadingWindowStatus(null);
@@ -1336,12 +1354,12 @@ async function selectBook(id) {
   // J08：切书换作用域，辅助推荐映射清空
   state.assistMap = {};
   if (!id) {
-    state.book = null; state.summaries = []; state.focus = false; document.body.classList.remove('focus-reading'); $('#workspace').classList.add('is-empty'); $('#empty-state').hidden = false; $('#reader-shell').hidden = true; renderBookMeta(); renderToc(); return;
+    state.book = null; pageProgress.watch(); state.summaries = []; state.focus = false; document.body.classList.remove('focus-reading'); $('#workspace').classList.add('is-empty'); $('#empty-state').hidden = false; $('#reader-shell').hidden = true; renderBookMeta(); renderToc(); return;
   }
   try {
-    const [book, summaries] = await Promise.all([api.book(id), api.pages(id)]);
+    const book = await api.bookMetadata(id);
     if (requestId !== bookRequest) return;
-    state.book = book; state.summaries = Array.isArray(summaries) ? summaries : []; $('#book-select').value = id;
+    state.book = book; state.summaries = []; $('#book-select').value = id;
     $('#workspace').classList.remove('is-empty'); $('#empty-state').hidden = true; $('#reader-shell').hidden = false;
     renderBookMeta(); renderBookmarks();
     const finiteDefault = Math.min(20, book.totalPages);
@@ -1352,12 +1370,23 @@ async function selectBook(id) {
     // J08：阅读依据默认保真（已确认）；旧偏好无此项，不迁移、不把旧显示当自动确认授权
     state.evidenceMode = prefs.evidenceMode === 'assisted' ? 'assisted' : 'confirmed'; state.assistMap = {};
     $('#font-size').value = state.fontSize; $('#font-output').value = state.fontSize; $('#line-height').value = state.lineHeight; $('#line-output').value = state.lineHeight;
-    const page = Math.min(book.totalPages, Math.max(1, Number(prefs.page || 1)));
+    const savedPage = Number(prefs.page);
+    const page = Math.min(book.totalPages, Math.max(1, Number.isInteger(savedPage) ? savedPage : 1));
     state.currentPage = page;
-    const outlinePromise = refreshOutline(id);
+    // Current-page GET is issued before any whole-book summaries or profile scan.
     await goToPage(page, { force: true, restoreScroll: true, scrollTop: prefs.scrollTop, skipSavePosition: true });
     if (requestId !== bookRequest) return;
-    await Promise.all([refreshJob(), outlinePromise]);
+    const summariesPromise = api.pages(id).then(summaries => {
+      if (requestId !== bookRequest || state.book?.id !== id) return;
+      const newer = new Map(state.summaries.filter(s => readingMetadataVersions.has(s.pageNumber)).map(s => [s.pageNumber, s]));
+      state.summaries = (Array.isArray(summaries) ? summaries : []).map(s => newer.get(s.pageNumber) || s);
+      // A metadata response must not overwrite newer revisions already observed by the window.
+      mergeReadingMetadata(readingSnapshot);
+      state.book.processedPages = state.summaries.filter(s => s.status === 'READY').length;
+      state.book.reviewedPages = state.summaries.filter(s => s.reviewed).length;
+      renderToc(); renderBookMeta();
+    }).catch(error => { if (requestId === bookRequest) showError(error); });
+    await Promise.all([refreshJob(), refreshOutline(id), summariesPromise]);
     if (requestId !== bookRequest) return;
     // U2/SAFE-12：选书不自动启动云端随读。页面图片外发须经用户在任务入口的明确授权
     // （授权绑定本次任务）；自动启动会绕过授权并与“默认关闭不识别”的验收冲突。
@@ -1807,9 +1836,9 @@ $('#reading-window-refresh').addEventListener('click', () => { void readingWindo
 $('#retry-page-header')?.addEventListener('click', retryCurrentPage);
 $('#reload-page-header')?.addEventListener('click', reloadCurrentPage);
 $('#reader-reload-page')?.addEventListener('click', reloadCurrentPage);
-const isAutoProcessAll = () => localStorage.getItem('book_html_auto_process_all') !== 'false';
+const isAutoProcessAll = () => { try { return localStorage.getItem('book_html_auto_process_all') === 'true'; } catch (_) { return false; } };
 function setAutoProcessAll(val) {
-  localStorage.setItem('book_html_auto_process_all', String(val));
+  try { localStorage.setItem('book_html_auto_process_all', String(val)); } catch (_) { /* Session UI remains usable. */ }
   const cb1 = $('#auto-process-all');
   if (cb1) cb1.checked = val;
   const cb2 = $('#reading-window-auto-all');

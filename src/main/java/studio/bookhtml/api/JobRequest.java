@@ -6,6 +6,6 @@ public record JobRequest(String pages,
                          @Pattern(regexp="paddle-aistudio|ppocr", message="provider 必须为 paddle-aistudio 或 ppocr") String provider,
                          @Pattern(regexp="auto|vertical|horizontal", message="layout 无效") String layout,
     boolean splitSpreads, boolean force, Boolean assist) {
-    public boolean assistEnabled() { return assist == null || assist; }
+    public boolean assistEnabled() { return Boolean.TRUE.equals(assist); }
     public String providerOrDefault() { return provider == null ? "paddle-aistudio" : provider; }
 }

@@ -24,9 +24,6 @@ public record PaddleAiStudioProperties(String accessToken, String jobUrl, String
 
     @Override
     public String toString() {
-        return "PaddleAiStudioProperties[accessToken=[REDACTED], jobUrl=" + jobUrl
-                + ", model=" + model + ", requestTimeoutSeconds=" + requestTimeoutSeconds
-                + ", totalTimeoutSeconds=" + totalTimeoutSeconds
-                + ", pollIntervalSeconds=" + pollIntervalSeconds + "]";
+        return "PaddleAiStudioProperties[configuration=[REDACTED]]";
     }
 }

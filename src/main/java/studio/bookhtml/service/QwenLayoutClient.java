@@ -49,7 +49,7 @@ public class QwenLayoutClient {
     private static final HttpClient SHARED_HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10)).build();
     private static HttpResponse<InputStream> sharedSend(HttpRequest request) throws Exception {
-        return SHARED_HTTP.send(request, HttpResponse.BodyHandlers.ofInputStream());
+        return BoundedModelHttp.send(SHARED_HTTP, request, MAX_RESPONSE_BYTES);
     }
     private static final int MAX_IMAGE_BYTES = 10 * 1024 * 1024;
     private static final int MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024;

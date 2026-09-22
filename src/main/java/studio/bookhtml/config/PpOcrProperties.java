@@ -14,6 +14,6 @@ public record PpOcrProperties(String url, int requestTimeoutSeconds) {
 
     @Override
     public String toString() {
-        return "PpOcrProperties[url=" + url + ", requestTimeoutSeconds=" + requestTimeoutSeconds + "]";
+        return "PpOcrProperties[url=REDACTED, requestTimeoutSeconds=" + requestTimeoutSeconds + "]";
     }
 }
