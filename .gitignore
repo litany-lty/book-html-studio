@@ -13,8 +13,11 @@ __pycache__/
 *.pyc
 
 # Local credentials and runtime evidence must never be committed.
+.env
 .env.*
 !.env.example
+.settings/
+*.secret
 *.pem
 *.key
 *.p12
