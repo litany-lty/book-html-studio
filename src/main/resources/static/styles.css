@@ -509,6 +509,22 @@ progress::-moz-progress-bar { background: var(--blue); }
   body[data-reader-mode="reading"] .workspace.is-empty { grid-template-columns: 250px minmax(0, 1fr); }
   body[data-reader-mode="proof"] #review-panel { display: block; }
 }
+/* U1/U7：任务底栏在滚动容器之外常驻（工具栏唯一入口 + 底栏详情），
+   后台任务不覆盖正文，停止至多两次操作可达。高度为最小高度，允许缩放自适应。 */
+.task-footer {
+  min-height: 44px;
+  border-top: 1px solid var(--line);
+  background: var(--paper);
+  padding: 6px 12px calc(56px + env(safe-area-inset-bottom, 0px));
+}
+.task-footer .reading-window-bar {
+  margin: 0 auto;
+  max-width: 960px;
+}
+/* 无任务时不占位；有任务时常驻可达。 */
+.task-footer:has(#reading-window-bar[hidden]) {
+  display: none;
+}
 .task-entry-quiet { font-variant-numeric: tabular-nums; }
 .task-entry-quiet[data-attention="true"] { border-color: var(--amber); }
 /* U1：阅读正文默认宽度与字号下限；原稿/大图不强制套文本宽度。 */

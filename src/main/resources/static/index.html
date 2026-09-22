@@ -104,7 +104,6 @@
           <input id="reading-progress-range" type="range" min="1" max="1" value="1" disabled aria-label="拖动选择目标页">
         </div>
         </footer>
-        <div id="reading-window-bar" class="reading-window-bar" role="status" aria-live="polite" hidden><span id="reading-window-status"></span><span id="reading-window-pages"></span><button id="reading-window-apply" class="button quiet" type="button" hidden>更新本页</button><button id="reading-window-manual" class="button quiet" type="button" hidden>手动重试失败页</button><button id="reading-window-refresh" class="button quiet" type="button" hidden>刷新状态</button><button id="reading-window-stop" class="button quiet" type="button">停止</button></div>
       </div>
     </section>
 
@@ -122,6 +121,9 @@
       </div>
     </aside>
   </main>
+  <footer id="task-footer" class="task-footer reader-footer-u1" aria-label="任务状态">
+    <div id="reading-window-bar" class="reading-window-bar" role="status" aria-live="polite" hidden><span id="reading-window-status"></span><span id="reading-window-pages"></span><button id="reading-window-apply" class="button quiet" type="button" hidden>更新本页</button><button id="reading-window-manual" class="button quiet" type="button" hidden>手动重试失败页</button><button id="reading-window-refresh" class="button quiet" type="button" hidden>刷新状态</button><button id="reading-window-stop" class="button quiet" type="button">停止</button></div>
+  </footer>
   <div id="drawer-scrim" class="drawer-scrim" hidden></div>
   <dialog id="library-dialog" class="library-dialog" aria-labelledby="library-title">
     <div class="library-head"><div><span class="library-eyebrow">我的藏书</span><h2 id="library-title">管理书架</h2><p>整理书名与归档状态。归档后可随时恢复，原稿、校对内容和用量记录都会保留。</p></div><button id="library-close" class="button quiet" type="button" aria-label="关闭书架管理">关闭</button></div>

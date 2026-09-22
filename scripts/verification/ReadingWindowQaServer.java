@@ -21,7 +21,6 @@ import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -31,7 +30,8 @@ import static org.mockito.Mockito.*;
 public class ReadingWindowQaServer {
     public static final String BOOK = "bbbbbbbb-2222-2222-2222-222222222222";
     private static final List<Map<String, Object>> calls = new CopyOnWriteArrayList<>();
-    private static final AtomicReference<CountDownLatch> gate = new AtomicReference<>();
+    // U5：并行在途每调用一门；/__qa/release 按派发先后逐个放行。
+    private static final java.util.Deque<CountDownLatch> gates = new java.util.concurrent.ConcurrentLinkedDeque<>();
 
     public static void main(String[] args) throws Exception {
         if (args.length != 2) throw new IllegalArgumentException("需要全新临时数据目录与独立端口");
@@ -84,11 +84,12 @@ public class ReadingWindowQaServer {
                     if (!(bean instanceof PageProcessor)) return bean;
                     PageProcessor mock = mock(PageProcessor.class);
                     try {
-                        when(mock.process(anyString(), anyInt(), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+                        // U4：随读 worker 走两阶段（基线阻塞可门控，增强直通基线块）。
+                        when(mock.processBaseline(anyString(), anyInt(), anyString(), anyString(), anyBoolean(), any()))
                                 .thenAnswer(invocation -> {
                                     String id = invocation.getArgument(0); int n = invocation.getArgument(1);
                                     if (!BOOK.equals(id)) throw new IllegalArgumentException("禁止处理非随读合成书");
-                                    CountDownLatch latch = new CountDownLatch(1); gate.set(latch);
+                                    CountDownLatch latch = new CountDownLatch(1); gates.add(latch);
                                     Map<String, Object> call = Collections.synchronizedMap(new LinkedHashMap<>());
                                     call.put("pageNumber", n); call.put("startedAt", System.currentTimeMillis());
                                     call.put("completed", false); calls.add(call);
@@ -102,7 +103,35 @@ public class ReadingWindowQaServer {
                                         return new ProcessingResult(new Page(n,600,800,"READY","mock",
                                                 List.of(block), List.of("模拟识别，无云调用"), false, null, List.of(block)),
                                                 ProcessingResult.Category.TEXT);
-                                    } finally { gate.compareAndSet(latch, null); }
+                                    } finally { gates.remove(latch); }
+                                });
+                        when(mock.enrichBaseline(anyString(), anyInt(), any(), anyString(), anyString(), any()))
+                                .thenAnswer(invocation -> {
+                                    studio.bookhtml.domain.Page baseline = invocation.getArgument(2);
+                                    List<Block> blocks = baseline.blocks() == null ? List.of() : baseline.blocks();
+                                    return new PageProcessor.EnrichResult(List.copyOf(blocks),
+                                            baseline.provider() == null ? "mock" : baseline.provider(),
+                                            List.of());
+                                });
+                        when(mock.process(anyString(), anyInt(), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+                                .thenAnswer(invocation -> {
+                                    String id = invocation.getArgument(0); int n = invocation.getArgument(1);
+                                    if (!BOOK.equals(id)) throw new IllegalArgumentException("禁止处理非随读合成书");
+                                    CountDownLatch latch = new CountDownLatch(1); gates.add(latch);
+                                    Map<String, Object> call = Collections.synchronizedMap(new LinkedHashMap<>());
+                                    call.put("pageNumber", n); call.put("startedAt", System.currentTimeMillis());
+                                    call.put("completed", false); calls.add(call);
+                                    try {
+                                        if (!latch.await(45, TimeUnit.SECONDS)) throw new IllegalStateException("测试未释放模拟识别");
+                                        String text = "这是第 " + n + " 页的模拟识别内容，仅用于随读导航与安全保存验证。";
+                                        Block block = new Block("mock-" + n, "text", 0, new double[]{.1,.1,.8,.1},
+                                                "horizontal-tb", text, text, .95, false, false, null, "local",
+                                                List.of("mock-" + n), null, null, List.of());
+                                        call.put("completed", true); call.put("finishedAt", System.currentTimeMillis());
+                                        return new ProcessingResult(new Page(n,600,800,"READY","mock",
+                                                List.of(block), List.of("模拟识别，无云调用"), false, null, List.of(block)),
+                                                ProcessingResult.Category.TEXT);
+                                    } finally { gates.remove(latch); }
                                 });
                     } catch (Exception error) { throw new IllegalStateException(error); }
                     return mock;
@@ -115,11 +144,13 @@ public class ReadingWindowQaServer {
     @RestController
     static class QaController {
         @GetMapping("/__qa/reading-calls") public Map<String, Object> calls() {
-            return Map.of("fixture", BOOK, "calls", List.copyOf(calls), "waiting", gate.get() != null);
+            return Map.of("fixture", BOOK, "calls", List.copyOf(calls), "waiting", !gates.isEmpty());
         }
         @PostMapping("/__qa/release") public Map<String, Object> release() {
-            CountDownLatch current = gate.get(); if (current != null) current.countDown();
-            return Map.of("released", current != null);
+            // U5 并行在途：按派发先后逐个放行，还原脚本步进控制语义。
+            CountDownLatch oldest = gates.pollFirst();
+            if (oldest != null) oldest.countDown();
+            return Map.of("released", oldest != null);
         }
     }
 }

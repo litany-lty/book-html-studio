@@ -1346,23 +1346,9 @@ async function selectBook(id) {
     if (requestId !== bookRequest) return;
     await Promise.all([refreshJob(), outlinePromise]);
     if (requestId !== bookRequest) return;
-    if (!readingWindow.active()) {
-      const provider = selectedProvider();
-      const providerConfig = state.config?.providers?.find(item => item.id === provider);
-      if (provider && providerConfig?.available) {
-        const form = new FormData($('#job-form'));
-        const options = {
-          provider,
-          layout: form.get('layout') || 'auto',
-          splitSpreads: form.get('splitSpreads') === 'on',
-          assist: $('#qwen-assist').checked && !$('#qwen-assist').disabled,
-          autoProcessAll: isAutoProcessAll()
-        };
-        readingWindow.enable(options).catch(err => {
-          console.warn('随读识别自动启动跳过:', err);
-        });
-      }
-    }
+    // U2/SAFE-12：选书不自动启动云端随读。页面图片外发须经用户在任务入口的明确授权
+    // （授权绑定本次任务）；自动启动会绕过授权并与“默认关闭不识别”的验收冲突。
+    // 用户明确开启后，本次会话内连续随读不再重复确认。
   } catch (error) { if (requestId === bookRequest) showError(error); }
 }
 

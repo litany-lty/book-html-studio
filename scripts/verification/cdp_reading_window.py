@@ -130,15 +130,17 @@ def main():
             "assist": False, "force": False}) == 409)
         check("在途时跳40", jump(40))
         check("再跳42", jump(42))
-        time.sleep(1.1)
-        check("在途未完成时不并发送新页", [item["pageNumber"] for item in calls()] == [30])
+        # U2 并行语义：容量内新中心与在途页并行（不强杀在途），被超前的 40 不再派发。
+        observed = wait_calls(2)
+        check("在途未完成时新中心并行发送", [item["pageNumber"] for item in observed] == [30, 42])
         http("/__qa/release", {})
         observed = wait_calls(2)
         check("旧请求收尾后最新42优先", [item["pageNumber"] for item in observed] == [30, 42])
         check("旧30结果不切回旧页", evaluate("document.querySelector('#page-jump').value==='42'"))
         http("/__qa/release", {})
         observed = wait_calls(3)
-        check("邻页顺序当前后先43", [item["pageNumber"] for item in observed] == [30, 42, 43])
+        # U2/U5 并行语义：收尾后容量释放，后台按队列顺序补足（43、44…），故断言前缀而非精确相等。
+        check("邻页顺序当前后先43", [item["pageNumber"] for item in observed][:3] == [30, 42, 43])
         check("不等全窗口当前42自动展示文字", wait("document.querySelector('#paper').textContent.includes('这是第 42 页')"))
         check("随读轮询不重复查询全书内容与目录", whole_book_reads() == initial_whole_book_reads)
         driver.screenshot(session, os.path.join(OUT, "desktop-reading.png"))
@@ -167,13 +169,14 @@ def main():
         # A protected draft keeps its higher-priority update notice. Require the
         # server-acknowledged stop message, not the draft-dependent status title.
         check("停止新队列", wait("document.querySelector('#reading-window-stop').hidden && document.querySelector('#reading-window-pages').textContent.includes('已停止后续排队')"))
+        frozen = [item["pageNumber"] for item in calls()]
         http("/__qa/release", {})
         time.sleep(1.4)
-        check("停止后无旧队列继续发送", [item["pageNumber"] for item in calls()] == [30, 42, 43])
+        check("停止后无旧队列继续发送", [item["pageNumber"] for item in calls()] == frozen)
         evaluate("window.confirm=()=>true")
         check("回到已在旧窗口完成的30", jump(30))
         check("旧窗口完成页不受PENDING缓存遮挡", wait("document.querySelector('#paper').textContent.includes('这是第 30 页')"))
-        check("读取完成页不重复识别", len(calls()) == 3)
+        check("读取完成页不重复识别", len(calls()) == len(frozen))
 
         driver.call("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": True}, session=session)
         time.sleep(.3)
@@ -184,7 +187,7 @@ def main():
         driver.navigate(session, SERVER)
         check("刷新恢复书架", wait("!!document.querySelector('#reading-window-open')"))
         time.sleep(1.3)
-        check("刷新不自动恢复云识别", len(calls()) == 3)
+        check("刷新不自动恢复云识别", len(calls()) == len(frozen))
         check("没有JS未处理异常", not any(e.get("method") == "Runtime.exceptionThrown" for e in driver.events))
         print("OVERALL PASS", flush=True)
     finally:
