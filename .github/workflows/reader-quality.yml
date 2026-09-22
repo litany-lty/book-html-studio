@@ -1,0 +1,47 @@
+name: Reader safety and streaming contracts
+on:
+  push:
+    branches: [main, audit/reader-stream-context-security-20260922]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: reader-quality-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Track tested revision
+        run: |
+          mkdir -p test-results/reader-audit
+          git rev-parse HEAD > test-results/reader-audit/tested-sha.txt
+      - name: Scan tracked files and reachable history without logging values
+        run: python3 scripts/verification/scan_secrets.py --history --output test-results/reader-audit/secrets.json
+      - name: Scanner regression tests
+        if: always()
+        run: python3 -m unittest discover -s scripts/verification -p 'test_scan_secrets.py'
+      - name: Streaming and interaction contracts
+        if: always()
+        run: |
+          node scripts/verification/probe_reader_stream.mjs
+          node scripts/verification/probe_reading_window.js
+          node scripts/verification/probe_display.js
+          node scripts/verification/probe_job_scope.js
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reader-contracts-${{ github.sha }}
+          path: test-results/reader-audit/
+          retention-days: 7
