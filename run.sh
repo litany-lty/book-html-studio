@@ -199,6 +199,14 @@ if [[ -n "$(listening_pids)" ]]; then
 fi
 
 printf '%s\n' "纸页工坊：http://127.0.0.1:${BOOK_PORT}（Ctrl+C 停止）"
+if [[ "${BIND:-127.0.0.1}" == "0.0.0.0" ]]; then
+  BOOK_LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
+  if [[ -n "$BOOK_LAN_IP" ]]; then
+    printf '%s\n' "局域网访问：http://${BOOK_LAN_IP}:${BOOK_PORT}（手机连同一 Wi-Fi 打开；仅限局域网，无登录保护）"
+  else
+    printf '%s\n' "局域网访问：http://<本机局域网IP>:${BOOK_PORT}（手机连同一 Wi-Fi 打开）"
+  fi
+fi
 # 资源预算（阶段2，均为暂定参数）：BOOK_XMX 为 JVM 堆上限（默认 768m，运行中不可任意扩大）；
 # RENDER_MAX_CONCURRENT / RENDER_MAX_IN_FLIGHT_MB / RENDER_MAX_WAIT_MS 控制共享渲染准入；
 # RENDER_WORKER_TIMEOUT_S 控制独立解码进程超时。
