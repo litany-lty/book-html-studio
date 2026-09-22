@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/fonts/reader-fonts.css">
 </head>
-<body>
+<body data-reader-mode="reading">
   <a class="skip-link" href="#reader">跳到正文</a>
   <header class="topbar">
     <div class="brand">
@@ -74,8 +74,8 @@
       <div id="empty-state" class="empty-state"><div class="empty-sheet"><span aria-hidden="true">原</span></div><div><h2>从一份 PDF 开始</h2><p>导入后先查看原稿，再挑选少量页面识别。没有识别结果的页面仍会诚实地显示原图。</p><label class="upload-button large" for="pdf-upload">选择 PDF</label><p class="empty-hint">也可以将 PDF 拖放到此处；导入不会自动开始识别。</p></div></div>
       <div id="reader-shell" hidden>
         <div class="reader-toolbar" aria-label="阅读工具">
-          <div class="view-switch" role="group" aria-label="显示方式"><button class="segmented" data-view="original" type="button">原稿</button><button class="segmented" data-view="facsimile" type="button">原貌 HTML</button><button class="segmented active" data-view="reading" type="button">横排阅读</button></div>
-          <div class="reader-primary-actions"><button id="reader-reload-page" class="button quiet reader-reload-btn" type="button" title="重新识别并排版当前页（二次处理）" hidden>重新处理本页</button><button id="reading-window-open" class="button quiet reading-window-open" type="button" aria-haspopup="dialog" aria-controls="reading-window-dialog" aria-pressed="false">随读识别</button><button id="reading-options-open" class="button quiet reading-options-open" type="button" aria-haspopup="dialog" aria-controls="reading-options">阅读设置</button></div>
+          <div class="view-switch" role="group" aria-label="显示方式"><button class="segmented" data-view="original" type="button">原稿</button><button class="segmented" data-view="facsimile" type="button">原版排布</button><button class="segmented active" data-view="reading" type="button">阅读</button></div>
+          <div class="reader-primary-actions"><button id="reader-reload-page" class="button quiet reader-reload-btn" type="button" title="重新识别并排版当前页（二次处理）" hidden>重新处理本页</button><button id="reading-window-open" class="button quiet reading-window-open task-entry-quiet" type="button" aria-haspopup="dialog" aria-controls="reading-window-dialog" aria-pressed="false">任务</button><button id="proof-toggle" class="button quiet" type="button" aria-pressed="false" aria-controls="review-panel">校对</button><button id="reading-options-open" class="button quiet reading-options-open" type="button" aria-haspopup="dialog" aria-controls="reading-options">阅读设置</button></div>
           <div class="reader-settings">
             <button id="focus-toggle" class="button quiet" type="button" aria-pressed="false">专注阅读</button>
             <button id="evidence-toggle" class="button quiet" type="button" aria-pressed="false">阅读依据：已确认</button>
@@ -88,12 +88,13 @@
           </div>
         </div>
         <div class="page-head">
-          <div><span id="quality-badge" class="quality-badge">等待处理</span><span id="quality-detail"></span><span id="page-save-status" class="page-save-status" role="status" aria-live="polite" hidden></span></div>
+          <div><span id="quality-badge" class="quality-badge">等待处理</span><span id="quality-detail"></span><span id="quality-diagnostics" class="quality-diagnostics" hidden></span><span id="page-save-status" class="page-save-status" role="status" aria-live="polite" hidden></span></div>
           <button id="bookmark-button" class="button quiet" type="button" aria-pressed="false">加入书签</button>
         </div>
         <div id="page-message" class="page-message" role="status" hidden></div>
-        <article id="paper" class="paper" aria-live="polite"></article>
-        <nav class="pagination" aria-label="翻页">
+        <article id="paper" class="paper"></article>
+        <footer class="reader-footer-u1">
+        <nav class="pagination" aria-label="翻页与阅读位置">
           <button id="prev-page" class="button" type="button">上一页</button>
           <form id="jump-form"><label for="page-jump">第</label><input id="page-jump" type="number" min="1"><span id="total-pages">/ 0 页</span></form>
           <button id="next-page" class="button" type="button">下一页</button>
@@ -102,6 +103,7 @@
           <div class="reading-progress-copy"><span>阅读进度</span><output id="reading-progress-output" for="reading-progress-range">0 / 0 页</output></div>
           <input id="reading-progress-range" type="range" min="1" max="1" value="1" disabled aria-label="拖动选择目标页">
         </div>
+        </footer>
         <div id="reading-window-bar" class="reading-window-bar" role="status" aria-live="polite" hidden><span id="reading-window-status"></span><span id="reading-window-pages"></span><button id="reading-window-apply" class="button quiet" type="button" hidden>更新本页</button><button id="reading-window-manual" class="button quiet" type="button" hidden>手动重试失败页</button><button id="reading-window-refresh" class="button quiet" type="button" hidden>刷新状态</button><button id="reading-window-stop" class="button quiet" type="button">停止</button></div>
       </div>
     </section>

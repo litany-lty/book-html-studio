@@ -37,28 +37,8 @@ class UxU0BaselineReproTest {
         return Files.readString(repoRoot().resolve(relative));
     }
 
-    @Test
-    void u0f01_fake92ProgressFormulaStillPresent() throws Exception {
-        String appJs = readStatic("src/main/resources/static/app.js");
-        assertTrue(appJs.contains("Math.min(92"),
-                "U0 证据：app.js 仍包含 Math.min(92 计时假进度");
-        assertTrue(appJs.contains("getConvertingPagePct"),
-                "U0 证据：getConvertingPagePct 仍存在");
-        assertTrue(appJs.contains("setInterval") && appJs.contains(", 100)"),
-                "U0 证据：100ms 标题刷新仍存在");
-    }
-
-    @Test
-    void u0f02_floatingTaskBarStillOverlaysReadingViewport() throws Exception {
-        String css = readStatic("src/main/resources/static/styles.css");
-        assertTrue(css.contains(".reading-window-bar"), "U0 证据：.reading-window-bar 仍存在");
-        assertTrue(css.contains("position: fixed") || css.contains("position:fixed"),
-                "U0 证据：任务条仍为 fixed 定位");
-        assertTrue(css.contains("pulseDot") || css.contains("pulse-dot") || css.contains("pulse-glow"),
-                "U0 证据：脉冲动画仍存在");
-        assertTrue(css.contains("bottom: 54px") || css.contains("bottom:54px"),
-                "U0 证据：任务条 bottom 54px 仍悬浮于阅读区");
-    }
+    // U0-F01/F02 已由 U1 消除（见 UxU1ReaderQuietTest），本类仅保留尚未修复项的复现。
+    // 故意不再断言假进度与悬浮条存在；若回退，U1 门禁会变红。
 
     @Test
     void u0f04_duplicateRunningHeaderFloodsOutline() {

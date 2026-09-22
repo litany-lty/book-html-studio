@@ -85,16 +85,19 @@ function originalImage(book, page, className = '') {
 
 export function statusMessage(page) {
   if (!page) return '';
-  if (page.status === 'FAILED') return page.error || '本页转换失败。原稿仍可查看，可重新处理本页。';
+  if (page.status === 'FAILED') return page.error || '本页暂未生成文字，可以先读原稿。';
   if (page.status === 'PROCESSING') {
     if (page.isReprocessing || (page.blocks?.length > 0)) {
-      return '正在二次处理本页，保持显示当前内容，完成后自动更新。';
+      return '正在重新处理，保留当前内容。';
     }
-    return '本页正在转换，完成前先显示原稿。';
+    return '正在识别本页，原稿可以继续阅读。';
   }
-  if (page.status !== 'READY') return '本页尚未转换，当前仅显示原稿。请在“处理设置”中选择本页。';
-  if (!page.blocks?.length) return '本页没有识别到内容，原稿已保留，请在校对栏手工框选。';
+  if (page.status !== 'READY') return '本页尚未识别，原稿保留，可随时对照。';
+  // U1：空白/纯图页使用轻量空态，不误报为识别失败，不诱导付费重试。
+  if (!page.blocks?.length) return '本页为空白页或仅含插图，原稿保留，可切换原稿查看。';
   const actionableWarnings = (page.warnings || []).filter(warning => !/尚未人工校对|自动结果仍需核对原图|自动原图复核候选/u.test(warning));
+  // U1：默认阅读不拼出长技术条；多条提示只给一句话，详情进入校对/诊断。
+  if (actionableWarnings.length > 3) return '有多条版面提示，可在校对详情查看。';
   if (actionableWarnings.length) return `版面提示：${actionableWarnings.join('；')}`;
   return '';
 }
@@ -104,12 +107,12 @@ export function qualityOf(page) {
     if (page?.status === 'PROCESSING') {
       const isReproc = page.isReprocessing || (page.blocks?.length > 0);
       return {
-        label: isReproc ? '二次处理中' : '正在转换',
+        label: isReproc ? '正在重新处理' : '正在识别本页',
         tone: 'processing',
-        detail: isReproc ? '正在重新提取并排版，完成后自动刷新。' : '本页正在转换，完成前先显示原稿。'
+        detail: ''
       };
     }
-    return { label: page?.status === 'FAILED' ? '转换失败' : '尚未转换', tone: 'pending', detail: '' };
+    return { label: page?.status === 'FAILED' ? '本页暂未生成文字' : '原稿保留，可随时对照', tone: 'pending', detail: '' };
   }
   const blocks = page.blocks || [];
   const uncertain = blocks.filter(block => block.uncertain || (block.confidence != null && block.confidence < .75)).length;
@@ -120,7 +123,15 @@ export function qualityOf(page) {
   const provider = page.provider ? ` · ${page.provider}` : '';
   const warnings = page.warnings?.length ? ` · ${page.warnings.length} 条版面提示` : '';
   const detail = `${blocks.length} 个块${unresolvedIssues ? `，${unresolvedIssues} 处内容疑点未解决` : uncertain ? `，${uncertain} 个块需留意` : ''}${average == null ? '' : `，识别参考值 ${Math.round(average * 100)}%`}${provider}${warnings}`;
-  return reviewed ? { label: '已人工校对', tone: 'reviewed', detail } : uncertain || unresolvedIssues ? { label: '模型提示', tone: 'warning', detail } : { label: '自动处理完成', tone: 'ready', detail };
+  // U1：默认阅读只显示轻量标签（有待核对文字）；块数/provider/参考值/提示数进入诊断详情。
+  const label = reviewed ? '已人工校对' : uncertain || unresolvedIssues ? '有待核对文字' : '自动处理完成';
+  const tone = reviewed ? 'reviewed' : uncertain || unresolvedIssues ? 'warning' : 'ready';
+  return { label, tone, detail };
+}
+
+// U1：诊断详情保留完整技术信息（块数、参考置信度、provider、提示数），按需查看。
+export function qualityDiagnostics(page) {
+  return qualityOf(page).detail || '';
 }
 
 function renderFacsimile(container, ctx) {
@@ -144,7 +155,7 @@ function renderFacsimile(container, ctx) {
   });
   const note = document.createElement('p');
   note.className = 'layout-note';
-  note.textContent = '原貌 HTML 按识别坐标近似排版；原稿保留在底层，插图与复杂底纹不会被重绘。';
+  note.textContent = '原版排布按识别坐标近似呈现；原稿保留在底层，插图与复杂底纹不会被重绘。';
   container.append(stage, note);
   fitFacsimile(stage);
 }
@@ -230,7 +241,7 @@ function renderReading(container, ctx) {
   if (!flow.children.length) {
     const empty = document.createElement('p');
     empty.className = 'flow-empty';
-    empty.textContent = '本页没有可进入阅读流的内容，请查看原稿或在校对栏补充。';
+    empty.textContent = '本页为空白页或仅含插图，可切换原稿查看。';
     flow.append(empty);
   }
   if (advertisements.length) {

@@ -7,6 +7,8 @@ import './settings.js';
 import { openBookUsage } from './usage.js';
 import { createReadingWindow } from './reading-window.js';
 import { createLibrary } from './library.js';
+import { initReaderMode } from './reader-mode.js';
+import { recordAnchor, restoreAnchor } from './reading-anchor.js';
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -45,8 +47,16 @@ function renderReadingWindowStatus(snapshot = readingSnapshot) {
   const bar = $('#reading-window-bar');
   bar.hidden = !active && !snapshot && !deferredReady;
   document.body.classList.toggle('reading-window-visible', !bar.hidden);
-  $('#reading-window-open').dataset.active = String(active);
-  $('#reading-window-open').setAttribute('aria-pressed', String(active));
+  // U1：阅读模式唯一安静任务入口。只显示活动任务数，不罗列页码/通道/并发量，
+  // 不带呼吸灯/流光/全宽进度条；预留宽度内更新，不改变工具栏高度与布局列数。
+  const entry = $('#reading-window-open');
+  const activeCount = snapshot?.processingPages?.length || (snapshot?.processingPage ? 1 : 0) || 0;
+  const failedCount = (snapshot?.pages || []).filter(page => page.status === 'FAILED').length;
+  entry.dataset.active = String(active);
+  entry.setAttribute('aria-pressed', String(active));
+  entry.textContent = activeCount > 0 ? `任务 · ${activeCount}` : '任务';
+  entry.dataset.attention = String(failedCount > 0);
+  entry.title = failedCount > 0 ? `${failedCount} 页需重试，展开任务详情查看` : '查看任务详情';
   $('#job-form button[type="submit"]').disabled = active || Boolean(state.pollTimer) || !state.book || jobSyncError;
   $('#reading-window-stop').hidden = !active;
   $('#reading-window-apply').hidden = !deferredReady || deferredReady.bookId !== state.book?.id || deferredReady.page !== state.currentPage;
@@ -142,6 +152,7 @@ function acceptReadyPage(pageNumber, page) {
       return;
     }
     const scrollTop = $('#reader').scrollTop;
+    const anchor = recordAnchor($('#reader'));
     if (!state.page) { pageFetchController?.abort(); ++pageRequest; }
     state.pageCache.set(pageNumber, page);
     state.page = page; state.blocks = cloneBlocks(page.blocks); state.reviewedDraft = Boolean(page.reviewed);
@@ -151,22 +162,22 @@ function acceptReadyPage(pageNumber, page) {
     convertingState.wasReprocessing = Boolean(convertingState.isReprocessing || state.reprocessingPage === pageNumber);
     convertingState.isReprocessing = false;
     state.reprocessingPage = null;
-    if (convertingState.timer) {
-      clearInterval(convertingState.timer);
-      convertingState.timer = null;
-    }
     renderCurrent();
     renderJobHeading();
     setTimeout(() => {
       if (convertingState.completedPage === pageNumber) {
         convertingState.pageNumber = null;
-        convertingState.startTime = 0;
         convertingState.completedAt = 0;
         convertingState.completedPage = null;
         renderJobHeading();
       }
     }, 1200);
-    requestAnimationFrame(() => { if (state.book?.id === bookId && state.currentPage === pageNumber) $('#reader').scrollTop = scrollTop; });
+    // U1：用阅读锚点恢复位置（同源块/邻近稳定文本），节点消失时回退 scrollTop。
+    requestAnimationFrame(() => {
+      if (state.book?.id !== bookId || state.currentPage !== pageNumber) return;
+      const root = $('#reader');
+      if (!restoreAnchor(root, anchor)) root.scrollTop = scrollTop;
+    });
   } else {
     state.pageCache.set(pageNumber, page);
     if (state.outline.some(entry => Number(entry.pageNumber) === pageNumber)) renderToc();
@@ -364,10 +375,9 @@ function pageTitle(page) {
   return headingText(heading).trim() || `第 ${page?.pageNumber || state.currentPage} 页`;
 }
 
+// U1：真实处理状态。不再用计时函数模拟百分比；未知剩余工作量时只显示阶段。
 const convertingState = {
   pageNumber: null,
-  startTime: 0,
-  timer: null,
   completedAt: 0,
   completedPage: null,
   isReprocessing: false,
@@ -376,22 +386,10 @@ const convertingState = {
 
 function resetConvertingState(newPage = null) {
   convertingState.pageNumber = newPage;
-  convertingState.startTime = newPage ? Date.now() : 0;
   convertingState.completedAt = 0;
   convertingState.completedPage = null;
   convertingState.isReprocessing = false;
   convertingState.wasReprocessing = false;
-  if (convertingState.timer) {
-    clearInterval(convertingState.timer);
-    convertingState.timer = null;
-  }
-}
-
-function getConvertingPagePct() {
-  if (convertingState.completedAt > 0) return 100;
-  if (!convertingState.startTime) return 15;
-  const elapsed = Date.now() - convertingState.startTime;
-  return Math.min(92, Math.max(15, Math.round(15 + 77 * (1 - Math.exp(-elapsed / 1100)))));
 }
 
 function isCurrentPageConverting() {
@@ -473,8 +471,8 @@ function renderJobHeading() {
   if (convertingState.completedAt > 0 && convertingState.completedPage === pageNum &&
       Date.now() - convertingState.completedAt < 1200) {
     headingEl.textContent = convertingState.wasReprocessing
-      ? `第 ${pageNum} 页二次处理完成 · 100%`
-      : `第 ${pageNum} 页转化完成 · 100%`;
+      ? `第 ${pageNum} 页二次处理完成`
+      : `第 ${pageNum} 页转化完成`;
     titleContainer?.classList.add('is-converting');
     return;
   }
@@ -482,32 +480,15 @@ function renderJobHeading() {
   if (converting) {
     if (convertingState.pageNumber !== pageNum) {
       convertingState.pageNumber = pageNum;
-      convertingState.startTime = Date.now();
       convertingState.completedAt = 0;
       convertingState.completedPage = null;
     }
-    if (!convertingState.timer) {
-      convertingState.timer = setInterval(() => {
-        if (!isCurrentPageConverting()) {
-          clearInterval(convertingState.timer);
-          convertingState.timer = null;
-          renderJobHeading();
-        } else {
-          const actionText = isReprocessing ? '正在二次处理' : '正在转化';
-          headingEl.textContent = `${actionText}第 ${state.currentPage} 页 · ${getConvertingPagePct()}%`;
-        }
-      }, 100);
-    }
-    const actionText = isReprocessing ? '正在二次处理' : '正在转化';
-    headingEl.textContent = `${actionText}第 ${pageNum} 页 · ${getConvertingPagePct()}%`;
+    // U1：未知剩余工作量时只显示真实阶段，不显示百分比。后端阶段信息由 U4 接入。
+    headingEl.textContent = isReprocessing ? `正在二次处理第 ${pageNum} 页` : `正在识别第 ${pageNum} 页`;
     titleContainer?.classList.add('is-converting');
     return;
   }
 
-  if (convertingState.timer) {
-    clearInterval(convertingState.timer);
-    convertingState.timer = null;
-  }
   titleContainer?.classList.remove('is-converting');
 
   if (state.job && state.job.status !== 'IDLE') {
@@ -575,7 +556,6 @@ async function reloadCurrentPage() {
   state.reprocessingPage = pageNum;
   convertingState.isReprocessing = true;
   convertingState.pageNumber = pageNum;
-  convertingState.startTime = Date.now();
   convertingState.completedAt = 0;
   convertingState.completedPage = null;
 
@@ -750,16 +730,16 @@ function renderQuality() {
 
   const badge = $('#quality-badge');
   if (isCurrentProcessing) {
-    const pct = job?.total ? Math.round(((job.completed || 0) / job.total) * 100) : 0;
+    // U1：当前页未知剩余工作量，只显示真实阶段，不显示百分比，不用脉冲点。
     badge.className = 'quality-badge processing';
-    badge.replaceChildren();
-    const dot = document.createElement('span');
-    dot.className = 'pulse-dot';
-    badge.append(dot, document.createTextNode(`正在转换 · ${pct}%`));
-    const detail = job?.total
-      ? `正在处理第 ${state.currentPage} 页，全书已完成 ${job.completed || 0} / ${job.total} 页 (${pct}%)`
-      : '本页正在转换，完成前先显示原稿。';
-    $('#quality-detail').textContent = detail;
+    badge.textContent = state.page?.isReprocessing ? '正在二次处理' : '正在识别本页';
+    $('#quality-detail').textContent = '';
+    const diag = $('#quality-diagnostics');
+    if (diag) {
+      diag.textContent = job?.total
+        ? `后台任务：已结束 ${job.completed || 0} / ${job.total} 页。当前页阶段未知，不显示百分比。`
+        : '后台任务进行中，当前页阶段未知，不显示百分比。';
+    }
     return;
   }
 
@@ -767,12 +747,16 @@ function renderQuality() {
   badge.className = `quality-badge ${quality.tone}`;
   badge.textContent = quality.label;
 
-  if (isJobRunning && job?.currentPage && job.currentPage !== state.currentPage) {
-    const pct = job.total ? Math.round(((job.completed || 0) / job.total) * 100) : 0;
-    const bgInfo = ` · 后台正在转换第 ${job.currentPage} 页 (${pct}%)`;
-    $('#quality-detail').textContent = `${quality.detail || ''}${bgInfo}`;
-  } else {
-    $('#quality-detail').textContent = quality.detail || '';
+  // U1：默认阅读不拼接长技术细节；详情进入诊断区按需查看。
+  $('#quality-detail').textContent = '';
+  const diag = $('#quality-diagnostics');
+  if (diag) {
+    let text = quality.detail || '';
+    if (isJobRunning && job?.currentPage && job.currentPage !== state.currentPage && job?.total) {
+      text += `${text ? '；' : ''}后台任务：已结束 ${job.completed || 0} / ${job.total} 页，当前处理第 ${job.currentPage} 页`;
+    }
+    diag.textContent = text;
+    diag.hidden = !text;
   }
 }
 
@@ -795,32 +779,28 @@ function renderPageMessage(rawMessage) {
     head.className = 'page-progress-head';
     const title = document.createElement('div');
     title.className = 'page-progress-title';
-    const spinner = document.createElement('span');
-    spinner.className = 'page-progress-spinner';
-    title.append(spinner, document.createTextNode(`第 ${state.currentPage} 页正在转换中…`));
-
-    const pct = job?.total ? Math.round(((job.completed || 0) / job.total) * 100) : 0;
-    const pctNode = document.createElement('span');
-    pctNode.className = 'page-progress-pct';
-    pctNode.textContent = `${pct}%`;
-    head.append(title, pctNode);
+    title.textContent = state.page?.isReprocessing
+      ? `第 ${state.currentPage} 页正在二次处理，保留当前内容…`
+      : `第 ${state.currentPage} 页正在识别，原稿可以继续阅读`;
+    head.append(title);
 
     const track = document.createElement('div');
-    track.className = 'page-progress-track';
+    track.className = 'page-progress-track is-indeterminate';
+    track.setAttribute('role', 'progressbar');
+    track.setAttribute('aria-label', '正在识别本页，剩余工作量未知');
     const fill = document.createElement('div');
-    fill.className = 'page-progress-fill';
-    fill.style.width = `${pct}%`;
+    fill.className = 'page-progress-fill is-indeterminate';
     track.append(fill);
 
     const meta = document.createElement('div');
     meta.className = 'page-progress-meta';
     const countSpan = document.createElement('span');
     countSpan.textContent = job?.total
-      ? `全书已完成 ${job.completed || 0} / ${job.total} 页 · 正在处理当前页`
+      ? `全书任务已结束 ${job.completed || 0} / ${job.total} 页 · 当前页仍在识别`
       : '正在进行文字与版面识别…';
     const hintSpan = document.createElement('span');
     hintSpan.className = 'page-progress-hint';
-    hintSpan.textContent = '识别完成后自动呈现排版正文，完成前先显示原稿。';
+    hintSpan.textContent = '识别完成后呈现排版正文；未知进度不显示百分比。';
     meta.append(countSpan, hintSpan);
 
     card.append(head, track, meta);
@@ -1598,13 +1578,8 @@ $('#job-form').addEventListener('submit', async event => {
   const assist = $('#qwen-assist').checked && !$('#qwen-assist').disabled;
   const providerConfig = state.config?.providers?.find(item => item.id === provider);
   const providerLabel = providerConfig?.label || provider;
-  const quotaSource = providerQuotaSource(providerConfig);
-  const providerTarget = quotaSource
-    ? `${providerLabel}（额度来源：${quotaSource}；仅表示认证账户通道，不代表余额）`
-    : providerLabel;
   const assistLabel = state.config?.qwenAssist?.model || 'Qwen3.8-Max';
-  const cloudTargets = assist ? `${providerTarget}，并额外发送给阿里云 ${assistLabel} 做结构整理与疑点建议（另计阿里云账户用量）` : providerTarget;
-  if (provider !== 'local' && !window.confirm(`所选页面图片将发送给 ${cloudTargets}。所选 paddle 系通道额度不足时会按可用情况自动改用同系另一通道并注明。自动结果会直接生成横排阅读稿，但不保证无误，确定开始吗？`)) return;
+  if (provider !== 'local' && !window.confirm(`将使用【${providerLabel}】识别第【${all ? `全书共 ${state.book.totalPages} 页` : pages}】页，页面图片会发送到该服务，可能产生费用。原稿和已保存内容会保留。${assist ? `另启用 ${assistLabel} 做结构整理与疑点建议（另计用量，建议不自动覆盖原文）。` : ''}`)) return;
   if (form.get('force') && !window.confirm('这会替换所选页已有的识别和手工校对结果，确定重新识别吗？')) return;
   const button = event.currentTarget.querySelector('button[type="submit"]'); setBusy(button, true, '正在创建任务…');
   const bookId = state.book.id, requestId = bookRequest;
@@ -1667,6 +1642,8 @@ $('#prev-page').addEventListener('click', () => goToPage(state.currentPage - 1))
 $('#jump-form').addEventListener('submit', event => { event.preventDefault(); commitPageInput(); }); $('#page-jump').addEventListener('change', commitPageInput);
 $('#reading-progress-range').addEventListener('input', event => renderReadingProgress(Number(event.target.value)));
 $('#reading-progress-range').addEventListener('change', event => goToPage(Number(event.target.value)));
+// U1：阅读模式默认进入，校对按需进入；后台任务不得自动打开面板。
+initReaderMode();
 $('#reading-window-open').addEventListener('click', () => {
   if (!state.book) return;
   const dialog = $('#reading-window-dialog');
