@@ -111,7 +111,10 @@ public class QwenTextReviewClient {
         if (!budget.reserve(1)) throw new OcrException("页面调用预算不足，剩余范围保留原文，明确部分增强");
         {
             Map<String, String> slices = sliceTexts(task, parentTexts);
-            String cacheKey = cacheKey(task, slices);
+            // U5：缓存身份含调用方书/页；身份变化不误命中。无上下文时退化为文本键（测试直调）。
+            UsageContext.Value caller = UsageContext.current();
+            String cacheKey = cacheKey(task, slices, caller == null ? null
+                    : caller.bookId() + ":" + caller.pageNumber());
             synchronized (cache) {
                 ReviewResult hit = cache.get(cacheKey);
                 if (hit != null) {
@@ -130,17 +133,17 @@ public class QwenTextReviewClient {
                 try {
                     return executeOnce(task, slices, parentTexts, regionImage, overviewImage, cancelled, cacheKey);
                 } catch (RateLimitedException rateLimited) {
-                    closeQuietly(permit);
                     if (attempt >= 2 || cancelled.getAsBoolean()) throw new OcrException(
                             "Qwen 请求频率受限且重试预算用尽，剩余范围保留原文");
                     sleepWithoutSlot(rateLimited.retryAfterMillis());
                     lastRetryable = new OcrException("Qwen 请求频率受限");
                 } catch (OcrException e) {
-                    closeQuietly(permit);
                     throw e;
                 } catch (Exception e) {
-                    closeQuietly(permit);
                     throw new OcrException("Qwen 局部核对请求失败");
+                } finally {
+                    // U5：成功/失败都释放；退避等待发生在释放之后（不持槽 sleep）。
+                    closeQuietly(permit);
                 }
             }
             throw lastRetryable == null ? new OcrException("Qwen 局部核对请求失败") : lastRetryable;
@@ -339,10 +342,11 @@ public class QwenTextReviewClient {
         }
     }
 
-    private String cacheKey(QwenTaskPlanner.ChunkTask task, Map<String, String> sliceTexts) {
+    private String cacheKey(QwenTaskPlanner.ChunkTask task, Map<String, String> sliceTexts,
+                              String callerIdentity) {
         StringBuilder raw = new StringBuilder(config.getModel()).append('|')
                 .append(config.getBaseUrl()).append('|').append(PROMPT_VERSION).append('|')
-                .append(task.kind()).append('|');
+                .append(task.kind()).append('|').append(callerIdentity).append('|');
         List<String> ids = new ArrayList<>(sliceTexts.keySet());
         Collections.sort(ids);
         for (String id : ids) raw.append(id).append('=').append(sliceTexts.get(id)).append(';');
