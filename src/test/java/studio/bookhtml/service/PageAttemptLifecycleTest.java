@@ -56,7 +56,8 @@ class PageAttemptLifecycleTest {
         when(books.get(id)).thenReturn(book);
         processor = mock(PageProcessor.class);
         settings = new SettingsService(app, new PaddleAiStudioProperties("test-token", null, null, 30, 60, 1),
-                new QwenAssistProperties(), new DecisionProperties(), json);
+                new QwenAssistProperties(), new DecisionProperties(), json,
+                new EncryptedFileSecretStore(data, new byte[32], "lifecycle-test-fixture", "fixture"));
         jobs = new JobService(store, books, processor);
         jobs.setSettings(settings);
         windows = new ReadingWindowService(store, jobs, settings, clock, Duration.ofSeconds(1));
