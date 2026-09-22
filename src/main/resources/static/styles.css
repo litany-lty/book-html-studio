@@ -508,6 +508,8 @@ progress::-moz-progress-bar { background: var(--blue); }
   body[data-reader-mode="reading"] .workspace,
   body[data-reader-mode="reading"] .workspace.is-empty { grid-template-columns: 250px minmax(0, 1fr); }
   body[data-reader-mode="proof"] #review-panel { display: block; }
+  /* U7-Style：校对栏关闭时底栏不再为其预留右侧宽度。 */
+  body[data-reader-mode="reading"] .reading-progress { right: 0; }
 }
 /* U1/U7：任务底栏在滚动容器之外常驻（工具栏唯一入口 + 底栏详情），
    后台任务不覆盖正文，停止至多两次操作可达。高度为最小高度，允许缩放自适应。 */
@@ -543,6 +545,7 @@ progress::-moz-progress-bar { background: var(--blue); }
 .structure-actions { display: flex; flex-wrap: wrap; gap: 4px; }
 .structure-actions .button { min-height: 32px; padding: 4px 8px; font-size: 11px; }
 .quality-diagnostics { margin-left: 8px; color: var(--muted); font-size: 11px; }
+#quality-diagnostics-toggle { min-height: 28px; padding: 2px 8px; font-size: 11px; }
 
 /* A1-01：保存冲突常驻比较栏（不随 toast 消失） */
 .conflict-bar { border: 2px solid #a56912; background: #fdf6e7; border-radius: 8px; padding: 10px 12px; margin: 0 0 12px; }
@@ -775,11 +778,11 @@ html[data-reader-font] .reader-font-preview { font-family: var(--reader-font); }
   .job-title-actions .button { min-height: 44px; min-width: 44px; padding-inline: 8px; }
   .mobile-bar { height: 44px; min-height: 44px; }
   .mobile-bar .button { min-width: 52px; }
-  .reader-toolbar { min-height: 48px; flex-wrap: nowrap; gap: 5px; padding: 3px 7px; }
-  .view-switch { flex: 1; min-width: 0; }
-  .segmented { min-width: 0; min-height: 44px; padding: 7px 4px; font-size: 11px; }
-  .reader-primary-actions { flex: none; }
-  .reader-primary-actions .button { min-height: 44px; min-width: 72px; padding-inline: 4px; font-size: 11px; }
+  .reader-toolbar { min-height: 48px; flex-wrap: nowrap; gap: 5px; padding: 3px 7px; overflow-x: auto; overscroll-behavior-x: contain; }
+  .view-switch { flex: none; min-width: 0; }
+  .segmented { min-width: 0; min-height: 44px; padding: 7px 8px; font-size: 11px; flex-shrink: 0; }
+  .reader-primary-actions { flex: none; min-width: 0; flex-wrap: nowrap; }
+  .reader-primary-actions .button { min-height: 44px; padding-inline: 8px; font-size: 11px; flex-shrink: 0; }
   .page-head { min-height: 34px; margin: 7px auto 8px; }
   .page-head #quality-detail { display: none; }
   .page-head #bookmark-button { min-height: 44px; }

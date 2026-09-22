@@ -763,6 +763,13 @@ function renderQuality() {
       diag.textContent = job?.total
         ? `后台任务：已结束 ${job.completed || 0} / ${job.total} 页。当前页阶段未知，不显示百分比。`
         : '后台任务进行中，当前页阶段未知，不显示百分比。';
+      const toggle = $('#quality-diagnostics-toggle');
+      const open = toggle?.dataset.open === 'true';
+      diag.hidden = !open;
+      if (toggle) {
+        toggle.hidden = false;
+        toggle.setAttribute('aria-expanded', String(open));
+      }
     }
     return;
   }
@@ -771,16 +778,22 @@ function renderQuality() {
   badge.className = `quality-badge ${quality.tone}`;
   badge.textContent = quality.label;
 
-  // U1：默认阅读不拼接长技术细节；详情进入诊断区按需查看。
+  // U1/U7-Style：默认阅读不拼接长技术细节；诊断区默认收起，按“详情”按需查看。
   $('#quality-detail').textContent = '';
   const diag = $('#quality-diagnostics');
+  const diagToggle = $('#quality-diagnostics-toggle');
   if (diag) {
     let text = quality.detail || '';
     if (isJobRunning && job?.currentPage && job.currentPage !== state.currentPage && job?.total) {
       text += `${text ? '；' : ''}后台任务：已结束 ${job.completed || 0} / ${job.total} 页，当前处理第 ${job.currentPage} 页`;
     }
     diag.textContent = text;
-    diag.hidden = !text;
+    const open = diagToggle?.dataset.open === 'true';
+    diag.hidden = !text || !open;
+    if (diagToggle) {
+      diagToggle.hidden = !text;
+      diagToggle.setAttribute('aria-expanded', String(open && Boolean(text)));
+    }
   }
 }
 
@@ -1743,6 +1756,15 @@ $('#prev-page').addEventListener('click', () => goToPage(state.currentPage - 1))
 $('#jump-form').addEventListener('submit', event => { event.preventDefault(); commitPageInput(); }); $('#page-jump').addEventListener('change', commitPageInput);
 $('#reading-progress-range').addEventListener('input', event => renderReadingProgress(Number(event.target.value)));
 $('#reading-progress-range').addEventListener('change', event => goToPage(Number(event.target.value)));
+// U7-Style：诊断详情默认收起，按需展开；关闭面板/切书时收起。
+document.querySelector('#quality-diagnostics-toggle')?.addEventListener('click', event => {
+  const toggle = event.currentTarget;
+  const open = toggle.dataset.open !== 'true';
+  toggle.dataset.open = String(open);
+  toggle.setAttribute('aria-expanded', String(open));
+  const diag = document.querySelector('#quality-diagnostics');
+  if (diag && diag.textContent) diag.hidden = !open;
+});
 // U1：阅读模式默认进入，校对按需进入；后台任务不得自动打开面板。
 initReaderMode();
 $('#reading-window-open').addEventListener('click', () => {
