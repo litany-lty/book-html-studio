@@ -51,6 +51,7 @@ public class QwenTextReviewClient {
     private final Transport transport;
     private QwenRequestGate gate;
     private UsageLedger usage;
+    private boolean managedTransport;
     private BookContextService bookContext;
     @Autowired(required = false)
     public void setBookContext(BookContextService bookContext) { this.bookContext = bookContext; }
@@ -65,6 +66,7 @@ public class QwenTextReviewClient {
     @Autowired
     public QwenTextReviewClient(QwenAssistProperties config, ObjectMapper json) {
         this(config, json, QwenTextReviewClient::sharedSend);
+        this.managedTransport = true;
     }
 
     QwenTextReviewClient(QwenAssistProperties config, ObjectMapper json, Transport transport) {
@@ -112,6 +114,10 @@ public class QwenTextReviewClient {
         if (task == null || task.ownedRanges().isEmpty())
             throw new ApiException(HttpStatus.BAD_REQUEST, "核对组缺少写入区间");
         {
+            QwenRequestGate.Budget shared = QwenExecutionScope.budgetOr(budget);
+            if (shared == null) shared = gate == null ? new QwenRequestGate.Budget(8) : gate.newBudget();
+            final QwenRequestGate.Budget callBudget = shared;
+            long deadline = callBudget.deadline(config.getTimeoutSeconds());
             Map<String, String> slices = sliceTexts(task, parentTexts);
             // U5：缓存身份含调用方书/页；身份变化不误命中。无上下文时退化为文本键（测试直调）。
             UsageContext.Value caller = UsageContext.current();
@@ -140,28 +146,18 @@ public class QwenTextReviewClient {
             OcrException lastRetryable = null;
             for (int attempt = 0; attempt <= 2; attempt++) {
                 if (cancelled.getAsBoolean()) throw new CancelledException();
-                QwenRequestGate.Permit permit = acquire(foreground);
-                if (permit == null) throw new OcrException("Qwen 并发队列已满，剩余范围保留原文");
                 try {
-                    if (cancelled.getAsBoolean()) throw new CancelledException();
-                    if (!budget.reserve(1)) throw new OcrException("页面调用预算不足，剩余范围保留原文");
-                    return executeOnce(task, slices, prepared, cancelled, cacheKey);
-                } catch (RateLimitedException rateLimited) {
-                    if (attempt >= 2 || cancelled.getAsBoolean()) throw new OcrException(
-                            "Qwen 请求频率受限且重试预算用尽，剩余范围保留原文");
-                    closeQuietly(permit);
-                    sleepWithoutSlot(rateLimited.retryAfterMillis());
+                    return executeOnce(task,slices,prepared,cancelled,cacheKey,foreground,callBudget);
+                } catch (RateLimitedException limited) {
+                    if (attempt >= 2 || limited.retryAfterMillis() < 0)
+                        throw new OcrException("Qwen 请求频率受限，保留原文并等待用户稍后重试");
+                    // executeOnce has closed its response body and permit before backoff.
+                    if (TimeUnit.MILLISECONDS.toNanos(limited.retryAfterMillis()) >= deadline-System.nanoTime())
+                        throw new OcrException("Qwen 限流等待超过本轮剩余期限，保留原文，不提前重试");
+                    sleepWithoutSlot(limited.retryAfterMillis(),cancelled);
                     lastRetryable = new OcrException("Qwen 请求频率受限");
-                } catch (CancelledException e) {
-                    throw e;
-                } catch (OcrException e) {
-                    throw e;
-                } catch (Exception e) {
-                    throw new OcrException("Qwen 局部核对请求失败");
-                } finally {
-                    // U5：成功/失败都释放；退避等待发生在释放之后（不持槽 sleep）。
-                    closeQuietly(permit);
-                }
+                } catch (CancelledException | OcrException propagate) { throw propagate; }
+                catch (Exception failure) { throw new OcrException("Qwen 核对或审计失败，保留原文"); }
             }
             throw lastRetryable == null ? new OcrException("Qwen 局部核对请求失败") : lastRetryable;
         }
@@ -196,85 +192,41 @@ public class QwenTextReviewClient {
         return range.sourceId() + ":" + range.start() + ":" + range.end();
     }
 
-    private QwenRequestGate.Permit acquire(boolean foreground) throws OcrException {
-        if (gate == null) return null;
-        try {
-            QwenRequestGate.Permit permit =
-                    gate.acquire(foreground, Duration.ofSeconds(Math.max(1, config.getTimeoutSeconds())));
-            if (permit == null) throw new OcrException("Qwen 并发队列已满，剩余范围保留原文");
-            return permit;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new CancelledException();
+    private static void sleepWithoutSlot(long millis, BooleanSupplier cancelled) {
+        long deadline=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(Math.max(0,millis));
+        while(true) {
+            if(cancelled.getAsBoolean() || Thread.currentThread().isInterrupted()) throw new CancelledException();
+            long remaining=deadline-System.nanoTime();
+            if(remaining<=0) return;
+            try { TimeUnit.NANOSECONDS.sleep(Math.min(TimeUnit.MILLISECONDS.toNanos(100),remaining)); }
+            catch(InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new CancelledException(); }
         }
     }
 
-    private static void closeQuietly(QwenRequestGate.Permit permit) {
-        if (permit != null) permit.close();
-    }
-
-    private static void sleepWithoutSlot(long millis) {
-        // U5：退避等待时已释放执行槽，不持槽 sleep；总次数仍受上限约束。
-        try {
-            Thread.sleep(Math.min(10_000, Math.max(0, millis)));
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new CancelledException();
-        }
-    }
-
-    private ReviewResult executeOnce(QwenTaskPlanner.ChunkTask task, Map<String, String> slices,
-                                     HttpRequest request, BooleanSupplier cancelled, String cacheKey) throws Exception {
-        if (cancelled.getAsBoolean()) throw new CancelledException();
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(Math.max(1, config.getTimeoutSeconds()));
-        String attemptId = null;
-        boolean responseSeen = false, parsed = false;
-        if (usage != null) {
-            try { attemptId = usage.start("qwen", config.getModel()); }
-            catch (Exception e) { attemptId = null; }
-        }
-        try {
-        HttpResponse<InputStream> response = transport.send(request);
-        if (response == null) throw new OcrException("Qwen 局部核对未返回响应");
-        responseSeen = true;
-        try (InputStream body = response.body()) {
-            if (cancelled.getAsBoolean()) throw new CancelledException();
-            if (response.statusCode() == 429) {
-                String retryAfter = response.headers().firstValue("Retry-After").orElse(null);
-                throw new RateLimitedException(parseRetryAfterMillis(retryAfter));
-            }
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new OcrException("Qwen 局部核对失败（HTTP " + response.statusCode() + "）");
-            }
-            byte[] bytes = readBody(body, deadline, cancelled);
-            if (bytes.length > MAX_RESPONSE_BYTES) throw new OcrException("Qwen 局部核对返回内容过大");
-            if (cancelled.getAsBoolean()) throw new CancelledException();
-            JsonNode root = json.readTree(bytes);
-            if (usage != null && attemptId != null) {
-                try { usage.captureUsage(attemptId, root); } catch (Exception ignored) {}
-            }
-            if (root.has("error")) throw new OcrException("Qwen 局部核对返回业务错误");
-            JsonNode choice = root.at("/choices/0");
-            if ("length".equalsIgnoreCase(choice.path("finish_reason").asText())) {
+    private ReviewResult executeOnce(QwenTaskPlanner.ChunkTask task, Map<String,String> slices,
+                                     HttpRequest request, BooleanSupplier cancelled, String cacheKey,
+                                     boolean foreground, QwenRequestGate.Budget budget) throws Exception {
+        try (QwenPhysicalCall call=QwenPhysicalCall.open(gate,usage,config.getModel(),budget,foreground,
+                config.getTimeoutSeconds(),cancelled,managedTransport)) {
+            HttpResponse<InputStream> response=call.send(request,transport::send);
+            if(response.statusCode()==429) throw new RateLimitedException(
+                    parseRetryAfterMillis(response.headers().firstValue("Retry-After").orElse(null)));
+            if(response.statusCode()<200 || response.statusCode()>=300)
+                throw new OcrException("Qwen 局部核对失败（HTTP "+response.statusCode()+"）");
+            byte[] bytes=call.read(response,MAX_RESPONSE_BYTES);
+            if(cancelled.getAsBoolean()) throw new CancelledException();
+            JsonNode root=json.readTree(bytes);
+            call.captureUsage(root);
+            if(root==null || root.has("error")) throw new OcrException("Qwen 局部核对返回业务错误");
+            JsonNode choice=root.at("/choices/0");
+            if("length".equalsIgnoreCase(choice.path("finish_reason").asText()))
                 throw new TruncatedException("Qwen 局部核对输出被截断");
-            }
-            JsonNode content = choice.at("/message/content");
-            if (!content.isTextual()) throw new OcrException("Qwen 局部核对返回结构无效");
-            ReviewResult result = parseAndValidate(task, slices, stripFence(content.asText()));
-            parsed = true;
-            if (usage != null && attemptId != null) {
-                try { usage.succeeded(attemptId); } catch (Exception ignored) {}
-            }
-            synchronized (cache) {
-                cache.put(cacheKey, result);
-            }
+            JsonNode content=choice.at("/message/content");
+            if(!content.isTextual()) throw new OcrException("Qwen 局部核对返回结构无效");
+            ReviewResult result=parseAndValidate(task,slices,stripFence(content.asText()));
+            call.succeeded();
+            synchronized(cache) { cache.put(cacheKey,result); }
             return result;
-        }
-        } finally {
-            // A transport timeout before response stays STARTED/unknown in the ledger; no blind retry.
-            if (usage != null && attemptId != null && responseSeen && !parsed) {
-                try { usage.failed(attemptId); } catch (Exception ignored) {}
-            }
         }
     }
 
@@ -320,6 +272,8 @@ public class QwenTextReviewClient {
             String sourceId = node.path("sourceId").asText(null);
             if (sourceId == null || !owned.contains(sourceId)) return null;
             if (contextOnly.contains(sourceId)) return null;
+            if(!node.path("start").isIntegralNumber() || !node.path("start").canConvertToInt()
+                    || !node.path("end").isIntegralNumber() || !node.path("end").canConvertToInt()) return null;
             int start = node.path("start").asInt(-1);
             int end = node.path("end").asInt(-1);
             String quote = node.path("quote").asText(null);
@@ -464,26 +418,17 @@ public class QwenTextReviewClient {
                 "detail", "high"));
     }
 
-    private static long parseRetryAfterMillis(String value) {
-        if (value == null) return 1_000;
+    static long parseRetryAfterMillis(String value) {
+        if(value==null || value.isBlank()) return 1000;
         try {
-            return Math.min(10_000, Long.parseLong(value.strip()) * 1_000);
-        } catch (NumberFormatException e) {
-            return 1_000;
-        }
-    }
-
-    private static byte[] readBody(InputStream body, long deadline, BooleanSupplier cancelled) throws Exception {
-        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-        byte[] buffer = new byte[32 * 1024];
-        int read;
-        while ((read = body.read(buffer)) != -1) {
-            if (cancelled.getAsBoolean()) throw new CancelledException();
-            if (System.nanoTime() > deadline) throw new UnknownOutcomeException("Qwen 局部核对读取超时，远端结果未知");
-            out.write(buffer, 0, read);
-            if (out.size() > MAX_RESPONSE_BYTES) break;
-        }
-        return out.toByteArray();
+            long millis;
+            if(value.strip().matches("[0-9]+")) millis=Math.multiplyExact(Long.parseLong(value.strip()),1000L);
+            else millis=java.time.Duration.between(java.time.Instant.now(),
+                    java.time.ZonedDateTime.parse(value.strip(),java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME).toInstant()).toMillis();
+            // A provider delay beyond our inline wait limit is deferred, never retried early.
+            return millis>10_000 ? -1 : Math.max(0,millis);
+        } catch(ArithmeticException overflow) { return -1; }
+        catch(Exception invalid) { return value.strip().matches("[0-9]+") ? -1 : 1000; }
     }
 
     private static String stripFence(String text) {

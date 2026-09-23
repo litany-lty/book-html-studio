@@ -19,6 +19,8 @@ import static org.mockito.Mockito.*;
  * 合成图像夹具，不调用模型。
  */
 class PageProcessorChunkedEnrichTest {
+    private QwenLayoutClient layoutClient;
+    private QwenTocRecoveryService tocClient;
 
     private static Block text(String id, int order, String content) {
         return new Block(id, "text", order, new double[]{.1, .1 + order * .1, .5, .05},
@@ -51,9 +53,9 @@ class PageProcessorChunkedEnrichTest {
         }
         PaddleOcrPipeline paddle = mock(PaddleOcrPipeline.class);
         MiniMaxVisionClient mini = mock(MiniMaxVisionClient.class);
-        QwenLayoutClient assist = mock(QwenLayoutClient.class);
+        QwenLayoutClient assist = mock(QwenLayoutClient.class); layoutClient=assist;
         when(assist.configured()).thenReturn(true);
-        QwenTocRecoveryService toc = mock(QwenTocRecoveryService.class);
+        QwenTocRecoveryService toc = mock(QwenTocRecoveryService.class); tocClient=toc;
         when(toc.recover(any(), any(), any())).thenReturn(
                 new QwenTocRecoveryService.RecoveryResult(List.of(), false, false, false, null));
         PageProcessor processor = new PageProcessor(store, pdf, nativeText, local, qwen, paddle,
@@ -114,5 +116,29 @@ class PageProcessorChunkedEnrichTest {
         PageProcessor processor = processor(enabled(false), coordinator, image());
         processor.enrichBaseline("book", 1, baseline(), "paddle-aistudio", "auto", () -> false);
         verifyNoInteractions(coordinator);
+    }
+
+    @Test void missingLegacyConfigurationIsNotReportedAsCompletedEnhancement() throws Exception {
+        PageProcessor processor=processor(enabled(false),null,image());
+        when(layoutClient.configured()).thenReturn(false);
+        var result=processor.enrichBaseline("book",1,baseline(),"paddle-aistudio","auto",()->false);
+        assertFalse(result.complete()); assertEquals(2,result.blocks().size());
+    }
+    @Test void failedAndRejectedLegacyResultsKeepBaselineAndPartialStatus() throws Exception {
+        for(boolean throwError:new boolean[]{true,false}) {
+            PageProcessor processor=processor(enabled(false),null,image());
+            if(throwError) when(layoutClient.assist(any(),any(),anyString(),any())).thenThrow(new OcrException("fixture failure"));
+            else when(layoutClient.assist(any(),any(),anyString(),any())).thenReturn(List.of());
+            var result=processor.enrichBaseline("book",1,baseline(),"paddle-aistudio","auto",()->false);
+            assertFalse(result.complete()); assertEquals(2,result.blocks().size());
+        }
+    }
+    @Test void failedTocRecoveryDoesNotClaimCompletionOrLaunchAnExtraWholePageCall() throws Exception {
+        PageProcessor processor=processor(enabled(false),null,image());
+        when(tocClient.recover(any(),any(),any())).thenReturn(
+                new QwenTocRecoveryService.RecoveryResult(baseline().blocks(),true,true,false,"fixture failure"));
+        var result=processor.enrichBaseline("book",1,baseline(),"paddle-aistudio","auto",()->false);
+        assertFalse(result.complete()); assertEquals(2,result.blocks().size());
+        verify(layoutClient,never()).assist(any(),any(),anyString(),any());
     }
 }

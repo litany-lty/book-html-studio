@@ -44,7 +44,9 @@ public class PageProcessor {
         return process(bookId,pageNumber,provider,layout,split,false,cancelled);
     }
     public ProcessingResult process(String bookId,int pageNumber,String provider,String layout,boolean split,boolean assist,BooleanSupplier cancelled)throws Exception{
-        try(UsageContext.Scope ignored=UsageContext.open(bookId,pageNumber,"OCR_PAGE")){
+        try(UsageContext.Scope ignored=UsageContext.open(bookId,pageNumber,"OCR_PAGE");
+            QwenExecutionScope execution=QwenExecutionScope.open(bookId,pageNumber,gate,
+                    priority != null && priority.foreground(bookId,pageNumber))){
         if(cancelled.getAsBoolean())throw new CancelledException();Page previous=store.readPage(bookId,pageNumber);String nativeLayout="vertical".equals(layout)?"vertical":"horizontal".equals(layout)?"horizontal":"auto";
         Optional<List<Block>>nativeBlocks=nativeText.extract(store.pdf(bookId),pageNumber,nativeLayout);List<Block>blocks;List<Block>sourceRecords;String actualProvider;List<String>warnings=new ArrayList<>();
         if(nativeBlocks.isPresent()&&!nativeBlocks.get().isEmpty()&&!preferOcrOverNative(store.pdf(bookId),pageNumber,nativeBlocks.get(),warnings,cancelled)){
@@ -326,7 +328,9 @@ public class PageProcessor {
         }
     }
     public EnrichResult enrichBaseline(String bookId,int pageNumber,Page baseline,String provider,String layout,BooleanSupplier cancelled)throws Exception{
-        try(UsageContext.Scope ignored=UsageContext.open(bookId,pageNumber,"ENRICH_PAGE")){
+        try(UsageContext.Scope ignored=UsageContext.open(bookId,pageNumber,"ENRICH_PAGE");
+            QwenExecutionScope execution=QwenExecutionScope.open(bookId,pageNumber,gate,
+                    priority != null && priority.foreground(bookId,pageNumber))){
         if(cancelled.getAsBoolean())throw new CancelledException();
         List<Block> sourceRecords=baseline.sourceRecords()==null?List.of():baseline.sourceRecords();
         List<String> warnings=new ArrayList<>();
@@ -347,31 +351,32 @@ public class PageProcessor {
                 if(chunked!=null){blocks=chunked.blocks();actualProvider=chunked.provider();warnings.addAll(chunked.warnings());complete &= chunked.complete();}
                 else{
                 AssistResult result=assistWithQwen(store.pdf(bookId),pageNumber,blocks,layout,cancelled);
+                complete &= result.assisted() && result.blocks()!=null && QualityGate.check(blocks,result.blocks(),QualityGate.GateOp.REORDER_OR_RECLASSIFY).accepted();
                 blocks=guardedAssist(blocks,result.blocks(),warnings,"Qwen3.8-Max 结构辅助来源校验失败，已保留原生文字层",QualityGate.GateOp.REORDER_OR_RECLASSIFY);
-                if(result.assisted())actualProvider="native+qwen-assist";else warnings.add(result.warning());
+                if(result.assisted())actualProvider="native+qwen-assist";else {complete=false; warnings.add(result.warning());}
                 }
             }else if(baseNative&&wantQwen){
                 if(miniMax.configured()){
                     try{List<Block> assisted=miniMax.assist(qwenOcr.encodeWithin(image).bytes(),blocks,layout,cancelled);blocks=simplify(guardedAssist(blocks,assisted,warnings,"MiniMax 结构辅助来源校验失败，已保留原生文字层结果",QualityGate.GateOp.REORDER_OR_RECLASSIFY));actualProvider="native+minimax";}
                     catch(CancelledException e){throw e;}
-                    catch(Exception e){blocks=new ArrayList<>(sourceRecords);warnings.add("MiniMax 结构辅助失败，本页保留原生文字层结果");}
-                }else warnings.add("MiniMax 辅助未配置，本页仅使用原生文字层，未完成结构辅助");
+                    catch(Exception e){complete=false;blocks=new ArrayList<>(sourceRecords);warnings.add("MiniMax 结构辅助失败，本页保留原生文字层结果");}
+                }else {complete=false; warnings.add("MiniMax 辅助未配置，本页仅使用原生文字层，未完成结构辅助");}
             }else if(PaddleOcrPipeline.isPaddle(actualProvider)||(!baseNative&&wantPaddle)){
                 String ocrLabel=PaddleOcrPipeline.ocrShortLabel(PaddleOcrPipeline.isPaddle(actualProvider)?actualProvider:provider);
                 QwenTocRecoveryService.RecoveryResult recovery=tocRecovery.recover(image,blocks,cancelled);
                 if(recovery.warning()!=null)warnings.add(recovery.warning());
-                if(recovery.recovered()){blocks=guardedAssist(sourceRecords,recovery.blocks(),warnings,"目录恢复来源校验失败，已保留"+ocrLabel+"原始结果",QualityGate.GateOp.NEW_VISUAL_TRANSCRIPTION);actualProvider=actualProvider+"+qwen-toc-recovery";}
-                else if(recovery.attempted())blocks=guardedAssist(sourceRecords,recovery.blocks(),warnings,"目录恢复来源校验失败，已保留"+ocrLabel+"原始结果",QualityGate.GateOp.NEW_VISUAL_TRANSCRIPTION);
+                if(recovery.recovered()){complete &= recovery.blocks()!=null && QualityGate.check(sourceRecords,recovery.blocks(),QualityGate.GateOp.NEW_VISUAL_TRANSCRIPTION).accepted();blocks=guardedAssist(sourceRecords,recovery.blocks(),warnings,"目录恢复来源校验失败，已保留"+ocrLabel+"原始结果",QualityGate.GateOp.NEW_VISUAL_TRANSCRIPTION);actualProvider=actualProvider+"+qwen-toc-recovery";}
+                else if(recovery.attempted()){complete=false;blocks=guardedAssist(sourceRecords,recovery.blocks(),warnings,"目录恢复来源校验失败，已保留"+ocrLabel+"原始结果",QualityGate.GateOp.NEW_VISUAL_TRANSCRIPTION);}
                 else{ChunkedOut chunked=tryChunkedAssist(bookId,pageNumber,blocks,image,layout,actualProvider,cancelled);
                 if(chunked!=null){blocks=chunked.blocks();actualProvider=chunked.provider();warnings.addAll(chunked.warnings());complete &= chunked.complete();}
-                else if(shouldRunLayoutAssist(recovery)&&qwenLayout.configured()){try{List<Block> assisted=qwenLayout.assist(qwenOcr.encodeWithin(image).bytes(),blocks,layout,cancelled);blocks=guardedAssist(sourceRecords,assisted,warnings,"Qwen3.8-Max 结构辅助来源校验失败，已保留"+ocrLabel+"原始结果",QualityGate.GateOp.REORDER_OR_RECLASSIFY);actualProvider=actualProvider+"+qwen-assist";}catch(CancelledException e){throw e;}catch(Exception e){String detail=JobService.safeDetail(e);warnings.add("Qwen3.8-Max 结构辅助失败，本页已保留"+ocrLabel+"原始结果"+(detail==null?"":"："+detail));blocks=new ArrayList<>(sourceRecords);}}
-                else warnings.add("Qwen3.8-Max 结构辅助未配置，本页仅保留"+ocrLabel+"结果");}
+                else if(shouldRunLayoutAssist(recovery)&&qwenLayout.configured()){try{List<Block> assisted=qwenLayout.assist(qwenOcr.encodeWithin(image).bytes(),blocks,layout,cancelled);complete &= assisted!=null && QualityGate.check(sourceRecords,assisted,QualityGate.GateOp.REORDER_OR_RECLASSIFY).accepted();blocks=guardedAssist(sourceRecords,assisted,warnings,"Qwen3.8-Max 结构辅助来源校验失败，已保留"+ocrLabel+"原始结果",QualityGate.GateOp.REORDER_OR_RECLASSIFY);actualProvider=actualProvider+"+qwen-assist";}catch(CancelledException e){throw e;}catch(Exception e){complete=false;String detail=JobService.safeDetail(e);warnings.add("Qwen3.8-Max 结构辅助失败，本页已保留"+ocrLabel+"原始结果"+(detail==null?"":"："+detail));blocks=new ArrayList<>(sourceRecords);}}
+                else {complete=false; warnings.add("Qwen3.8-Max 结构辅助未配置，本页仅保留"+ocrLabel+"结果");}}
             }else if("qwen".equals(actualProvider)||(!baseNative&&wantQwen)){
                 if(miniMax.configured()){
                     try{byte[]png=qwenOcr.encodeWithin(image).bytes();List<Block> assisted=miniMax.assist(png,blocks,layout,cancelled);blocks=guardedAssist(sourceRecords,assisted,warnings,"MiniMax 结构辅助来源校验失败，已保留 Qwen OCR 原始结果",QualityGate.GateOp.MERGE_TEXT_STRUCTURE);if("vertical".equals(layout))blocks=verticalNormalizer.normalize(blocks,sourceRecords);actualProvider="qwen+minimax";List<Block> reviewed=review.review(image,blocks,cancelled);blocks=guardedAssist(blocks,reviewed,warnings,"局部复核来源校验失败，已保留辅助前结果",QualityGate.GateOp.REORDER_OR_RECLASSIFY);if(blocks.stream().anyMatch(b->b.source()!=null&&b.source().contains("qwen-review")))actualProvider="qwen+minimax+qwen-review";}
                     catch(CancelledException e){throw e;}
-                    catch(Exception e){String detail=JobService.safeDetail(e);warnings.add("MiniMax 结构辅助失败，本页已保留 Qwen OCR 原始结果"+(detail==null?"":"："+detail));blocks=new ArrayList<>(sourceRecords);}
-                }else warnings.add("MiniMax 辅助未配置，本页仅使用 Qwen OCR，未完成结构辅助");
+                    catch(Exception e){complete=false;String detail=JobService.safeDetail(e);warnings.add("MiniMax 结构辅助失败，本页已保留 Qwen OCR 原始结果"+(detail==null?"":"："+detail));blocks=new ArrayList<>(sourceRecords);}
+                }else {complete=false; warnings.add("MiniMax 辅助未配置，本页仅使用 Qwen OCR，未完成结构辅助");}
             }else{
                 warnings.add("本地基线无可选增强通道，保留基线可读版本");
                 return new EnrichResult(List.copyOf(blocks),actualProvider,List.copyOf(warnings),complete);

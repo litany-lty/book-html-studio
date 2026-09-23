@@ -52,7 +52,7 @@ class JobPhase1SafetyTest {
         store.writePage(id,pageWithText("甲乙丙丁戊己"),false);
         BookService books=mock(BookService.class);when(books.get(id)).thenReturn(book);
         PageProcessor processor=mock(PageProcessor.class);
-        when(processor.process(eq(id),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any())).thenThrow(new RuntimeException("boom"));
+        when(processor.processBaseline(eq(id),eq(1),anyString(),anyString(),anyBoolean(),any())).thenThrow(new RuntimeException("boom"));
         JobService jobs=new JobService(store,books,processor);
         try{
             jobs.submit(id,new JobRequest("1","local","auto",false,true,false));
@@ -62,7 +62,7 @@ class JobPhase1SafetyTest {
             assertEquals("READY",after.status());
             assertTrue(after.blocks().stream().anyMatch(b->"甲乙丙丁戊己".equals(b.original())));
             assertTrue(after.warnings().stream().anyMatch(w->w.contains("boom")||w.contains("处理失败")));
-            verify(processor).process(eq(id),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any());
+            verify(processor).processBaseline(eq(id),eq(1),anyString(),anyString(),anyBoolean(),any());
         }finally{jobs.close();}
     }
 
@@ -75,7 +75,7 @@ class JobPhase1SafetyTest {
         store.writePage(id,pageWithText("完整來源文字完整來源文字完整"),false);
         BookService books=mock(BookService.class);when(books.get(id)).thenReturn(book);
         PageProcessor processor=mock(PageProcessor.class);
-        when(processor.process(eq(id),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any())).thenAnswer(inv->new ProcessingResult(emptyPage(),ProcessingResult.Category.TEXT));
+        when(processor.processBaseline(eq(id),eq(1),anyString(),anyString(),anyBoolean(),any())).thenAnswer(inv->new ProcessingResult(emptyPage(),ProcessingResult.Category.TEXT));
         JobService jobs=new JobService(store,books,processor);
         try{
             jobs.submit(id,new JobRequest("1","local","auto",false,true,false));
@@ -99,7 +99,7 @@ class JobPhase1SafetyTest {
         PageProcessor processor=mock(PageProcessor.class);
         CountDownLatch entered=new CountDownLatch(1);
         CountDownLatch releaseWorker=new CountDownLatch(1);
-        when(processor.process(eq(id),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any())).thenAnswer(inv->{
+        when(processor.processBaseline(eq(id),eq(1),anyString(),anyString(),anyBoolean(),any())).thenAnswer(inv->{
             entered.countDown();
             // Hold the physical worker until the assertion. An interruptible sleep may
             // end before submit() executes, in which case accepting a retry is correct.
@@ -130,7 +130,7 @@ class JobPhase1SafetyTest {
             reset(processor);
             Block done=textBlock("s","新任务结果");
             Page ready=new Page(1,600,800,"READY","local",List.of(done),List.of(),false,null,List.of(done));
-            when(processor.process(eq(id),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any()))
+            when(processor.processBaseline(eq(id),eq(1),anyString(),anyString(),anyBoolean(),any()))
                     .thenReturn(new ProcessingResult(ready,ProcessingResult.Category.TEXT));
             Job second=null;
             deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);

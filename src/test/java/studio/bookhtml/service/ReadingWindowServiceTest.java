@@ -371,7 +371,7 @@ class ReadingWindowServiceTest {
     @Test void existingManualBatchIsNotCancelledOrPreempted() throws Exception {
         setup(3);
         CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
-        when(processor.process(eq(book.id()), eq(1), anyString(), anyString(), anyBoolean(), anyBoolean(), any()))
+        when(processor.processBaseline(eq(book.id()), eq(1), anyString(), anyString(), anyBoolean(),any()))
                 .thenAnswer(inv -> { entered.countDown(); assertTrue(release.await(3, TimeUnit.SECONDS)); return ready(1); });
         jobs.submit(book.id(), new JobRequest("1", "paddle-aistudio", "auto", false, false, false));
         assertTrue(entered.await(2, TimeUnit.SECONDS));

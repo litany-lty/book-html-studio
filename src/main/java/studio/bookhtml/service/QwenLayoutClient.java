@@ -66,6 +66,7 @@ public class QwenLayoutClient {
     private final ObjectMapper json;
     private final Transport transport;
     private UsageLedger usage;
+    private boolean managedTransport;
     private BookContextService bookContext;
     @Autowired(required = false)
     public void setBookContext(BookContextService bookContext) { this.bookContext = bookContext; }
@@ -73,6 +74,7 @@ public class QwenLayoutClient {
     @Autowired
     public QwenLayoutClient(QwenAssistProperties config, ObjectMapper json) {
         this(config, json, QwenLayoutClient::sharedSend);
+        this.managedTransport = true;
     }
 
     QwenLayoutClient(QwenAssistProperties config, ObjectMapper json, Transport transport) {
@@ -99,7 +101,7 @@ public class QwenLayoutClient {
 
     public List<Block> assist(byte[] image, List<Block> sourceBlocks, String layout,
                               BooleanSupplier cancelled) throws OcrException {
-        return assist(image, sourceBlocks, layout, cancelled, true);
+        return assist(image, sourceBlocks, layout, cancelled, QwenExecutionScope.foregroundOr(false));
     }
 
     /** U5：foreground=false 时只用后台额度（为当前阅读页保留），不强杀。 */
@@ -113,82 +115,27 @@ public class QwenLayoutClient {
         if (sources.isEmpty()) return List.of();
         validateSources(sources);
 
-        String attemptId = null;
-        boolean responseSeen = false, parsed = false;
-        // U5：物理 permit 覆盖发送到响应流收尾；取消/失败 finally 释放。
-        QwenRequestGate.Permit permit = null;
         try {
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(Math.max(1, config.getTimeoutSeconds()));
-            HttpRequest request = request(image, sources, layout);
-            if (usage != null) attemptId = usage.start("qwen", config.getModel());
-            permit = acquirePermit(foreground, deadline);
-            HttpResponse<InputStream> response;
-            try {
-                response = transport.send(request);
-            } catch (CancelledException | OcrException | ApiException propagate) {
-                closeQuietly(permit);
-                throw propagate;
-            } catch (Exception sendFailed) {
-                closeQuietly(permit);
-                throw new OcrException("Qwen3.8-Max 辅助发送失败");
+            HttpRequest request = request(image,sources,layout);
+            try (QwenPhysicalCall call=QwenPhysicalCall.open(gate,usage,config.getModel(),null,foreground,
+                    config.getTimeoutSeconds(),cancelled,managedTransport)) {
+                HttpResponse<InputStream> response=call.send(request,transport::send);
+                if(response.statusCode()<200 || response.statusCode()>=300)
+                    throw new OcrException("Qwen 结构辅助失败（HTTP "+response.statusCode()+"）");
+                JsonNode root=json.readTree(call.read(response,MAX_RESPONSE_BYTES));
+                call.captureUsage(root);
+                if(root==null || root.has("error")) throw new OcrException("Qwen 结构辅助返回业务错误");
+                JsonNode choice=root.at("/choices/0");
+                if("length".equalsIgnoreCase(choice.path("finish_reason").asText())) throw new OcrException("Qwen 结构输出被截断");
+                JsonNode content=choice.at("/message/content");
+                if(!content.isTextual()) throw new OcrException("Qwen 结构辅助返回结构无效");
+                List<Block> result=merge(stripFence(content.asText()),sources);
+                if(cancelled.getAsBoolean()) throw new CancelledException();
+                call.succeeded();
+                return result;
             }
-            if (response == null) throw new OcrException("Qwen3.8-Max 辅助未返回响应");
-            responseSeen = true;
-            if (cancelled.getAsBoolean()) {
-                close(response.body());
-                throw new CancelledException();
-            }
-            if (response.statusCode() == 429) {
-                close(response.body());
-                throw new OcrException("Qwen3.8-Max 请求频率受限，请稍后重试");
-            }
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                close(response.body());
-                throw new OcrException("Qwen3.8-Max 辅助失败（HTTP " + response.statusCode() + "）");
-            }
-            byte[] bytes = readBody(response.body(), deadline, cancelled);
-            if (bytes.length > MAX_RESPONSE_BYTES) throw new OcrException("Qwen3.8-Max 返回内容过大");
-            if (cancelled.getAsBoolean()) throw new CancelledException();
-            JsonNode root = json.readTree(bytes);
-            if (usage != null) usage.captureUsage(attemptId, root);
-            if (root.has("error")) throw new OcrException("Qwen3.8-Max 返回业务错误");
-            JsonNode choice = root.at("/choices/0");
-            if ("length".equalsIgnoreCase(choice.path("finish_reason").asText())) {
-                throw new OcrException("Qwen3.8-Max 结构输出被截断");
-            }
-            JsonNode content = choice.at("/message/content");
-            if (!content.isTextual()) throw new OcrException("Qwen3.8-Max 返回结构无效");
-            List<Block> result = merge(stripFence(content.asText()), sources);
-            parsed = true;
-            if (usage != null) usage.succeeded(attemptId);
-            return result;
-        } catch (ApiException | CancelledException | OcrException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new OcrException("Qwen3.8-Max 辅助请求失败");
-        } finally {
-            if (usage != null && responseSeen && !parsed)
-                try { usage.failed(attemptId); } catch (java.io.IOException ignored) { }
-            closeQuietly(permit);
-        }
-    }
-
-    private QwenRequestGate.Permit acquirePermit(boolean foreground, long deadline) throws OcrException {
-        if (gate == null) return null;
-        long millis = Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()));
-        try {
-            QwenRequestGate.Permit permit = gate.acquire(foreground,
-                    Duration.ofMillis(Math.min(millis, TimeUnit.SECONDS.toMillis(Math.max(1, config.getTimeoutSeconds())))));
-            if (permit == null) throw new OcrException("Qwen 并发队列已满，剩余范围保留原文");
-            return permit;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new CancelledException();
-        }
-    }
-
-    private static void closeQuietly(QwenRequestGate.Permit permit) {
-        if (permit != null) permit.close();
+        } catch(ApiException | CancelledException | OcrException propagate) { throw propagate; }
+        catch(Exception failure) { throw new OcrException("Qwen 结构辅助或调用审计失败，保留原文"); }
     }
 
     /**
@@ -205,53 +152,27 @@ public class QwenLayoutClient {
         List<Block> sources = sourceBlocks == null ? List.of() : List.copyOf(sourceBlocks);
         if (sources.isEmpty()) return List.of();
         validateSources(sources);
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(Math.max(1, config.getTimeoutSeconds()));
-        String attemptId = null;
-        boolean responseSeen = false, parsed = false;
-        QwenRequestGate.Permit permit = acquirePermit(foreground, deadline);
         try {
-            HttpRequest request = structureRequest(image, sources, layout);
-            if (usage != null) attemptId = usage.start("qwen", config.getModel());
-            HttpResponse<InputStream> response = transport.send(request);
-            if (response == null) throw new OcrException("Qwen 结构任务未返回响应");
-            responseSeen = true;
-            if (cancelled.getAsBoolean()) {
-                close(response.body());
-                throw new CancelledException();
+            HttpRequest request=structureRequest(image,sources,layout);
+            try (QwenPhysicalCall call=QwenPhysicalCall.open(gate,usage,config.getModel(),null,foreground,
+                    config.getTimeoutSeconds(),cancelled,managedTransport)) {
+                HttpResponse<InputStream> response=call.send(request,transport::send);
+                if(response.statusCode()<200 || response.statusCode()>=300)
+                    throw new OcrException("Qwen 结构任务失败（HTTP "+response.statusCode()+"）");
+                JsonNode root=json.readTree(call.read(response,MAX_RESPONSE_BYTES));
+                call.captureUsage(root);
+                if(root==null || root.has("error")) throw new OcrException("Qwen 结构任务返回业务错误");
+                JsonNode choice=root.at("/choices/0");
+                if("length".equalsIgnoreCase(choice.path("finish_reason").asText())) throw new OcrException("Qwen 结构任务输出被截断");
+                JsonNode content=choice.at("/message/content");
+                if(!content.isTextual()) throw new OcrException("Qwen 结构任务返回结构无效");
+                List<String> result=parseStructureOrder(stripFence(content.asText()),sources);
+                if(cancelled.getAsBoolean()) throw new CancelledException();
+                call.succeeded();
+                return result;
             }
-            if (response.statusCode() == 429) {
-                close(response.body());
-                throw new OcrException("Qwen 请求频率受限，请稍后重试");
-            }
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                close(response.body());
-                throw new OcrException("Qwen 结构任务失败（HTTP " + response.statusCode() + "）");
-            }
-            byte[] bytes = readBody(response.body(), deadline, cancelled);
-            if (bytes.length > MAX_RESPONSE_BYTES) throw new OcrException("Qwen 结构任务返回内容过大");
-            if (cancelled.getAsBoolean()) throw new CancelledException();
-            JsonNode root = json.readTree(bytes);
-            if (usage != null) usage.captureUsage(attemptId, root);
-            if (root.has("error")) throw new OcrException("Qwen 结构任务返回业务错误");
-            JsonNode choice = root.at("/choices/0");
-            if ("length".equalsIgnoreCase(choice.path("finish_reason").asText())) {
-                throw new OcrException("Qwen 结构任务输出被截断");
-            }
-            JsonNode content = choice.at("/message/content");
-            if (!content.isTextual()) throw new OcrException("Qwen 结构任务返回结构无效");
-            List<String> order = parseStructureOrder(stripFence(content.asText()), sources);
-            parsed = true;
-            if (usage != null) usage.succeeded(attemptId);
-            return order;
-        } catch (ApiException | CancelledException | OcrException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new OcrException("Qwen 结构任务请求失败");
-        } finally {
-            if (usage != null && responseSeen && !parsed)
-                try { usage.failed(attemptId); } catch (java.io.IOException ignored) { }
-            closeQuietly(permit);
-        }
+        } catch(ApiException | CancelledException | OcrException propagate) { throw propagate; }
+        catch(Exception failure) { throw new OcrException("Qwen 结构任务或调用审计失败，保留原文"); }
     }
 
     /** 严格排列校验：循环、覆盖、缺失、多余 ID 全部拒绝。 */
@@ -644,49 +565,6 @@ public class QwenLayoutClient {
 
     private static String safeLayout(String layout) {
         return layout != null && Set.of("auto", "vertical", "horizontal").contains(layout) ? layout : "auto";
-    }
-
-    private static byte[] readBody(InputStream body, long deadline, BooleanSupplier cancelled) throws OcrException {
-        if (body == null) throw new OcrException("Qwen3.8-Max 返回空响应");
-        CompletableFuture<byte[]> future = CompletableFuture.supplyAsync(() -> {
-            try (InputStream input = body) {
-                return input.readNBytes(MAX_RESPONSE_BYTES + 1);
-            } catch (Exception e) {
-                throw new CompletionException(e);
-            }
-        });
-        try {
-            while (true) {
-                if (cancelled.getAsBoolean()) {
-                    close(body);
-                    future.cancel(true);
-                    throw new CancelledException();
-                }
-                long remaining = deadline - System.nanoTime();
-                if (remaining <= 0) {
-                    close(body);
-                    future.cancel(true);
-                    throw new OcrException("Qwen3.8-Max 辅助响应超时");
-                }
-                try {
-                    return future.get(Math.min(remaining, TimeUnit.MILLISECONDS.toNanos(200)), TimeUnit.NANOSECONDS);
-                } catch (TimeoutException ignored) {
-                    // Poll cancellation while retaining one deadline for request headers and body.
-                }
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            close(body);
-            future.cancel(true);
-            throw new CancelledException();
-        } catch (ExecutionException e) {
-            throw new OcrException("Qwen3.8-Max 响应读取失败");
-        }
-    }
-
-    private static void close(InputStream body) {
-        if (body == null) return;
-        try { body.close(); } catch (Exception ignored) { }
     }
 
     private static String stripFence(String value) {

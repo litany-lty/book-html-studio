@@ -4,11 +4,16 @@ package studio.bookhtml.service;
 public final class UsageContext {
     private static final ThreadLocal<Value> CURRENT = new ThreadLocal<>();
     private UsageContext() {}
-    public record Value(String bookId, Integer pageNumber, String operation) {}
+    public record Value(String bookId, Integer pageNumber, String operation, String taskId) {
+        public Value(String bookId, Integer pageNumber, String operation) { this(bookId,pageNumber,operation,null); }
+    }
     public static Value current() { return CURRENT.get(); }
     public static Scope open(String bookId, Integer pageNumber, String operation) {
+        return open(bookId, pageNumber, operation, null);
+    }
+    public static Scope open(String bookId, Integer pageNumber, String operation, String taskId) {
         Value previous = CURRENT.get();
-        CURRENT.set(new Value(bookId, pageNumber, operation));
+        CURRENT.set(new Value(bookId, pageNumber, operation, taskId));
         return new Scope(previous);
     }
     public static final class Scope implements AutoCloseable {

@@ -23,14 +23,17 @@ class UxU4ProgressTest {
 
     @Test
     void u4_baselinePublishedOnlyAfterDurableCommit() throws Exception {
-        String jobs = read("src/main/java/studio/bookhtml/service/JobService.java");
+        String adapter = read("src/main/java/studio/bookhtml/service/JobService.java");
+        assertTrue(adapter.contains("pageEngine.execute("), "批量与随读都委托统一页引擎");
+        assertFalse(adapter.contains("store.commitPage("), "入口适配不得保留第二套页发布路径");
+        String jobs = read("src/main/java/studio/bookhtml/service/PageProcessingService.java");
         assertTrue(jobs.contains("CommitOp.JOB_BASELINE"), "U4：基线提交走独立操作类别");
         assertTrue(jobs.contains("CommitOp.JOB_ENHANCEMENT"), "U4：增强提交走独立操作类别");
         assertTrue(jobs.contains("processBaseline"), "U4：基线与增强分离");
         assertTrue(jobs.contains("enrichBaseline"), "U4：增强只产候选");
         // 基线落盘（commitPage 成功）之后才宣布可读。
-        int commitIdx = jobs.indexOf("CommitOp.JOB_BASELINE");
-        int publishedIdx = jobs.indexOf("baselinePublished(running.bookId", commitIdx);
+        int commitIdx = jobs.indexOf("published=store.commitPage(");
+        int publishedIdx = jobs.indexOf("onPublished(r,published", commitIdx);
         assertTrue(commitIdx >= 0 && publishedIdx > commitIdx,
                 "U4：内存收到结果不算完成，落盘才宣布可读");
     }
