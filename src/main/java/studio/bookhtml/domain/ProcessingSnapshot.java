@@ -26,6 +26,10 @@ public record ProcessingSnapshot(int schemaVersion,
                                  boolean canRetry,
                                  String messageCode,
                                  long attemptSeq) {
+    private static final String SERVER_INSTANCE_ID = UUID.randomUUID().toString();
+    /** Event sequences are comparable only within one server process. */
+    @com.fasterxml.jackson.annotation.JsonProperty(value="serverInstanceId", access=com.fasterxml.jackson.annotation.JsonProperty.Access.READ_ONLY)
+    public String serverInstanceId() { return SERVER_INSTANCE_ID; }
     // 内容可用性：ORIGINAL_ONLY / OCR_READABLE / ENHANCED / MANUAL
     // 任务生命周期：QUEUED / RUNNING / DRAINING / SUCCEEDED / PARTIAL / FAILED / CANCELLED / INTERRUPTED
     // 当前阶段：PREPARING / OCR / STRUCTURE / REVIEW / VALIDATING / PUBLISHING

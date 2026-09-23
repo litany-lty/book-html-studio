@@ -85,7 +85,7 @@ class PageProcessorChunkedEnrichTest {
 
     @Test void qw_chunkedPathUsedWhenEnabledAndAssembled() throws Exception {
         QwenAssistCoordinator coordinator = mock(QwenAssistCoordinator.class);
-        when(coordinator.coordinate(any(), anyInt(), any(), any(), any(), any(), any(), anyString(),
+        when(coordinator.coordinateLazy(any(), anyInt(), any(), any(), any(), any(), any(), anyString(),
                 anyBoolean(), any())).thenAnswer(inv -> {
                     @SuppressWarnings("unchecked")
                     List<Block> blocks = (List<Block>) inv.getArgument(2);
@@ -101,7 +101,7 @@ class PageProcessorChunkedEnrichTest {
 
     @Test void qw_coordinatorFailureFallsBackToLegacyPage() throws Exception {
         QwenAssistCoordinator coordinator = mock(QwenAssistCoordinator.class);
-        when(coordinator.coordinate(any(), anyInt(), any(), any(), any(), any(), any(), anyString(),
+        when(coordinator.coordinateLazy(any(), anyInt(), any(), any(), any(), any(), any(), anyString(),
                 anyBoolean(), any())).thenThrow(new OcrException("分组失败"));
         PageProcessor processor = processor(enabled(true), coordinator, image());
         // 旧整页回滚：assistWithQwen 内 qwenLayout 未配置（mock 默认 false）→ 保留基线。

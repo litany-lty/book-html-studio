@@ -25,8 +25,12 @@ class UxU5QwenBoundedTest {
         String gate = read("src/main/java/studio/bookhtml/service/QwenRequestGate.java");
         assertTrue(gate.contains("maxConcurrent"), "U5：全局上限单一来源");
         String coordinator = read("src/main/java/studio/bookhtml/service/QwenAssistCoordinator.java");
-        assertTrue(coordinator.contains("独立有界出站池"), "U5：独立有界出站池，不与页编排同池");
-        assertTrue(coordinator.contains("pool())"), "U5：不用无界 common pool 承载付费请求");
+        assertTrue(coordinator.contains("private PriorityTaskScheduler pool"), "U5：独立共享的有界调度器，不与页编排同池");
+        assertTrue(coordinator.contains("if (pool == null) pool = new PriorityTaskScheduler"), "U5：协调器只建立一个共享调度器");
+        String scheduler=read("src/main/java/studio/bookhtml/service/PriorityTaskScheduler.java");
+        assertTrue(scheduler.contains("queue.size()>="), "U5：排队数量必须有硬上限");
+        assertTrue(scheduler.contains("backgroundLimit"), "U5：保留前台执行容量");
+        assertTrue(coordinator.contains("scheduler.submit("), "U5：不用无界 common pool 承载付费请求");
         String processor = read("src/main/java/studio/bookhtml/service/PageProcessor.java");
         assertFalse(processor.contains("newFixedThreadPool"), "U5：不为每页新建线程池");
         assertFalse(processor.contains("supplyAsync"), "U5：不无界派发模型请求");
