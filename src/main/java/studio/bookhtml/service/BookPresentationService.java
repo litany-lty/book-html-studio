@@ -63,6 +63,10 @@ public class BookPresentationService {
         this.overrides = overrides;
     }
 
+    public PresentationOverrideService overrides() {
+        return overrides;
+    }
+
     // ---------- 规范化与几何 ----------
 
     /** 文本比较只用于索引；原文字形不改。统一常见空白与外层书名括号。 */

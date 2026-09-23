@@ -168,12 +168,20 @@
 | **B09-04** | B09 | DONE | `store.js` 与 `app.js` 实现 `SessionGuard`（交互会话守卫），管理页切换、书切换及会话代次，杜绝跨会话异步状态污染 | `FrontendBoundsTest` (testSessionGuardStructure / testSessionGuardBehavior) | 实测 PASS |
 | **B09-05** | B09 | DONE | B09 批次 5 项新增专项实测 PASS，全仓 775 项测试全部通过（775/775 PASS） | `mvn test` 775/775 | 全部实测 PASS |
 
-*(后续批次 B10～B13 子任务随各批次执行实时更新)*
+| **B10-01** | B10 | DONE | 实现 `ExportSnapshot`（`studio.bookhtml.domain.ExportSnapshot`）不可变快照模型与版本固定，支持原子 `sourceSeq` 重试栅栏、`PageRef` 确定性哈希校验，锁定导出期间页面修订，杜绝脏读与版本混合导出 | `ExportSnapshotConcurrencyTest` (5 tests) | 实测 PASS |
+| **B10-02** | B10 | DONE | `ExportService` 深度集成快照化写入（`writeZip(ExportSnapshot, ...)`），安全转义 JS/JSON 字符串（`safeJavascriptJson` 严格转义 `<`、`>`、`&`、`\u2028`、`\u2029`），杜绝 XSS 注入与 Canary 敏感信息泄漏 | `ExportInjectionTest` (4 tests) | 实测 PASS |
+| **B10-03** | B10 | DONE | 实现 `SafeArchiveExtractor`（`studio.bookhtml.service.SafeArchiveExtractor`），流式实施 50 MiB 字节限额、5000 条目上限与 100:1 动态压缩比检测，防 ZIP 炸弹与内存/磁盘耗尽 | `BackupArchiveSafetyTest` (6 tests) | 实测 PASS |
+| **B10-04** | B10 | DONE | ZIP 条目路径穿越防护（Path Traversal Guard），严格校验并拒绝 `..` 相对穿越、根路径、Windows 驱动器盘符、冒号与 NUL 字符 | `BackupArchiveSafetyTest`, `ExportInjectionTest` | 实测 PASS |
+| **B10-05** | B10 | DONE | 离线存储 `offline-edit-store.js` 增加跨书隔离防护（`MISMATCHED_BOOK` 阻断非本书备份覆写）与 `schemaVersion: 2` 校验保护 | `probe_offline_store.js` | 实测 PASS |
+| **B10-06** | B10 | DONE | B10 批次 15 项新增专项实测 PASS，全仓 790 项测试全部通过（790/790 PASS），Node 探针与 Python 校验全绿，密钥扫描 0 泄露 | `mvn test` 790/790, Node/Python 探针, `scan_secrets.py` | 全部实测 PASS |
+
+*(后续批次 B11～B13 子任务随各批次执行实时更新)*
 
 ---
 
 ## 7. 下一步行动
-立即执行 **B10 批次**（导出快照与沙箱安全 / G12）：
-1. 建立不可变 `ExportSnapshot` 与离线渲染管线；
-2. 实现不可信脚本与 HTML 标签严格转义；
-3. 实现 ZIP 导出路径穿越防护（Path Traversal Guard）与离线一致性校验。
+立即执行 **B11 批次**（局域网安全、白名单与 CSP 策略 / G13）：
+1. 实现局域网访问授权与动态配对机制（`LanPairingService`：`LOOPBACK` / `LAN_PAIRED` / `TRUSTED_PROXY` 三种模式）；
+2. 强化写操作来源校验（`WriteOriginFilter` 严格校验 Origin / Referer，拒绝不可信跨站与局域网未配对写请求）；
+3. 实现出站网络目的地址安全策略（`OutboundDestinationPolicy`：阻断公网爬虫向内网私有 IP 的 SSRF 攻击）；
+4. 完善 Web 安全响应头与 CSP（Content-Security-Policy）防护基线。
