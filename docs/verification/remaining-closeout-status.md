@@ -76,7 +76,7 @@
 
 | GAP ID | 对应批次 | 当前状态 | 描述与目标 | 完成标记与证据 |
 |---|---|---|---|---|
-| **G01** | B02 | TODO_CODE | 账本有界追加日志、检查点、分页索引、增量汇总与归档 | 待实现 |
+| **G01** | B02 | DONE | 账本有界追加日志、检查点、分页索引、增量汇总与归档 | 679 套件全绿，8 套新增账本专项实测 PASS |
 | **G02** | B03 | TODO_CODE | 来源事件最小记录、永久页摘要/统计/倒排检索索引与小型页头 | 待实现 |
 | **G03** | B05 | PARTIAL_CODE | 全模型统一物理调用、账户并发与预算治理 | 待实现 |
 | **G04** | B05 | TODO_CODE | 异步 OCR 远端 Job 持久占位、轮询恢复与未知债务治理 | 待实现 |
@@ -110,17 +110,22 @@
 | **B01-04** | B01 | DONE | Controller 输出、证据收集与导出持有租约至流关闭 | `ExportService`、`BookService` 改造 | 实测 PASS |
 | **B01-05** | B01 | DONE | 隔离渲染进程与临时磁盘限额管理 | `RenderProcessResourceTest` | 实测 PASS |
 | **B01-06** | B01 | DONE | 多页/多模型混合资源并发压力回归 | `ResidentImageBudgetTest` 溢出与上限 | 666/666 PASS |
-| **B02-01** | B02 | TODO_CODE | 实现 `DurableEventJournal` 与 `AtomicManifestStore` | `LedgerJournalTest` | 待实现 |
-| **B02-02** | B02 | TODO_CODE | `UsageLedger` 改造为追加日志写与内存分片索引 | `UsageLedgerTest` | 待实现 |
-| **B02-03** | B02 | TODO_CODE | 实现定期 Checkpoint 生成与 WAL 截断归档 | `LedgerCheckpointRecoveryTest` | 待实现 |
-| **B02-04** | B02 | TODO_CODE | 保持 UNKNOWN 债务在归档时的完整性 | `LedgerAdmissionScaleTest` | 待实现 |
+| **B02-01** | B02 | DONE | 实现 `DurableEventJournal` 与 `AtomicManifestStore`，WAL 帧 CRC32 与有界崩溃截断 | `LedgerJournalTest` (6 tests) | 实测 PASS |
+| **B02-02** | B02 | DONE | `UsageLedger` 改造为追加日志写与内存分片聚合，消除 10 万条热路径全局扫描 | `UsageLedgerTest` (4 tests) | 实测 PASS |
+| **B02-03** | B02 | DONE | 实现定期 Checkpoint 生成与 WAL 截断归档、原子 manifest 发布 | `LedgerCheckpointRecoveryTest` (2 tests) | 实测 PASS |
+| **B02-04** | B02 | DONE | 保持 UNKNOWN 债务在归档时的完整性，无遗漏保留至 recovery 目录 | `LedgerAdmissionScaleTest` (1 test) | 实测 PASS |
+| **B02-05** | B02 | DONE | 实现带有界 TTL 与上限的冻结快照游标分页，Controller 暴露 `snapshotToken` | `LedgerSnapshotPaginationTest` (1 test) | 实测 PASS |
+| **B02-06** | B02 | DONE | 实现旧版 `usage/<id>.json` 自动无损迁移至 `usage-v2/` 且保留源文件只读备份 | `LegacyLedgerMigrationTest` (1 test) | 实测 PASS |
+| **B02-07** | B02 | DONE | 归档机制验证，跨轮次累计计数与总金额准确性保证 | `LedgerArchiveTest` (2 tests) | 实测 PASS |
+| **B02-08** | B02 | DONE | 账本完整性审计与诊断接口 `auditIntegrity`、`diagnose` | `FinalGapRegressionTest` (5 tests) | 实测 PASS |
+| **B02-09** | B02 | DONE | 全量回归与并发执行验证（679 项全通过） | `mvn test` 679/679 | 全部实测 PASS |
 
 *(后续批次 B03～B13 子任务随各批次执行实时更新)*
 
 ---
 
 ## 7. 下一步行动
-立即执行 **B02 批次**（账本有界追加日志、检查点、分页索引、增量汇总与归档 / G01）：
-1. 编写失败用例与恢复测试：`LedgerJournalTest`、`LedgerCheckpointRecoveryTest`、`LedgerAdmissionScaleTest`。
-2. 实现 `DurableEventJournal` 与 `AtomicManifestStore`。
-3. 改造 `UsageLedger`，消除 10 万条热路径全局扫描，实现原子检查点与有界追加写。
+立即执行 **B03 批次**（来源事件最小记录、永久页摘要/统计/倒排检索索引与小型页头 / G02）：
+1. 编写失败测试：验证页级别独立头文件写入与加载（避免整本读取）、来源事件记录与倒排检索、统计缓存快速重建。
+2. 实现 `SourceChangeJournal` 与 `PageHeadStore`（`heads/<page>.json`），并优化 `BookStore.commitPage` / `ReaderController` / `ProcessingProgressService`。
+3. 验证 1000 页下无整本 `page-attempts.json` / `pages.json` 读放大，保持向后兼容。
