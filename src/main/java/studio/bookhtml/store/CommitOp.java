@@ -9,9 +9,9 @@ public enum CommitOp {
     MANUAL_SAVE,
     /** 人工回退：同 MANUAL_SAVE，成功生成更高的新 revision。 */
     MANUAL_REVERT,
-    /** 任务开始本页：当前 jobId、任务活跃、页属于任务、未取消、revision 匹配。 */
+    /** 仅供读取旧日志的遗留操作；新任务准入不得写 PROCESSING 页面。 */
     JOB_START,
-    /** 任务成功提交：当前 jobId、仍为 RUNNING、页属于任务、processing 版本匹配。 */
+    /** 任务成功提交：精确 attempt、原稿身份、版本与取消权限同时匹配。 */
     JOB_COMPLETE,
     /**
      * U4：可读基线提交。资格同 JOB_COMPLETE；语义为“来源校验通过的安全可读版”，
@@ -23,7 +23,7 @@ public enum CommitOp {
      * （增强结果保留为过期候选或重新核验，禁止覆盖）。
      */
     JOB_ENHANCEMENT,
-    /** 任务取消/失败恢复：当前 jobId、页属于任务、恢复目标版本匹配；绝不覆盖较新版本。 */
+    /** 未取消任务的失败信息提交；取消只保留原页，禁止迟到恢复覆盖。 */
     JOB_RESTORE,
     /** 启动恢复专用：仅恢复上下文使用，不作为普通 API/任务入口。 */
     SYSTEM_RECOVERY

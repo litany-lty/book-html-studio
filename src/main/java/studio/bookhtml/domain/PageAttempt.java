@@ -22,7 +22,30 @@ public record PageAttempt(String bookId,
                           List<String> allowedCommitOps,
                           String lifecycle,
                           Instant startedAt,
-                          Instant updatedAt) {
+                          Instant updatedAt, Binding binding) {
+    public record Binding(String jobId, String pdfSha256, boolean overwriteAuthorized) {
+        public Binding {
+            if (jobId == null || jobId.isBlank() || jobId.length() > 200
+                    || jobId.codePoints().anyMatch(Character::isISOControl)
+                    || pdfSha256 == null || !(pdfSha256.equals("ABSENT") || pdfSha256.matches("[0-9a-f]{64}")))
+                throw new IllegalArgumentException("invalid attempt binding");
+        }
+    }
+    /** Legacy identities can be read but cannot authorize new writes. */
+    public PageAttempt(String bookId, int pageNumber, UUID runId, UUID attemptId, long generation,
+                       int expectedRevision, String expectedSourceHash, List<String> allowedCommitOps,
+                       String lifecycle, Instant startedAt, Instant updatedAt) {
+        this(bookId,pageNumber,runId,attemptId,generation,expectedRevision,expectedSourceHash,
+                allowedCommitOps,lifecycle,startedAt,updatedAt,null);
+    }
+    public PageAttempt bind(String jobId, String pdfSha256, boolean overwrite) {
+        return new PageAttempt(bookId,pageNumber,runId,attemptId,generation,expectedRevision,
+                expectedSourceHash,allowedCommitOps,lifecycle,startedAt,updatedAt,
+                new Binding(jobId,pdfSha256,overwrite));
+    }
+    public String commitIdentity(String outcome) {
+        return "attempt:" + attemptId + ":" + generation + ":" + outcome;
+    }
     public PageAttempt {
         allowedCommitOps = allowedCommitOps == null ? List.of() : List.copyOf(allowedCommitOps);
     }
@@ -46,7 +69,7 @@ public record PageAttempt(String bookId,
 
     public PageAttempt withLifecycle(String next) {
         return new PageAttempt(bookId, pageNumber, runId, attemptId, generation,
-                expectedRevision, expectedSourceHash, allowedCommitOps, next, startedAt, Instant.now());
+                expectedRevision, expectedSourceHash, allowedCommitOps, next, startedAt, Instant.now(), binding);
     }
 
     public String key() {
@@ -65,7 +88,7 @@ public record PageAttempt(String bookId,
         }
         /** Reads legacy intent-only journals without manufacturing replay receipts. */
         public Journal(Map<String, PageAttempt> intents) { this(intents, Map.of()); }
-        @com.fasterxml.jackson.annotation.JsonProperty("schemaVersion") public int schemaVersion() { return 2; }
+        @com.fasterxml.jackson.annotation.JsonProperty("schemaVersion") public int schemaVersion() { return 3; }
 
         public Journal withIntents(Map<String, PageAttempt> next) {
             Map<String, ReprocessOperation> updated = new java.util.LinkedHashMap<>(operations);

@@ -259,7 +259,7 @@ class ConcurrentPageCommitTest {
         store.writeJob(id, new studio.bookhtml.domain.Job("job-2", "RUNNING", 0, 1, null, null, List.of(), Instant.now(),
                 List.of(2), "local", "auto", false, false, false, "fp"));
         PageConflictException foreign = assertThrows(PageConflictException.class, () ->
-                store.commitPage(id, processing, rev, CommitActor.JOB, "job-2", CommitOp.JOB_START));
+                store.registerPageAttempt(id,1,rev,"job-2",List.of("JOB_COMPLETE"),true,null,null));
         assertTrue(foreign.getMessage().contains("不属于"));
         assertEquals(rev, rev(store, id));
     }
@@ -272,33 +272,28 @@ class ConcurrentPageCommitTest {
         int rev = rev(store, id);
         store.writeJob(id, queuedJob("job-1", 1));
         Page processing = new Page(1, 600, 800, "PROCESSING", "local", List.of(), List.of(), false, null, null, null);
-        Page started = store.commitPage(id, processing, rev, CommitActor.JOB, "job-1", CommitOp.JOB_START);
-        assertEquals("PROCESSING", started.status());
+        var owner=store.registerPageAttempt(id,1,rev,"job-1",List.of("JOB_COMPLETE"),true,null,null);
+        assertEquals(rev,rev(store,id),"admission must not publish PROCESSING");
         store.writeJob(id, new studio.bookhtml.domain.Job("job-1", "CANCELLED", 0, 1, 1, null, List.of(), Instant.now(),
                 List.of(1), "local", "auto", false, false, false, "fp"));
         Page late = manualPage("迟到结果");
         assertThrows(PageConflictException.class, () ->
-                store.commitPage(id, late, rev + 1, CommitActor.JOB, "job-1", CommitOp.JOB_COMPLETE));
-        assertEquals(rev + 1, rev(store, id));
+                store.commitPage(id, late, rev, CommitActor.JOB, owner.commitIdentity("SUCCEEDED"), CommitOp.JOB_COMPLETE));
+        assertEquals(rev, rev(store, id));
     }
 
-    @Test void cancellingRestoreSucceedsAndStaleRestoreRefused() throws Exception {
-        // A1-C04：CANCELLING 对自己的 processing 版本恢复合法；过期恢复保留较新版本
-        BookStore store = new BookStore(TestConfigs.config(temp, "", ""), mapper());
-        String id = "b3333333-3333-3333-3333-333333333333";
-        service(store, id);
-        int rev = rev(store, id);
-        store.writeJob(id, new studio.bookhtml.domain.Job("job-1", "RUNNING", 0, 1, null, null, List.of(), Instant.now(),
-                List.of(1), "local", "auto", false, false, false, "fp"));
-        Page processing = new Page(1, 600, 800, "PROCESSING", "local", List.of(), List.of(), false, null, null, null);
-        store.commitPage(id, processing, rev, CommitActor.JOB, "job-1", CommitOp.JOB_START);
-        store.writeJob(id, new studio.bookhtml.domain.Job("job-1", "CANCELLING", 0, 1, 1, null, List.of(), Instant.now(),
-                List.of(1), "local", "auto", false, false, false, "fp"));
-        Page restored = store.commitPage(id, manualPage("恢复旧可读状态"), rev + 1, CommitActor.JOB, "job-1", CommitOp.JOB_RESTORE);
-        assertEquals(rev + 2, BookStore.revisionOrZero(restored));
-        assertThrows(PageConflictException.class, () ->
-                store.commitPage(id, manualPage("过期恢复"), rev + 1, CommitActor.JOB, "job-1", CommitOp.JOB_RESTORE));
-        assertEquals("恢复旧可读状态", store.readPage(id, 1).blocks().get(0).original());
+    @Test void cancellationKeepsSnapshotAndDeniesLateRestore() throws Exception {
+        BookStore store=new BookStore(TestConfigs.config(temp,"",""),mapper());
+        String id="b3333333-3333-3333-3333-333333333333"; service(store,id);
+        int rev=rev(store,id); byte[] before=Files.readAllBytes(store.pagePath(id,1));
+        store.writeJob(id,new studio.bookhtml.domain.Job("job-1","RUNNING",0,1,1,null,List.of(),Instant.now(),
+                List.of(1),"local","auto",false,true,false,"fp"));
+        var owner=store.registerPageAttempt(id,1,rev,"job-1",List.of("JOB_COMPLETE","JOB_RESTORE"),true,null,null);
+        store.revokePageAttempt(owner);
+        assertThrows(PageConflictException.class,()->store.commitPage(id,manualPage("过期恢复"),rev,
+                CommitActor.JOB,owner.commitIdentity("FAILED"),CommitOp.JOB_RESTORE));
+        assertEquals(rev,rev(store,id));
+        assertArrayEquals(before,Files.readAllBytes(store.pagePath(id,1)),"cancelled work cannot rewrite the retained snapshot");
     }
 
     @Test void ioFailureAtEachStageLeavesNoPseudoSuccess() throws Exception {

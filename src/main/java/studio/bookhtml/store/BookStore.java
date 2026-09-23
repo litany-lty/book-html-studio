@@ -12,6 +12,8 @@ import studio.bookhtml.domain.Book;
 import studio.bookhtml.domain.ContentIssue;
 import studio.bookhtml.domain.Job;
 import studio.bookhtml.domain.Page;
+import studio.bookhtml.domain.PageAttempt;
+import studio.bookhtml.domain.ReprocessOperation;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -29,6 +31,9 @@ public class BookStore {
     private final ObjectMapper json;
     private final Object dirLock;
     private final DataDirectoryLease lease;
+    private final SourceIdentityGuard sourceIdentity = new SourceIdentityGuard();
+    private final PageCommitJournal commits;
+    private final AttemptAuthority authority;
     public record PageChange(String bookId, Page previous, Page committed, long sourceEpoch) {}
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong> pageEpochs = new java.util.concurrent.ConcurrentHashMap<>();
     private final List<java.util.function.Consumer<PageChange>> pageListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
@@ -47,7 +52,67 @@ public class BookStore {
         this.dirLock = lease.monitor();
         this.booksRoot = lease.realPath().resolve("books");
         this.json = json;
+        this.commits = new PageCommitJournal(json);
+        this.authority = new AttemptAuthority(dirLock, sourceIdentity, commits, lease.revokedAttempts());
         Files.createDirectories(booksRoot);
+    }
+
+    public PageAttempt registerPageAttempt(String id, int page, int revision, String jobId,
+            List<String> operations, boolean overwrite, String operationKey,
+            java.util.function.Function<PageAttempt,ReprocessOperation> receipt) throws IOException {
+        return authority.admit(this,id,page,revision,jobId,operations,overwrite,operationKey,receipt);
+    }
+    public void finishPageAttempt(PageAttempt owner, String lifecycle) throws IOException { authority.finish(this,owner,lifecycle); }
+    public void revokePageAttempt(PageAttempt owner) throws IOException { authority.revoke(this,owner); }
+    public String recoveredAttemptOutcome(PageAttempt owner) {
+        synchronized (dirLock) { return authority.recoveredOutcome(this,owner); }
+    }
+    public void reconcilePageAttempts(String id) throws IOException {
+        synchronized(dirLock) {
+            var journal=authority.read(this,id);
+            var intents=new java.util.LinkedHashMap<>(journal.intents());
+            journal.intents().forEach((key,attempt)->{
+                if (!AttemptAuthority.TERMINAL.contains(attempt.lifecycle()))
+                    intents.put(key,attempt.withLifecycle(authority.recoveredOutcome(this,attempt)));
+            });
+            var reconciled=journal.withIntents(intents);
+            var receipts=new java.util.LinkedHashMap<>(reconciled.operations());
+            receipts.replaceAll((key,r)->r.terminal()?r:r.finish("INTERRUPTED",java.time.Instant.now()));
+            var result=new PageAttempt.Journal(intents,receipts);
+            if (!result.equals(journal)) writeSidecar(pageAttemptsPath(id),result);
+        }
+    }
+    public void recoverPagePublications() {
+        for (Book book:listBooks()) {
+            Path directory=bookDir(book.id()).resolve("pages/commits");
+            if (!Files.exists(directory,LinkOption.NOFOLLOW_LINKS)) continue;
+            try {
+                DurableJson.rejectLinks(directory);
+                try (var paths=Files.list(directory)) {
+                    for (var iterator=paths.iterator();iterator.hasNext();) {
+                        String name=iterator.next().getFileName().toString();
+                        if (!name.matches("[1-9][0-9]*\\.json")) continue;
+                        int page=Integer.parseInt(name.substring(0,name.length()-5));
+                        if (page>book.totalPages()) throw new IOException("commit page out of range");
+                        synchronized(dirLock) { commits.reconcile(bookDir(book.id()),book.id(),page,readPage(book.id(),page)); }
+                    }
+                }
+            } catch (Exception invalid) {
+                System.getLogger(BookStore.class.getName()).log(System.Logger.Level.WARNING,
+                        "Publication journal needs inspection; page content is preserved and affected writes fail closed");
+            }
+        }
+    }
+
+    public void verifyAttemptForDispatch(PageAttempt owner, CommitOp operation) throws IOException {
+        var source=sourceIdentity.capture(pdf(owner.bookId()));
+        synchronized (dirLock) {
+            Page current=readPage(owner.bookId(),owner.pageNumber());
+            if (current==null) throw new IOException("attempt page missing");
+            var claim=authority.claim(this,owner.bookId(),owner.pageNumber(),owner.commitIdentity("SUCCEEDED"),revisionOrZero(current));
+            var log=commits.reconcile(bookDir(owner.bookId()),owner.bookId(),owner.pageNumber(),current);
+            authority.requireLive(this,claim,current,operation,source,log);
+        }
     }
 
     /** 释放数据目录租约（Spring 销毁时调用；测试可显式调用验证释放语义）。 */
@@ -124,117 +189,123 @@ public class BookStore {
      * 任务状态与页集合资格、归档旧版本、写入新版本在同一目录锁内完成。
      * 成功返回此次真正提交的不可变结果；调用方不得再 readPage。
      */
-    public Page commitPage(String id, Page proposed, int expectedRevision, CommitActor actor, String expectedJobId, CommitOp op) throws IOException {
+    public Page commitPage(String id, Page proposed, int expectedRevision, CommitActor actor, String identity, CommitOp op) throws IOException {
+        validateActor(actor,op);
+        var source=actor==CommitActor.JOB ? sourceIdentity.capture(pdf(id)) : null;
         synchronized (dirLock) {
-            if (proposed == null) throw new ApiException(HttpStatus.BAD_REQUEST, "缺少页面内容");
-            Path target = pagePath(id, proposed.pageNumber());
-            Page current = Files.exists(target) ? read(target, Page.class, "页面数据损坏") : null;
-            if (current == null) throw new ApiException(HttpStatus.NOT_FOUND, "页码不存在");
-            int currentRev = revisionOrZero(current);
-            if (currentRev != expectedRevision)
-                throw new PageConflictException(currentRev, "页面已被更新，请刷新后重试");
-            checkCommitEligibility(id, current, proposed, currentRev, actor, expectedJobId, op);
-            return persistNewRevision(id, current, proposed);
+            if (proposed==null || proposed.pageNumber()<1) throw new ApiException(HttpStatus.BAD_REQUEST,"缺少页面内容");
+            Path target=pagePath(id,proposed.pageNumber());
+            Page current=Files.exists(target)?read(target,Page.class,"页面数据损坏"):null;
+            if (current==null) throw new ApiException(HttpStatus.NOT_FOUND,"页码不存在");
+            int revision=revisionOrZero(current);
+            if (current.pageNumber()!=proposed.pageNumber()) throw new IOException("page identity mismatch");
+            AttemptAuthority.Claim claim=null;
+            if (actor==CommitActor.JOB) {
+                claim=authority.claim(this,id,proposed.pageNumber(),identity,revision);
+                var log=commits.reconcile(bookDir(id),id,proposed.pageNumber(),current);
+                for (var e : log) {
+                    if (claim.attempt().attemptId().equals(e.attemptId()) && claim.attempt().generation()==e.attemptSeq()
+                            && op.name().equals(e.operation())) {
+                        if (expectedRevision==e.expectedRevision() && claim.outcome().equals(e.outcome())
+                                && "COMMITTED".equals(e.state()) && commits.matches(e,current)
+                                && e.contentHash().equals(commits.hash(withRevision(proposed,e.publishedRevision()))))
+                            return current; // Read-only replay: no new revision, history or event.
+                        throw new PageConflictException(revision,"该尝试已提交或不能重放，不覆盖当前版本");
+                    }
+                }
+                authority.requireLive(this,claim,current,op,source,log);
+            } else checkCommitEligibility(id,current,proposed,revision,actor,identity,op);
+            if (revision!=expectedRevision) throw new PageConflictException(revision,"页面已被更新，请刷新后重试");
+            return persistNewRevision(id,current,proposed,op,claim);
         }
+    }
+
+    private static void validateActor(CommitActor actor, CommitOp op) {
+        if (actor==null || op==null) throw new ApiException(HttpStatus.BAD_REQUEST,"缺少提交操作身份");
+        CommitActor required=switch(op) {
+            case MANUAL_SAVE -> CommitActor.MANUAL;
+            case MANUAL_REVERT -> CommitActor.REVERT;
+            case SYSTEM_RECOVERY -> CommitActor.SYSTEM;
+            default -> CommitActor.JOB;
+        };
+        if (required!=actor) throw new ApiException(HttpStatus.BAD_REQUEST,"提交操作与操作者不匹配");
     }
 
     /** A1-04：同一锁内的操作资格判断。任务登记、状态与页集合在此统一裁定。 */
-    private void checkCommitEligibility(String id, Page current, Page proposed, int currentRev, CommitActor actor, String expectedJobId, CommitOp op) {
-        switch (op) {
-            case MANUAL_SAVE, MANUAL_REVERT -> {
-                if ("PROCESSING".equals(current.status()))
-                    throw new PageConflictException(currentRev, "本页正在识别，请等待完成或先取消任务再操作");
-                Job job = readJob(id);
-                if (job != null && List.of("QUEUED", "RUNNING", "CANCELLING").contains(job.status())
-                        && job.pages() != null && job.pages().contains(current.pageNumber()))
-                    throw new PageConflictException(currentRev, "本页正在识别，请等待完成或先取消任务再操作");
-            }
-            case JOB_START -> {
-                boolean retainedSnapshot = json.valueToTree(proposed).equals(json.valueToTree(current))
-                        && ("READY".equals(current.status()) || "FAILED".equals(current.status()));
-                if (!"PROCESSING".equals(proposed.status()) && !retainedSnapshot)
-                    throw new ApiException(HttpStatus.BAD_REQUEST, "任务开始须保留原快照或进入 PROCESSING");
-                Job job = requireCurrentJob(id, currentRev, expectedJobId, current.pageNumber());
-                if (!List.of("QUEUED", "RUNNING").contains(job.status()))
-                    throw new PageConflictException(currentRev, "任务已不在可开始状态，本页不再写入");
-                requirePageInJob(job, current, currentRev);
-            }
-            case JOB_COMPLETE, JOB_BASELINE -> {
-                Job job = requireCurrentJob(id, currentRev, expectedJobId, current.pageNumber());
-                if (!"RUNNING".equals(job.status()))
-                    throw new PageConflictException(currentRev, "任务已结束或取消，本页结果不再写入");
-                requirePageInJob(job, current, currentRev);
-            }
-            case JOB_ENHANCEMENT -> {
-                Job job = requireCurrentJob(id, currentRev, expectedJobId, current.pageNumber());
-                if (!"RUNNING".equals(job.status()))
-                    throw new PageConflictException(currentRev, "任务已结束或取消，本页结果不再写入");
-                requirePageInJob(job, current, currentRev);
-                // U4：人工在此期间保存了内容，新的人工版本优先，禁止覆盖。
-                if (current.reviewed() || "manual".equals(current.provider()))
-                    throw new PageConflictException(currentRev, "本页已有人工版本，增强结果保留为候选，不覆盖");
-            }
-            case JOB_RESTORE -> {
-                Job job = requireCurrentJob(id, currentRev, expectedJobId, current.pageNumber());
-                if (List.of("COMPLETED", "COMPLETED_WITH_ERRORS", "FAILED", "CANCELLED", "IDLE", "INTERRUPTED").contains(job.status()))
-                    throw new PageConflictException(currentRev, "任务已终态，恢复写入不再执行");
-                requirePageInJob(job, current, currentRev);
-            }
-            case SYSTEM_RECOVERY -> { }
-        }
-        if (actor == CommitActor.JOB && expectedJobId == null)
-            throw new ApiException(HttpStatus.BAD_REQUEST, "任务提交缺少任务标识");
-    }
-
-    private Job requireCurrentJob(String id, int currentRev, String expectedJobId, int pageNumber) {
-        if (expectedJobId == null) throw new ApiException(HttpStatus.BAD_REQUEST, "任务提交缺少任务标识");
-        Job job = readJob(id);
-        if (job == null)
-            throw new PageConflictException(currentRev, "任务已被取代，本页不再写入");
-        if (expectedJobId.startsWith("reading:") && job.id() != null && job.id().startsWith("reading:")) {
-            String[] expParts = expectedJobId.split(":");
-            String[] actParts = job.id().split(":");
-            if (expParts.length > 1 && actParts.length > 1 && !expParts[1].equals(actParts[1]))
-                throw new PageConflictException(currentRev, "任务已被取代，本页不再写入");
-            return job;
-        }
-        if (!expectedJobId.equals(job.id()))
-            throw new PageConflictException(currentRev, "任务已被取代，本页不再写入");
-        return job;
-    }
-
-    private static void requirePageInJob(Job job, Page current, int currentRev) {
-        if (job.id() != null && job.id().startsWith("reading:")) {
-            if (job.pages() != null && !job.pages().isEmpty() && !job.pages().contains(current.pageNumber()))
-                throw new PageConflictException(currentRev, "本页不属于当前任务，不再写入");
-            return;
-        }
-        if (job.pages() == null || !job.pages().contains(current.pageNumber()))
-            throw new PageConflictException(currentRev, "本页不属于当前任务，不再写入");
+    private void checkCommitEligibility(String id, Page current, Page proposed, int revision,
+                                        CommitActor actor, String identity, CommitOp op) {
+        validateActor(actor,op);
+        if (actor==CommitActor.JOB) throw new PageConflictException(revision,"任务必须经尝试身份验证后提交");
+        if (op==CommitOp.SYSTEM_RECOVERY) return;
+        if ("PROCESSING".equals(current.status())) throw new PageConflictException(revision,"本页正在识别，请先停止任务");
+        Job job=readJob(id);
+        if (job!=null && List.of("QUEUED","RUNNING","CANCELLING").contains(job.status())
+                && job.pages()!=null && job.pages().contains(current.pageNumber()))
+            throw new PageConflictException(revision,"本页正在识别，请先停止任务");
     }
 
     private Page persistNewRevision(String id, Page current, Page proposed) throws IOException {
-        var epoch = pageEpochs.computeIfAbsent(id, ignored -> new java.util.concurrent.atomic.AtomicLong());
-        long settledEpoch = Math.addExact(epoch.get(), 2);
-        epoch.set(settledEpoch - 1); // Odd while a page publication is in progress.
-        try {
-            // 阶段1：只归档可读版本（READY/FAILED），避免 PROCESSING 中间态污染历史；R04 按数值保留最近 5 个
-            if (current != null && ("READY".equals(current.status()) || "FAILED".equals(current.status()))) archiveHistory(id, current);
-            int newRev = current == null
-                    ? (proposed.revision() == null || proposed.revision() < 0 ? 0 : proposed.revision())
-                    : revisionOrZero(current) + 1;
-            Page toWrite = new Page(proposed.pageNumber(), proposed.width(), proposed.height(), proposed.status(), proposed.provider(),
-                proposed.blocks(), proposed.warnings(), proposed.reviewed(), proposed.error(), proposed.sourceRecords(), newRev);
-            atomic(pagePath(id, proposed.pageNumber()), toWrite);
-            PageChange event = new PageChange(id, current, toWrite, settledEpoch);
-            for (var listener : pageListeners) {
-                try { listener.accept(event); } catch (RuntimeException ignored) { /* Derived data cannot undo a saved page. */ }
-            }
-            // U6：页变更唯一出口；派生索引（画像/统计缓存）据此失效，不轮询。
-            notifyBookChanged(id);
-            return toWrite;
-        } finally { epoch.set(settledEpoch); }
+        return persistNewRevision(id,current,proposed,CommitOp.SYSTEM_RECOVERY,null);
     }
+    private Page persistNewRevision(String id, Page current, Page proposed, CommitOp operation,
+                                    AttemptAuthority.Claim claim) throws IOException {
+        checkInjected("atomic");
+        int revision=current==null ? Math.max(0,revisionOrZero(proposed)) : Math.addExact(revisionOrZero(current),1);
+        UUID commitId=current==null ? null : UUID.randomUUID();
+        Page saved=new Page(proposed.pageNumber(),proposed.width(),proposed.height(),proposed.status(),proposed.provider(),
+                proposed.blocks(),proposed.warnings(),proposed.reviewed(),proposed.error(),proposed.sourceRecords(),revision,commitId);
+        var epoch=pageEpochs.computeIfAbsent(id,ignored->new java.util.concurrent.atomic.AtomicLong());
+        long settled=Math.addExact(epoch.get(),2); epoch.set(settled-1);
+        try {
+            if (current==null) atomic(pagePath(id,saved.pageNumber()),saved);
+            else publishRecorded(id,current,saved,operation,claim);
+            PageChange event=new PageChange(id,current,saved,settled);
+            for (var listener:pageListeners) {
+                try { listener.accept(event); } catch (RuntimeException ignored) { /* Projection cannot undo publication. */ }
+            }
+            notifyBookChanged(id);
+            return saved;
+        } finally { epoch.set(settled); }
+    }
+    private void publishRecorded(String id, Page current, Page saved, CommitOp operation,
+                                 AttemptAuthority.Claim claim) throws IOException {
+        Path dir=bookDir(id); int page=saved.pageNumber();
+        var before=commits.reconcile(dir,id,page,current);
+        PageAttempt a=claim==null ? null : claim.attempt();
+        var entry=new PageCommitJournal.Entry(saved.lastCommitId(),id,page,a==null?null:a.attemptId(),a==null?0:a.generation(),
+                operation.name(),claim==null?"SUCCEEDED":claim.outcome(),revisionOrZero(current),saved.revision(),
+                commits.hash(current),commits.hash(saved),"PREPARED",java.time.Instant.now());
+        var prepared=commits.append(before,entry);
+        commitCheckpoint("commit-intent");
+        commits.write(dir,page,prepared);
+        try {
+            commitCheckpoint("commit-prepared");
+            if ("READY".equals(current.status()) || "FAILED".equals(current.status())) archiveHistory(id,current);
+            commitCheckpoint("page-replace");
+            DurableJson.write(pagePath(id,page),saved,json,64*1024*1024);
+        } catch (IOException failure) {
+            // A transport/filesystem exception is not proof that rename did not happen.
+            boolean published=false;
+            try {
+                Page actual=read(pagePath(id,page),Page.class,"页面数据损坏");
+                published=commits.matches(entry,actual);
+                commits.reconcile(dir,id,page,actual);
+            } catch (IOException | RuntimeException unknown) { /* Preserve PREPARED for conservative recovery. */ }
+            if (!published) throw failure;
+        }
+        // Nothing below may turn a confirmed saved page into a misleading save failure.
+        try {
+            commitCheckpoint("page-published");
+            commitCheckpoint("commit-completion");
+            commits.write(dir,page,commits.mark(prepared,entry.commitId(),"COMMITTED"));
+            commitCheckpoint("commit-settled");
+        } catch (IOException | RuntimeException failure) {
+            System.getLogger(BookStore.class.getName()).log(System.Logger.Level.WARNING,
+                    "Page published; commit metadata will be reconciled from its exact identity");
+        }
+    }
+    /** Test subclasses can interrupt a precise boundary; no HTTP/config switch exposes it. */
+    protected void commitCheckpoint(String phase) throws IOException { checkInjected(phase); }
 
     /** U6：书籍变更监听（画像/统计等派生缓存失效用）。监听器只做轻量失效，不得阻塞。 */
     private final List<java.util.function.Consumer<String>> changeListeners =
@@ -318,7 +389,7 @@ public class BookStore {
     public static Page withRevision(Page page, int revision) {
         if (page == null) return null;
         return new Page(page.pageNumber(), page.width(), page.height(), page.status(), page.provider(),
-            page.blocks(), page.warnings(), page.reviewed(), page.error(), page.sourceRecords(), revision);
+            page.blocks(), page.warnings(), page.reviewed(), page.error(), page.sourceRecords(), revision, page.lastCommitId());
     }
     public Path historyDir(String id, int page) { return bookDir(id).resolve("pages").resolve("history").resolve(String.valueOf(page)); }
     public Path candidatePath(String id, int page) { return bookDir(id).resolve("pages").resolve(page + ".candidate.json"); }
@@ -335,7 +406,7 @@ public class BookStore {
         Path dir = historyDir(id, existing.pageNumber());
         Files.createDirectories(dir);
         Path target = dir.resolve("rev-" + revisionOrZero(existing) + ".json");
-        if (!Files.exists(target)) atomic(target, existing);
+        if (!Files.exists(target)) DurableJson.write(target, existing, json, 64*1024*1024);
         // R04/A1-C08：按数值保留最新 5 个有效历史版本；异常命名、非普通文件、
         // 超出 int 范围的版本号不参与排序、不被清理
         try (Stream<Path> files = Files.list(dir)) {
@@ -486,7 +557,7 @@ public class BookStore {
                     current.status(), current.provider(), List.copyOf(blocks), current.warnings(),
                     current.reviewed(), null, current.sourceRecords(), null);
             checkCommitEligibility(id, current, proposed, currentRev, actor, expectedJobId, op);
-            return new IssueAcceptResult(persistNewRevision(id, current, proposed), false);
+            return new IssueAcceptResult(persistNewRevision(id, current, proposed, op, null), false);
         }
     }
     public Page readCandidate(String id, int page) {
@@ -523,9 +594,15 @@ public class BookStore {
                             || tree.has("operations") && !tree.path("operations").isObject()) throw new IOException();
                     var version = tree.get("schemaVersion");
                     if (version != null && (!version.isIntegralNumber() || !version.canConvertToInt()
-                            || version.intValue() < 1 || version.intValue() > 2)) throw new IOException();
-                    if (version != null && version.intValue() == 2 && !tree.path("operations").isObject())
+                            || version.intValue() < 1 || version.intValue() > 3)) throw new IOException();
+                    if (version != null && version.intValue() >= 2 && !tree.path("operations").isObject())
                         throw new IOException();
+                    for (var attempt : tree.path("intents")) {
+                        requireInteger(attempt,"pageNumber",1,Integer.MAX_VALUE);
+                        requireInteger(attempt,"generation",1,Long.MAX_VALUE);
+                        requireInteger(attempt,"expectedRevision",0,Integer.MAX_VALUE);
+                    }
+                    for (var receipt : tree.path("operations")) requireInteger(receipt,"attemptSeq",1,Long.MAX_VALUE);
                     return json.treeToValue(tree, type);
                 }
             } catch (Exception invalid) {
@@ -533,6 +610,11 @@ public class BookStore {
             }
         }
         return Files.exists(path) ? read(path, type, "展示索引数据损坏") : null;
+    }
+    private static void requireInteger(com.fasterxml.jackson.databind.JsonNode node, String field, long min, long max) throws IOException {
+        var value=node.path(field);
+        if (!value.isIntegralNumber() || !value.canConvertToLong() || value.longValue()<min || value.longValue()>max)
+            throw new IOException("invalid journal integer");
     }
     public <T> void writeSidecar(Path path, T value) throws IOException {
         synchronized (dirLock) {

@@ -31,7 +31,7 @@ public class JobService {
     private final Map<String, PageAttempt> pageAttempts = new ConcurrentHashMap<>();
     private final java.time.Clock operationClock;
     private static final java.time.Duration OPERATION_RETENTION = java.time.Duration.ofDays(30);
-    private record PendingOperation(String key, String fingerprint) {}
+    private record PendingOperation(String key, String fingerprint, boolean overwrite) {}
     private UUID readingReservation;
     private String readingReservationBookId;
     private SettingsService settings;
@@ -46,14 +46,14 @@ public class JobService {
     @org.springframework.beans.factory.annotation.Autowired public void setSettings(SettingsService settings){this.settings=settings;}
     /** U4：阶段事件聚合（测试可注入；缺省关闭，不影响正式保存）。 */
     @org.springframework.beans.factory.annotation.Autowired(required=false) public void setProgress(ProcessingProgressService progress){this.progress=progress;}
-    @PostConstruct void recover(){store.recoverInterruptedJobs();reconcileAttemptIntents();}
+    @PostConstruct void recover(){store.recoverPagePublications();store.recoverInterruptedJobs();reconcileAttemptIntents();}
     @PreDestroy void close() {
         RuntimeException shutdownFailure = null;
         synchronized (this) {
             closing = true;
             if (active != null) {
                 Running running = active;
-                running.cancelled = true;
+                markCancelled(running);
                 if (running.future != null) running.future.cancel(true);
                 if (running.thread != null) running.thread.interrupt();
                 if (!running.started) {
@@ -127,7 +127,7 @@ public class JobService {
         if (running != null) {
             // U2：只标记取消并中断，不提前从登记表删除。物理槽与登记在 worker
             // 收尾（finally）时释放；取消后仍可恢复旧可读版本（mayRestore）。
-            running.cancelled = true;
+            markCancelled(running);
             if (running.future != null) running.future.cancel(true);
             if (running.thread != null) running.thread.interrupt();
             if (!running.started) releaseReserved(running, "CANCELLED");
@@ -135,7 +135,7 @@ public class JobService {
     }
     private synchronized void cancelAllReserved() {
         for (Running running : new HashSet<>(activeReserved.values())) {
-            running.cancelled = true;
+            markCancelled(running);
             if (running.future != null) running.future.cancel(true);
             if (running.thread != null) running.thread.interrupt();
         }
@@ -186,7 +186,7 @@ public class JobService {
             for (int page : pages) {
                 Page published = store.readPage(bookId, page);
                 PageAttempt attempt = registerAttempt(bookId, page, BookStore.revisionOrZero(published),
-                        List.of("JOB_BASELINE", "JOB_ENHANCEMENT", "JOB_COMPLETE", "JOB_RESTORE"), operation, queued);
+                        List.of("JOB_BASELINE", "JOB_ENHANCEMENT", "JOB_COMPLETE", "JOB_RESTORE"), "reading:"+reservation, operation!=null && operation.overwrite(), operation, queued);
                 running.attempts.put(page, attempt);
                 activeReserved.put(page, running);
                 if (progress != null) progress.begin(attempt, BookStore.revisionOrZero(published),
@@ -280,75 +280,45 @@ public class JobService {
         String channel = provider == null ? "paddle-aistudio" : provider;
         JobRequest jobRequest = new JobRequest(String.valueOf(pageNumber), channel, layout,
                 splitSpreads, true, assist);
-        return submitReserved(reservation, bookId, jobRequest, new PendingOperation(operationKey, fingerprint));
-    }
-
-    private PageAttempt registerAttempt(String bookId, int pageNumber, int expectedRevision, List<String> allowedOps) {
-        return registerAttempt(bookId, pageNumber, expectedRevision, allowedOps, null, null);
+        return submitReserved(reservation, bookId, jobRequest, new PendingOperation(operationKey, fingerprint, request.explicitOverwriteAuthorization()));
     }
 
     private PageAttempt registerAttempt(String bookId, int pageNumber, int expectedRevision,
-                                       List<String> allowedOps, PendingOperation operation, Job response) {
-        String key = bookId + ":" + pageNumber;
-        synchronized (pageAttempts) {
-            PageAttempt prev = readJournal(bookId).intents().get(key);
-            String sourceHash = null;
-            try {
-                Page page = store.readPage(bookId, pageNumber);
-                if (page != null && page.sourceRecords() != null && !page.sourceRecords().isEmpty()
-                        && page.sourceRecords().get(0) != null)
-                    sourceHash = page.sourceRecords().get(0).id();
-            } catch (RuntimeException ignored) {}
-            PageAttempt next = (prev != null && prev.bookId().equals(bookId) && prev.pageNumber() == pageNumber)
-                    ? prev.nextGeneration(expectedRevision, sourceHash, allowedOps)
-                    : PageAttempt.register(bookId, pageNumber, expectedRevision, sourceHash, allowedOps);
-            persistIntent(bookId, next, operation, response); // identity + replay receipt precede dispatch in one atomic file
-            pageAttempts.put(key, next);
-            return next;
-        }
-    }
-
-    /**
-     * U4：恢复意图持久化（IN_PROGRESS → 终态）。写持久化意图 → 原子页提交 →
-     * 更新完成标记；自动恢复不重发云请求，不重复收费。
-     */
-    private void persistIntent(String bookId, PageAttempt attempt, PendingOperation operation, Job response) {
+            List<String> allowedOps, String ownerJobId, boolean overwrite, PendingOperation operation, Job response) {
         try {
-            PageAttempt.Journal current = readJournal(bookId);
-            Map<String, PageAttempt> intents = new LinkedHashMap<>(current.intents());
-            Map<String, ReprocessOperation> operations = new LinkedHashMap<>(current.operations());
-            intents.put(attempt.key(), attempt);
-            if (operation != null) {
-                if (operations.containsKey(operation.key())) throw new IllegalStateException("operation already registered");
-                Instant accepted = operationClock.instant();
-                operations.put(operation.key(), new ReprocessOperation(bookId, operation.fingerprint(),
-                        attempt.attemptId(), attempt.generation(), response, accepted,
-                        accepted.plus(OPERATION_RETENTION), "RUNNING"));
-            }
-            store.writeSidecar(store.pageAttemptsPath(bookId), new PageAttempt.Journal(intents, operations));
-        } catch (Exception failure) {
-            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "任务身份记录保存失败，未派发云请求");
+            Instant accepted=operationClock.instant();
+            PageAttempt attempt=store.registerPageAttempt(bookId,pageNumber,expectedRevision,ownerJobId,allowedOps,
+                    overwrite,operation==null?null:operation.key(),
+                    owner->new ReprocessOperation(bookId,operation.fingerprint(),owner.attemptId(),owner.generation(),
+                            response,accepted,accepted.plus(OPERATION_RETENTION),"RUNNING"));
+            pageAttempts.put(attempt.key(),attempt);
+            return attempt;
+        } catch (IOException failure) {
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE,"任务身份记录保存失败，未派发云请求");
         }
     }
 
     private void completeIntent(Running running, int pageNumber, String lifecycle) {
-        PageAttempt owner = running.attempts.get(pageNumber);
-        if (owner == null) return;
-        synchronized (pageAttempts) {
-            try {
-                PageAttempt.Journal journal = readJournal(running.bookId);
-                PageAttempt current = journal.intents().get(owner.key());
-                if (current == null || !current.attemptId().equals(owner.attemptId())
-                        || current.generation() != owner.generation()) return;
-                if (List.of("SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "INTERRUPTED", "UNKNOWN").contains(current.lifecycle())) return;
-                var intents = new LinkedHashMap<>(journal.intents());
-                PageAttempt completed = current.withLifecycle(lifecycle);
-                intents.put(owner.key(), completed);
-                store.writeSidecar(store.pageAttemptsPath(running.bookId), journal.withIntents(intents));
-                pageAttempts.computeIfPresent(owner.key(), (key, value) -> value.attemptId().equals(owner.attemptId()) ? completed : value);
-            } catch (Exception failure) {
-                if (progress != null) progress.finish(running.bookId, pageNumber, owner.attemptId(),
-                        "UNKNOWN", "ATTEMPT_JOURNAL_WRITE_FAILED", false);
+        PageAttempt owner=running.attempts.get(pageNumber);
+        if (owner==null) return;
+        try {
+            store.finishPageAttempt(owner,lifecycle);
+            PageAttempt saved=readJournal(running.bookId).intents().get(owner.key());
+            if (saved!=null) pageAttempts.computeIfPresent(owner.key(),(key,current)->
+                    current.attemptId().equals(saved.attemptId()) ? saved : current);
+        } catch (Exception failure) {
+            if (progress!=null) progress.finish(running.bookId,pageNumber,owner.attemptId(),
+                    "UNKNOWN","ATTEMPT_JOURNAL_WRITE_FAILED",false);
+        }
+    }
+
+    private void markCancelled(Running running) {
+        running.cancelled=true;
+        for (PageAttempt attempt:running.attempts.values()) {
+            try { store.revokePageAttempt(attempt); }
+            catch (Exception failure) {
+                System.getLogger(JobService.class.getName()).log(System.Logger.Level.WARNING,
+                        "Cancellation fence persistence failed; publication remains denied in this process");
             }
         }
     }
@@ -380,35 +350,12 @@ public class JobService {
      * INTERRUPTED；无法证明所有权不覆盖；绝不重新发送云请求。
      */
     public synchronized void reconcileAttemptIntents() {
-        if (active != null || !activeReserved.isEmpty()) return; // Startup reconciliation never settles live workers.
-        List<String> bookIds;
-        try {
-            bookIds = store.listBooks().stream().map(Book::id).toList();
-        } catch (RuntimeException e) {
-            return;
-        }
-        for (String bookId : bookIds) {
-            PageAttempt.Journal journal;
-            try { journal = readJournal(bookId); } catch (RuntimeException unreadable) { continue; }
-            boolean changed = false;
-            java.util.Map<String, PageAttempt> intents = new java.util.LinkedHashMap<>(journal.intents());
-            for (Map.Entry<String, PageAttempt> entry : journal.intents().entrySet()) {
-                PageAttempt intent = entry.getValue();
-                if (List.of("SUCCEEDED", "PARTIAL", "CANCELLED", "FAILED", "INTERRUPTED", "UNKNOWN").contains(intent.lifecycle())) continue;
-                try {
-                    // A readable page or a larger revision is not proof of this attempt's commit.
-                    intents.put(entry.getKey(), intent.withLifecycle("INTERRUPTED"));
-                    changed = true;
-                } catch (RuntimeException ignored) {}
-            }
-            PageAttempt.Journal reconciled = journal.withIntents(intents);
-            Map<String, ReprocessOperation> operations = new LinkedHashMap<>(reconciled.operations());
-            operations.replaceAll((key, receipt) -> receipt.terminal() ? receipt
-                    : receipt.finish("INTERRUPTED", operationClock.instant()));
-            if (changed || !operations.equals(journal.operations())) {
-                try {
-                    store.writeSidecar(store.pageAttemptsPath(bookId), new PageAttempt.Journal(intents, operations));
-                } catch (Exception ignored) {}
+        if (active!=null || !activeReserved.isEmpty()) return;
+        for (Book book:store.listBooks()) {
+            try { store.reconcilePageAttempts(book.id()); }
+            catch (Exception invalid) {
+                System.getLogger(JobService.class.getName()).log(System.Logger.Level.WARNING,
+                        "Attempt recovery incomplete; no cloud request has been resubmitted");
             }
         }
     }
@@ -480,7 +427,7 @@ public class JobService {
         if(bookId.equals(readingReservationBookId)){cancelAllReserved();}
         if(active==null||!active.bookId.equals(bookId)||!List.of("QUEUED","RUNNING","CANCELLING").contains(job.status()))return job;
         if("CANCELLING".equals(job.status()))return job;
-        Running running=active;running.cancelled=true;
+        Running running=active;markCancelled(running);
         if(!running.started){running.future.cancel(false);Job cancelled=statusJob(job,"CANCELLED",job.completed(),job.total(),job.currentPage(),null,job.errors());write(bookId,cancelled);active=null;if(running.lease!=null)running.lease.close();return cancelled;}
         Job cancelling=statusJob(job,"CANCELLING",job.completed(),job.total(),job.currentPage(),null,job.errors());write(bookId,cancelling);running.thread.interrupt();return cancelling;}
     private void run(Running running,Job initial,List<Integer> pages,String provider,String layout,boolean split,boolean force,boolean assist){synchronized(this){if(active!=running||running.cancelled)return;running.started=true;running.thread=Thread.currentThread();}int completed=0;List<String>errors=new ArrayList<>();try{
@@ -498,9 +445,14 @@ public class JobService {
             UUID attemptId = null;
             boolean pagePublished = false;
             try{
-                PageAttempt admitted = registerAttempt(running.bookId, pageNumber, baselineRev,
-                        List.of("JOB_COMPLETE", "JOB_RESTORE"));
-                running.attempts.put(pageNumber, admitted);
+                PageAttempt admitted;
+                synchronized(this) {
+                    if (running.cancelled) throw new CancelledException();
+                    admitted=registerAttempt(running.bookId,pageNumber,baselineRev,
+                            List.of("JOB_COMPLETE","JOB_RESTORE"),initial.id(),force,null,null);
+                    running.attempts.put(pageNumber,admitted);
+                }
+                store.verifyAttemptForDispatch(admitted,CommitOp.JOB_COMPLETE);
                 if (progress != null) {
                     attemptId = progress.begin(admitted, baselineRev, "READY".equals(old.status()));
                     progress.plan(running.bookId, pageNumber, attemptId, "PAGE", 1);
@@ -528,7 +480,7 @@ public class JobService {
                         fallback=new Page(old.pageNumber(),old.width(),old.height(),"FAILED",old.provider(),old.blocks(),List.copyOf(warnings),old.reviewed(),message,old.sourceRecords(),null);
                     }
                     try {
-                        store.commitPage(running.bookId,fallback,baselineRev,CommitActor.JOB,initial.id(),CommitOp.JOB_RESTORE);
+                        store.commitPage(running.bookId,fallback,baselineRev,CommitActor.JOB,commitIdentity(running,pageNumber,"FAILED"),CommitOp.JOB_RESTORE);
                     } catch (PageConflictException conflict) {
                         errors.add("第 "+pageNumber+" 页在识别期间又被更新，已保留最新版本");
                     }
@@ -536,7 +488,7 @@ public class JobService {
                     // A1-04：先提交成功结果，通过后再补原始快照；被拒绝的结果不写快照
                     try {
                         if (attemptId != null) progress.stage(running.bookId,pageNumber,attemptId,"PUBLISHING");
-                        Page committed = store.commitPage(running.bookId,page,baselineRev,CommitActor.JOB,initial.id(),CommitOp.JOB_COMPLETE);
+                        Page committed = store.commitPage(running.bookId,page,baselineRev,CommitActor.JOB,commitIdentity(running,pageNumber,result.category()==ProcessingResult.Category.TEXT_PARTIAL?"PARTIAL":"SUCCEEDED"),CommitOp.JOB_COMPLETE);
                         pagePublished = true;
                         boolean partial = result.category() == ProcessingResult.Category.TEXT_PARTIAL;
                         if (attemptId != null) {
@@ -570,7 +522,7 @@ public class JobService {
                     failed=new Page(old.pageNumber(),old.width(),old.height(),"FAILED",provider,old.blocks(),old.warnings(),old.reviewed(),message,old.sourceRecords(),null);
                 }
                 try {
-                    store.commitPage(running.bookId,failed,baselineRev,CommitActor.JOB,initial.id(),CommitOp.JOB_RESTORE);
+                    store.commitPage(running.bookId,failed,baselineRev,CommitActor.JOB,commitIdentity(running,pageNumber,"FAILED"),CommitOp.JOB_RESTORE);
                 } catch (PageConflictException ignored) { }
             }
             finally {
@@ -621,6 +573,7 @@ public class JobService {
                         progress.stage(running.bookId, pageNumber, attemptId, "OCR");
                         progress.plan(running.bookId, pageNumber, attemptId, "PAGE", 1);
                     }
+                    store.verifyAttemptForDispatch(admitted,CommitOp.JOB_BASELINE);
                     ProcessingResult baselineResult=processor.processBaseline(running.bookId,pageNumber,provider,layout,split,()->running.cancelled||Thread.currentThread().isInterrupted());
                     Page baselinePage=mergeUnresolvedIssues(old,baselineResult.page());
                     if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
@@ -640,13 +593,13 @@ public class JobService {
                             fallback=new Page(old.pageNumber(),old.width(),old.height(),"FAILED",old.provider(),old.blocks(),List.copyOf(warnings),old.reviewed(),message,old.sourceRecords(),null);
                         }
                         try {
-                            store.commitPage(running.bookId,fallback,baselineRev,CommitActor.JOB,expectedJobId,CommitOp.JOB_RESTORE);
+                            store.commitPage(running.bookId,fallback,baselineRev,CommitActor.JOB,commitIdentity(running,pageNumber,"FAILED"),CommitOp.JOB_RESTORE);
                         } catch (PageConflictException | IOException ignored) {}
                         if(attemptId!=null)progress.finish(running.bookId,pageNumber,attemptId,"FAILED","BASELINE_REJECTED",true);
                     }else{
                         try {
                             if(attemptId!=null)progress.stage(running.bookId,pageNumber,attemptId,"BASELINE_PUBLISHING");
-                            Page committed=store.commitPage(running.bookId,baselinePage,baselineRev,CommitActor.JOB,expectedJobId,CommitOp.JOB_BASELINE);
+                            Page committed=store.commitPage(running.bookId,baselinePage,baselineRev,CommitActor.JOB,commitIdentity(running,pageNumber,baselineResult.category()==ProcessingResult.Category.TEXT_PARTIAL?"PARTIAL":assist?"BASELINE_PUBLISHED":"SUCCEEDED"),CommitOp.JOB_BASELINE);
                             try{store.preserveOriginal(running.bookId,committed);}catch(IOException ignored){}
                             baselinePublishedThisPage = true;
                             pageBaselinePublished = true;
@@ -674,6 +627,7 @@ public class JobService {
                         if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
                         if(attemptId!=null)progress.stage(running.bookId,pageNumber,attemptId,"STRUCTURE");
                         try {
+                            store.verifyAttemptForDispatch(admitted,CommitOp.JOB_ENHANCEMENT);
                             PageProcessor.EnrichResult enriched=processor.enrichBaseline(running.bookId,pageNumber,publishedPage,provider,layout,()->running.cancelled||Thread.currentThread().isInterrupted());
                             if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
                             if(!mayPublish(running,reservation,expectedJobId))return;
@@ -692,7 +646,7 @@ public class JobService {
                             } else {
                                 try {
                                     if(attemptId!=null)progress.stage(running.bookId,pageNumber,attemptId,"PUBLISHING");
-                                    Page committed = store.commitPage(running.bookId,enrichedPage,publishedRev,CommitActor.JOB,expectedJobId,CommitOp.JOB_ENHANCEMENT);
+                                    Page committed = store.commitPage(running.bookId,enrichedPage,publishedRev,CommitActor.JOB,commitIdentity(running,pageNumber,enriched.complete()?"SUCCEEDED":"PARTIAL"),CommitOp.JOB_ENHANCEMENT);
                                     if(attemptId!=null){
                                         progress.baselinePublished(running.bookId,pageNumber,attemptId,committed.revision(),enriched.complete());
                                         completePageUnit(running.bookId,pageNumber,attemptId);
@@ -748,7 +702,7 @@ public class JobService {
                         failed=new Page(old.pageNumber(),old.width(),old.height(),"FAILED",provider,old.blocks(),old.warnings(),old.reviewed(),message,old.sourceRecords(),null);
                     }
                     try {
-                        store.commitPage(running.bookId,failed,baselineRev,CommitActor.JOB,expectedJobId,CommitOp.JOB_RESTORE);
+                        store.commitPage(running.bookId,failed,baselineRev,CommitActor.JOB,commitIdentity(running,pageNumber,"FAILED"),CommitOp.JOB_RESTORE);
                         completeIntent(running, pageNumber, "FAILED");
                     } catch (PageConflictException | IOException ignored) { }
                 }
@@ -766,6 +720,19 @@ public class JobService {
         }catch(CancelledException|CancellationException ignored){}
         finally { releaseReserved(running, running.cancelled ? "CANCELLED" : "INTERRUPTED"); }
     }
+    private String commitIdentity(Running running, int page, String outcome) {
+        PageAttempt attempt=running.attempts.get(page);
+        if (attempt==null) throw new ApiException(HttpStatus.CONFLICT,"缺少有效页面处理身份");
+        if ("SUCCEEDED".equals(outcome) && progress!=null) {
+            ProcessingSnapshot snapshot=progress.snapshot(running.bookId,page,attempt.attemptId());
+            if (snapshot!=null && !"PAGE".equals(snapshot.units().kind())) {
+                var u=snapshot.units();
+                if (u.failed()+u.skipped()+u.cancelled()>0 || u.succeeded()<u.total()) outcome="PARTIAL";
+            }
+        }
+        return attempt.commitIdentity(outcome);
+    }
+
     private void completePageUnit(String bookId, int page, UUID attemptId) {
         ProcessingSnapshot snapshot = progress.snapshot(bookId,page,attemptId);
         if (snapshot != null && "PAGE".equals(snapshot.units().kind()) && snapshot.units().total() == 1
