@@ -17,8 +17,8 @@
   "readyForRelease": false,
   "baselineSha": "eb89822cf477a3beb3472cf114ab8b3fd09b3f6e",
   "currentBranch": "harden/remaining-eb89822-20260923",
-  "currentHeadSha": "9db952c",
-  "requiredCodeGapsRemaining": ["G11", "G12", "G13", "G14", "G15", "G16"],
+  "currentHeadSha": "71e734a",
+  "requiredCodeGapsRemaining": ["G12", "G13", "G14", "G15", "G16"],
   "failedGates": [],
   "blockedExternal": ["E01", "E02", "E03", "E04", "E05", "E06", "E07", "E08"],
   "skippedTests": [],
@@ -89,7 +89,7 @@
 | **G08** | B07 | DONE | BookContentProfile + 严格 ContextSnapshot + JEV 接受锁内依赖校验 | 760 套件全绿，3 套新增专项实测 PASS (BookContentProfile/ContextSnapshot/JEV锁内校验) |
 | **G09** | B08 | DONE | 完整 V3 固定计划（父 planHash/子 reviewPlanHash/contextHash/持久 eventSeq） | 770 套件全绿，2 套新增专项实测 PASS (WorkPlanReducer/V3ProgressApi/Journal持久化) |
 | **G10** | B01 | DONE | 图像解码图、子图、PNG、Base64、请求体及临时磁盘完整字节租约 | 666 套件全绿，4 套新增专项实测 PASS |
-| **G11** | B09 | PARTIAL_CODE | 前端 12页/32MiB 缓存双上限、校对工作台按需挂载、交互会话守卫 | 待实现 |
+| **G11** | B09 | DONE | 前端 12页/32MiB 缓存双上限、校对工作台按需挂载、交互会话守卫 | 775 套件全绿，新增 FrontendBoundsTest (5 tests) 实测 PASS (双上限/工作台惰性挂载/SessionGuard) |
 | **G12** | B10 | TODO_VERIFY | 冻结 ExportSnapshot、不可信脚本转义、ZIP 路径穿越与离线一致性 | 待实现 |
 | **G13** | B11 | PARTIAL_CODE | LAN 配对与能力分级认证、统一外发白名单、严格 CSP、秘密轮换演练 | 待实现 |
 | **G14** | B12 | TODO_CODE | 统一脱敏诊断指标、性能可复现埋点与故障记录 | 待实现 |
@@ -162,13 +162,18 @@
 | **B08-03** | B08 | DONE | `ProcessingProgressService` 与 `ProcessingSnapshot` 深度集成 V3 计划与流水，暴露加权完成率与准确率，向后兼容 `schemaVersion=2` | `ProcessingProgressServiceTest`, `ProcessingProgressTest`, `V3ProgressApiTest` | 实测 PASS |
 | **B08-04** | B08 | DONE | 前端 `page-progress.js` 更新 `terminal.PARTIAL` 语义为“本轮结束 · 部分待核对”，区分阶段完成比例与文字核对准确率 | 静态检查与组件渲染验证 | 实测 PASS |
 | **B08-05** | B08 | DONE | B08 批次 10 项新增专项实测 PASS，全仓 770 项测试全部通过（770/770 PASS） | `mvn test` 770/770 | 全部实测 PASS |
+| **B09-01** | B09 | DONE | `store.js` 实现 12 页 / 32 MiB 双上限 LRU 缓存与页面字节估算（`estimatePageBytes`），双重超限时淘汰最久未使用页且保护当前页 | `FrontendBoundsTest` (testPageCacheDualLimitsStructure / testDualLimitEvictionBehavior) | 实测 PASS |
+| **B09-02** | B09 | DONE | `editor.js` 增加 `unmountIssueWorkbench` 导出，提供工作台卸载、DOM 清空与画布/图片内存回收 | `FrontendBoundsTest` (testWorkbenchLazyMountingStructure) | 实测 PASS |
+| **B09-03** | B09 | DONE | `app.js` 实现工作台按需挂载与抽屉关闭/切出阅读模式彻底卸载，杜绝非校对视图常驻渲染开销 | 静态检查与组件行为验证 | 实测 PASS |
+| **B09-04** | B09 | DONE | `store.js` 与 `app.js` 实现 `SessionGuard`（交互会话守卫），管理页切换、书切换及会话代次，杜绝跨会话异步状态污染 | `FrontendBoundsTest` (testSessionGuardStructure / testSessionGuardBehavior) | 实测 PASS |
+| **B09-05** | B09 | DONE | B09 批次 5 项新增专项实测 PASS，全仓 775 项测试全部通过（775/775 PASS） | `mvn test` 775/775 | 全部实测 PASS |
 
-*(后续批次 B09～B13 子任务随各批次执行实时更新)*
+*(后续批次 B10～B13 子任务随各批次执行实时更新)*
 
 ---
 
 ## 7. 下一步行动
-立即执行 **B09 批次**（前端内存上限与视口裁剪 / G11）：
-1. 实现 12 页 / 32 MiB 双上限 LRU 缓存与溢出回收；
-2. 实现校对工作台按需惰性挂载，离开视口及时卸载；
-3. 实现交互会话守卫防止跨会话状态泄漏。
+立即执行 **B10 批次**（导出快照与沙箱安全 / G12）：
+1. 建立不可变 `ExportSnapshot` 与离线渲染管线；
+2. 实现不可信脚本与 HTML 标签严格转义；
+3. 实现 ZIP 导出路径穿越防护（Path Traversal Guard）与离线一致性校验。
