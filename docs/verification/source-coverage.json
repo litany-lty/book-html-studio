@@ -1,0 +1,1908 @@
+{
+  "schemaVersion": 1,
+  "baselineCommit": "eb89822cf477a3beb3472cf114ab8b3fd09b3f6e",
+  "totalTracked": 253,
+  "files": [
+    {
+      "path": "src/main/java/studio/bookhtml/BookHtmlStudioApplication.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 757
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/config/PaddleAiStudioProperties.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1628
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/config/EnvironmentSecretStore.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "SECURITY_AUTH"
+      ],
+      "sizeBytes": 1166
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/config/SettingsService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "SECURITY_AUTH"
+      ],
+      "sizeBytes": 19851
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/config/SettingsPersistence.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "SECURITY_AUTH"
+      ],
+      "sizeBytes": 6925
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/config/AppProperties.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 3302
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/config/DecisionProperties.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 6053
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/config/SecretStore.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "SECURITY_AUTH"
+      ],
+      "sizeBytes": 3332
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/config/EncryptedFileSecretStore.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "SECURITY_AUTH"
+      ],
+      "sizeBytes": 8905
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/config/PpOcrProperties.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 710
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/config/WriteOriginFilter.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "SECURITY_AUTH"
+      ],
+      "sizeBytes": 4702
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/config/QwenAssistProperties.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 3131
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/config/PrivateSettingsFiles.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 5403
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/UsageController.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 1767
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/ReadingWindowRequest.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1270
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/ApiException.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 318
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/PresentationOverrideRequest.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1062
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/JobRequest.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 596
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/ReviewDecisionController.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 16451
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/ReadingWindowResponse.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2803
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/ReaderController.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 2129
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/LibraryUpdateRequest.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 176
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/ReadingWindowCommand.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 123
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/PresentationController.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2226
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/SettingsController.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 5497
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/ReadingWindowController.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 913
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/ApiController.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "EXPORT_OFFLINE"
+      ],
+      "sizeBytes": 12659
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/ApiErrorHandler.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2230
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/DiagnosticsController.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY",
+        "RENDERING_BUDGET"
+      ],
+      "sizeBytes": 1831
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/PageUpdateRequest.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 349
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/api/PageReprocessRequest.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 903
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/QuoteLocator.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 3547
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/SharedTransport.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1008
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/DecisionBudget.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 7133
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/DeepFreeze.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1904
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/DecisionBeans.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 854
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/DecisionAcceptService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 10136
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/IssueBasis.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1475
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/DecisionTargetIdentity.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4022
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/DecisionPolicy.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 15446
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/MockDecisionTransport.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 5671
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/DecisionTransport.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 497
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/DecisionCoordinator.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 65023
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/DecisionModels.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 21014
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/JevDecisionClient.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 17247
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/DecisionHash.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 934
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/CanonicalJson.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4165
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/DecisionStateBuilder.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 12730
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/CandidateResolutionService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 21451
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/DecisionStore.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 26884
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/DecisionOutboundGate.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4062
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/EvidenceCollector.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 14237
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/decision/PdfIdentity.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1358
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/PresentationOverrideService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 8991
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/QwenPhysicalCall.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 6807
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/PaddleAiStudioClient.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "NETWORK_TRANSPORT",
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 35826
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/PaddleOcrClient.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "NETWORK_TRANSPORT"
+      ],
+      "sizeBytes": 21487
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/PdfRenderWorker.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "RENDERING_BUDGET"
+      ],
+      "sizeBytes": 3050
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/QwenTextReviewClient.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "NETWORK_TRANSPORT",
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 26086
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/BaiduPpOcrParser.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 5191
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/OutlineService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 4554
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/BaiduPpOcrClient.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "NETWORK_TRANSPORT",
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 22194
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/JobService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 41975
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/PaddleOcrParser.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 7747
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/ProcessingResult.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 998
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/VerticalLayoutNormalizer.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 9683
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/QwenRequestGate.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 7863
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/NativeTextExtractor.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "RENDERING_BUDGET"
+      ],
+      "sizeBytes": 6628
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/PriorityTaskScheduler.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 3776
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/QwenTocRecoveryService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "NETWORK_TRANSPORT",
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 28455
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/SparsePageGuard.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2874
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/QuotaExceededException.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 444
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/RenderBudget.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "RENDERING_BUDGET"
+      ],
+      "sizeBytes": 5683
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/BoundedHttp.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "NETWORK_TRANSPORT"
+      ],
+      "sizeBytes": 9111
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/ReadingWindowService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 30933
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/QwenOcrClient.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "NETWORK_TRANSPORT"
+      ],
+      "sizeBytes": 10503
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/QwenExecutionScope.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4087
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/CancelledException.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 157
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/HeadingText.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 5972
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/PageProcessor.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY",
+        "RENDERING_BUDGET"
+      ],
+      "sizeBytes": 41380
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/IssueImageService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "RENDERING_BUDGET"
+      ],
+      "sizeBytes": 42139
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/AssistedReviewService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 5382
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/QwenTaskPlanner.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 9159
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/PdfService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "RENDERING_BUDGET"
+      ],
+      "sizeBytes": 18555
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/PageStatisticsCache.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 3437
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/AdvertisementFilter.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 3755
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/BookContextService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 6245
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/QualityGate.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 16192
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/ProcessingProgressService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 11280
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/MiniMaxVisionClient.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "NETWORK_TRANSPORT"
+      ],
+      "sizeBytes": 9264
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/ScanTextEvidence.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 5061
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/BlockValidator.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 3131
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/PageProcessingService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 13266
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/CloudOcrPipeline.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "RENDERING_BUDGET"
+      ],
+      "sizeBytes": 5498
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/QwenLayoutClient.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "NETWORK_TRANSPORT",
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 35890
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/UsageLedger.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 30837
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/TraditionalConverter.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 291
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/QwenAssistCoordinator.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 23805
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/BookPresentationService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 29381
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/ReadingStructureNormalizer.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 13781
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/OcrTextRecovery.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 9683
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/OcrNoTextException.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 321
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/PaddleOcrPipeline.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4897
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/OcrException.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 226
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/PageRanges.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1366
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/IsolatedPdfRender.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "NETWORK_TRANSPORT",
+        "STORAGE_AUTHORITY",
+        "RENDERING_BUDGET"
+      ],
+      "sizeBytes": 11937
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/TesseractService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "NETWORK_TRANSPORT"
+      ],
+      "sizeBytes": 7190
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/ExportService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY",
+        "RENDERING_BUDGET",
+        "EXPORT_OFFLINE"
+      ],
+      "sizeBytes": 74266
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/ReadingPriority.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 821
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/BookService.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY",
+        "RENDERING_BUDGET"
+      ],
+      "sizeBytes": 12510
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/service/UsageContext.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1360
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/domain/Page.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1555
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/domain/BookLayoutProfile.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2087
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/domain/ContentIssue.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1074
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/domain/PresentationOverride.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 1497
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/domain/Job.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 899
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/domain/ProcessingSnapshot.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 3623
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/domain/PageSummary.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 216
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/domain/Book.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 619
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/domain/PageAttempt.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 5606
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/domain/ReprocessOperation.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2236
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/domain/Block.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1082
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/domain/PagePresentation.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 3308
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/store/AttemptAuthority.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 11250
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/store/DurableJson.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2737
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/store/DataDirectoryLease.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 5783
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/store/BookStore.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 43432
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/store/PageCommitJournal.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 7023
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/store/SourceIdentityGuard.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 3034
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/store/PageConflictException.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 596
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/store/CommitActor.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 554
+    },
+    {
+      "path": "src/main/java/studio/bookhtml/store/CommitOp.java",
+      "category": "src/main/java",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1311
+    },
+    {
+      "path": "src/main/resources/static/focus-reading.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 14198
+    },
+    {
+      "path": "src/main/resources/static/reader-navigation.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1466
+    },
+    {
+      "path": "src/main/resources/static/index.html",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 31054
+    },
+    {
+      "path": "src/main/resources/static/decision.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 21149
+    },
+    {
+      "path": "src/main/resources/static/styles.css",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 95012
+    },
+    {
+      "path": "src/main/resources/static/reader-mode.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2825
+    },
+    {
+      "path": "src/main/resources/static/store.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4083
+    },
+    {
+      "path": "src/main/resources/static/task-center.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 870
+    },
+    {
+      "path": "src/main/resources/static/reader-fonts.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2947
+    },
+    {
+      "path": "src/main/resources/static/reader-status.css",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1218
+    },
+    {
+      "path": "src/main/resources/static/library.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 8701
+    },
+    {
+      "path": "src/main/resources/static/editor.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 23077
+    },
+    {
+      "path": "src/main/resources/static/settings-secret-store.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2920
+    },
+    {
+      "path": "src/main/resources/static/reading-anchor.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2078
+    },
+    {
+      "path": "src/main/resources/static/reading-window.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 13521
+    },
+    {
+      "path": "src/main/resources/static/usage.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 8401
+    },
+    {
+      "path": "src/main/resources/static/page-progress.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 6069
+    },
+    {
+      "path": "src/main/resources/static/reader.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 21894
+    },
+    {
+      "path": "src/main/resources/static/api.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 7618
+    },
+    {
+      "path": "src/main/resources/static/reading-layout.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 24121
+    },
+    {
+      "path": "src/main/resources/static/app.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY",
+        "RENDERING_BUDGET"
+      ],
+      "sizeBytes": 112140
+    },
+    {
+      "path": "src/main/resources/static/settings.js",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 17876
+    },
+    {
+      "path": "src/main/resources/static/focus-reading.css",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 3783
+    },
+    {
+      "path": "src/main/resources/static/fonts/noto-serif-sc.css",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 102775
+    },
+    {
+      "path": "src/main/resources/static/fonts/noto-sans-sc.css",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 102573
+    },
+    {
+      "path": "src/main/resources/static/fonts/lxgw-wenkai-tc-ofl.txt",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4390
+    },
+    {
+      "path": "src/main/resources/static/fonts/noto-serif-sc-ofl.txt",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4350
+    },
+    {
+      "path": "src/main/resources/static/fonts/reader-fonts.css",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1428
+    },
+    {
+      "path": "src/main/resources/static/fonts/noto-sans-sc-ofl.txt",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4388
+    },
+    {
+      "path": "src/main/resources/static/fonts/jetbrains-mono-ofl.txt",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4399
+    },
+    {
+      "path": "src/main/resources/static/fonts/manifest.json",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 103065
+    },
+    {
+      "path": "src/main/resources/static/fonts/lxgw-wenkai-tc.css",
+      "category": "src/main/resources/static",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 117402
+    },
+    {
+      "path": "src/main/resources/export/issue-review.js",
+      "category": "src/main/resources/export",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 51534
+    },
+    {
+      "path": "src/main/resources/export/offline-edit-store.js",
+      "category": "src/main/resources/export",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 12145
+    },
+    {
+      "path": "src/main/resources/export/issue-review.css",
+      "category": "src/main/resources/export",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 7191
+    },
+    {
+      "path": "scripts/ProbeBaiduSignedDownload.java",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [
+        "NETWORK_TRANSPORT"
+      ],
+      "sizeBytes": 4594
+    },
+    {
+      "path": "scripts/CaptureJavaHttpHeaders.java",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [
+        "NETWORK_TRANSPORT"
+      ],
+      "sizeBytes": 1792
+    },
+    {
+      "path": "scripts/probe-cloud.mjs",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4695
+    },
+    {
+      "path": "scripts/fetch-reader-fonts.mjs",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4426
+    },
+    {
+      "path": "scripts/probe-baidu.mjs",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 6929
+    },
+    {
+      "path": "scripts/compare-baidu-ocr.mjs",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 18682
+    },
+    {
+      "path": "scripts/security/scan_secrets.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 6776
+    },
+    {
+      "path": "scripts/security/__pycache__/scan_secrets.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 10678
+    },
+    {
+      "path": "scripts/verification/build_manifest.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4263
+    },
+    {
+      "path": "scripts/verification/browser_scan_recovery.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 6151
+    },
+    {
+      "path": "scripts/verification/probe_final_gaps.mjs",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 9626
+    },
+    {
+      "path": "scripts/verification/probe_offline_store.js",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2872
+    },
+    {
+      "path": "scripts/verification/ReadingWindowQaServer.java",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 11865
+    },
+    {
+      "path": "scripts/verification/export_sample_gallery.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 5044
+    },
+    {
+      "path": "scripts/verification/probe_api_lifecycle.mjs",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2554
+    },
+    {
+      "path": "scripts/verification/test_shadow_eval.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 6890
+    },
+    {
+      "path": "scripts/verification/browser_reader_smoke.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 8826
+    },
+    {
+      "path": "scripts/verification/cdp_offline.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 8951
+    },
+    {
+      "path": "scripts/verification/apply_review_labels.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 9047
+    },
+    {
+      "path": "scripts/verification/render_annotate.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 8382
+    },
+    {
+      "path": "scripts/verification/inventory_books.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4086
+    },
+    {
+      "path": "scripts/verification/cdp_decision.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 11243
+    },
+    {
+      "path": "scripts/verification/probe_scan_empty.mjs",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1913
+    },
+    {
+      "path": "scripts/verification/qwen_crop_opinions.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 8390
+    },
+    {
+      "path": "scripts/verification/verify_evidence_package.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 8462
+    },
+    {
+      "path": "scripts/verification/cdp_reading_window.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 13030
+    },
+    {
+      "path": "scripts/verification/run_reader_browser.sh",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1393
+    },
+    {
+      "path": "scripts/verification/jev_live_smoke.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 5601
+    },
+    {
+      "path": "scripts/verification/cdp_partial_close.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 7853
+    },
+    {
+      "path": "scripts/verification/SeedUsage.java",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 3558
+    },
+    {
+      "path": "scripts/verification/eval_sample_run.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4159
+    },
+    {
+      "path": "scripts/verification/probe_settings_secrets.mjs",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2577
+    },
+    {
+      "path": "scripts/verification/render_blind_pilot.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 15139
+    },
+    {
+      "path": "scripts/verification/shadow_eval.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 20433
+    },
+    {
+      "path": "scripts/verification/cdp_library.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 8442
+    },
+    {
+      "path": "scripts/verification/test_review_labels.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4355
+    },
+    {
+      "path": "scripts/verification/probe_editor_evidence.js",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 6346
+    },
+    {
+      "path": "scripts/verification/test_secret_guard.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2329
+    },
+    {
+      "path": "scripts/verification/cdp_reader_ux.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 12357
+    },
+    {
+      "path": "scripts/verification/probe_settings_usage.mjs",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 3449
+    },
+    {
+      "path": "scripts/verification/probe_ready_fetch_retry.js",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1098
+    },
+    {
+      "path": "scripts/verification/sample_books.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 6566
+    },
+    {
+      "path": "scripts/verification/cdp_offline_decision.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 6125
+    },
+    {
+      "path": "scripts/verification/README.md",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY",
+        "EXPORT_OFFLINE"
+      ],
+      "sizeBytes": 7312
+    },
+    {
+      "path": "scripts/verification/SeedBook.java",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2547
+    },
+    {
+      "path": "scripts/verification/freeze_candidates.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 11289
+    },
+    {
+      "path": "scripts/verification/probe_focus_reading.mjs",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2074
+    },
+    {
+      "path": "scripts/verification/probe_job_scope.js",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 6541
+    },
+    {
+      "path": "scripts/verification/browser_focus_reading.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 22365
+    },
+    {
+      "path": "scripts/verification/probe_reader_attention.js",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 1335
+    },
+    {
+      "path": "scripts/verification/perf_samples.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2474
+    },
+    {
+      "path": "scripts/verification/probe_reader_fonts.js",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4077
+    },
+    {
+      "path": "scripts/verification/probe_reading_window.js",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [
+        "STORAGE_AUTHORITY"
+      ],
+      "sizeBytes": 11830
+    },
+    {
+      "path": "scripts/verification/cdpdrive.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4389
+    },
+    {
+      "path": "scripts/verification/probe_display.js",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2834
+    },
+    {
+      "path": "scripts/verification/make_import_backup.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2041
+    },
+    {
+      "path": "scripts/verification/SecretStoreProbe.java",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [
+        "SECURITY_AUTH"
+      ],
+      "sizeBytes": 4242
+    },
+    {
+      "path": "scripts/verification/probe_page_progress.mjs",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 3689
+    },
+    {
+      "path": "scripts/verification/cdp_import_restart.py",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 3783
+    },
+    {
+      "path": "scripts/verification/__pycache__/cdp_offline.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 12382
+    },
+    {
+      "path": "scripts/verification/__pycache__/sample_books.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 9857
+    },
+    {
+      "path": "scripts/verification/__pycache__/shadow_eval.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 22625
+    },
+    {
+      "path": "scripts/verification/__pycache__/cdpdrive.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 8016
+    },
+    {
+      "path": "scripts/verification/__pycache__/export_sample_gallery.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 7881
+    },
+    {
+      "path": "scripts/verification/__pycache__/perf_samples.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4552
+    },
+    {
+      "path": "scripts/verification/__pycache__/eval_sample_run.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 6275
+    },
+    {
+      "path": "scripts/verification/__pycache__/cdp_import_restart.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 5948
+    },
+    {
+      "path": "scripts/verification/__pycache__/render_annotate.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 12050
+    },
+    {
+      "path": "scripts/verification/__pycache__/cdp_library.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 11008
+    },
+    {
+      "path": "scripts/verification/__pycache__/make_import_backup.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 2533
+    },
+    {
+      "path": "scripts/verification/__pycache__/verify_evidence_package.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 13337
+    },
+    {
+      "path": "scripts/verification/__pycache__/freeze_candidates.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 14259
+    },
+    {
+      "path": "scripts/verification/__pycache__/test_shadow_eval.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 9200
+    },
+    {
+      "path": "scripts/verification/__pycache__/cdp_decision.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 14494
+    },
+    {
+      "path": "scripts/verification/__pycache__/cdp_reading_window.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 19023
+    },
+    {
+      "path": "scripts/verification/__pycache__/test_review_labels.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 6781
+    },
+    {
+      "path": "scripts/verification/__pycache__/test_secret_guard.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 4907
+    },
+    {
+      "path": "scripts/verification/__pycache__/cdp_reader_ux.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 15148
+    },
+    {
+      "path": "scripts/verification/__pycache__/apply_review_labels.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 12676
+    },
+    {
+      "path": "scripts/verification/__pycache__/jev_live_smoke.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 7536
+    },
+    {
+      "path": "scripts/verification/__pycache__/qwen_crop_opinions.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 13779
+    },
+    {
+      "path": "scripts/verification/__pycache__/render_blind_pilot.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 18772
+    },
+    {
+      "path": "scripts/verification/__pycache__/cdp_partial_close.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 10612
+    },
+    {
+      "path": "scripts/verification/__pycache__/build_manifest.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 7171
+    },
+    {
+      "path": "scripts/verification/__pycache__/cdp_offline_decision.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 8113
+    },
+    {
+      "path": "scripts/verification/__pycache__/inventory_books.cpython-314.pyc",
+      "category": "scripts",
+      "status": "READ",
+      "entryTypes": [],
+      "sizeBytes": 6134
+    }
+  ]
+}

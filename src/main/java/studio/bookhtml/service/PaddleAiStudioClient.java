@@ -28,6 +28,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermission;
 import java.security.MessageDigest;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -62,6 +63,8 @@ public class PaddleAiStudioClient {
     private final Waiter waiter;
     private SettingsService settings;
     private UsageLedger usage;
+    private RemoteJobRegistry remoteJobRegistry;
+    private ProviderResourceRegistry resources;
     private final Object[] locks = new Object[LOCK_STRIPES];
 
     @Autowired
@@ -83,6 +86,8 @@ public class PaddleAiStudioClient {
 
     @Autowired public void setSettings(SettingsService settings) { this.settings = settings; }
     @Autowired public void setUsageLedger(UsageLedger usage) { this.usage = usage; }
+    @Autowired(required = false) public void setRemoteJobRegistry(RemoteJobRegistry remoteJobRegistry) { this.remoteJobRegistry = remoteJobRegistry; }
+    @Autowired(required = false) public void setResourceRegistry(ProviderResourceRegistry resources) { this.resources = resources; }
     private String accessToken() { return settings == null ? properties.accessToken() : settings.state().paddleAccessToken(); }
     private String model() { return settings == null ? properties.model() : "PaddleOCR-VL-1.6"; }
 
@@ -127,68 +132,124 @@ public class PaddleAiStudioClient {
         String taskId = cache == null ? null : cache.taskId();
         String ownerBookId = cache == null ? null : cache.ownerBookId();
         String usageAttemptId = cache == null ? null : cache.usageAttemptId();
-        if (taskId == null || taskId.isBlank()) {
-            if (cache != null && !"rejected".equals(cache.state()))
-                throw new OcrException("PaddleOCR AI Studio 提交结果不确定；为避免重复计费未自动重提");
-            checkCancelled(cancelled);
-            HttpRequest submission = submissionRequest(png, deadline);
-            if (usage != null) try {
-                usageAttemptId = usage.start("paddle-aistudio", model());
-                ownerBookId = UsageContext.current().bookId();
-            } catch (java.io.IOException e) { throw new OcrException("用量账本不可用，禁止提交 AI Studio 任务", e); }
-            writeCache(fingerprint, cacheEntry(fingerprint, null, "submitting", null, ownerBookId, usageAttemptId));
-            try {
-                taskId = submit(submission, cancelled, usageAttemptId);
-                writeCache(fingerprint, cacheEntry(fingerprint, taskId, "submitted", null, ownerBookId, usageAttemptId));
-                if (usage != null) usage.pending(usageAttemptId);
-            } catch (SubmitRejectedException e) {
-                if (usage != null) try { usage.failed(usageAttemptId); } catch (java.io.IOException ignored) { }
-                writeCache(fingerprint, cacheEntry(fingerprint, null, "rejected", null, ownerBookId, usageAttemptId));
-                throw e;
-            } catch (QuotaExceededException e) {
-                if (usage != null) try { usage.failed(usageAttemptId); } catch (java.io.IOException ignored) { }
-                writeCache(fingerprint, cacheEntry(fingerprint, null, "rejected", null, ownerBookId, usageAttemptId));
-                throw e;
-            } catch (CancelledException e) {
-                writeCache(fingerprint, cacheEntry(fingerprint, null, "submit-unknown", null, ownerBookId, usageAttemptId));
-                throw e;
-            } catch (Exception e) {
-                writeCache(fingerprint, cacheEntry(fingerprint, null, "submit-unknown", null, ownerBookId, usageAttemptId));
-                throw new OcrException("PaddleOCR AI Studio 提交结果不确定；为避免重复计费未自动重提");
-            }
-        }
 
-        String state = cache == null ? "submitted" : cache.state();
-        while (System.nanoTime() < deadline) {
-            checkCancelled(cancelled);
-            waiter.pause(properties.pollIntervalSeconds(), cancelled);
-            checkCancelled(cancelled);
-            JsonNode response = sendJson(pollRequest(taskId, deadline), cancelled, MAX_API_BYTES,
-                    "PaddleOCR AI Studio 任务查询失败");
-            if (usage != null) try { usage.captureUsage(usageAttemptId, response); }
-            catch (java.io.IOException e) { throw new OcrException("用量账本更新失败", e); }
-            JsonNode data = successData(response, "PaddleOCR AI Studio 任务查询失败");
-            state = data.path("state").asText("").toLowerCase(Locale.ROOT);
-            writeCache(fingerprint, cacheEntry(fingerprint, taskId, state, null, ownerBookId, usageAttemptId));
-            if (Set.of("pending", "running").contains(state)) continue;
-            if ("failed".equals(state)) {
-                if (usage != null) try { usage.failed(usageAttemptId); } catch (java.io.IOException e) { throw new OcrException("用量账本更新失败", e); }
-                throw new OcrException("PaddleOCR AI Studio 远端任务失败；为避免重复计费未自动重提");
+        ProviderResourceRegistry.Permit remotePermit = null;
+        if (resources != null) {
+            try {
+                remotePermit = resources.acquireRemoteJob(Duration.ofSeconds(30), cancelled);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new CancelledException();
             }
-            if (!"done".equals(state)) throw new OcrException("PaddleOCR AI Studio 返回未知任务状态");
-            // Remote completion is the billing-relevant confirmation; local JSONL parsing may still fail.
-            if (usage != null) try { usage.succeeded(usageAttemptId); }
-            catch (java.io.IOException e) { throw new OcrException("用量账本更新失败", e); }
-            URI resultUri = validateResultUri(data.path("resultUrl").path("jsonUrl").asText(""));
-            String jsonl = send(downloadRequest(resultUri, deadline), cancelled, MAX_RESULT_BYTES,
-                    "PaddleOCR AI Studio 结果下载失败").body();
-            JsonNode normalized = normalizeJsonLines(jsonl, width, height);
-            List<Block> blocks = channel(parser.parse(normalized, width, height, layout));
-            writeCache(fingerprint, cacheEntry(fingerprint, taskId, "done", normalized, ownerBookId, usageAttemptId));
-            return blocks;
         }
-        writeCache(fingerprint, cacheEntry(fingerprint, taskId, state, null, ownerBookId, usageAttemptId));
-        throw new OcrException("PaddleOCR AI Studio 任务仍在远端处理中，可稍后重试继续查询（远端任务可能仍计费）");
+        RemoteJobRegistry.RemoteJobRecord remoteRecord = null;
+        try {
+            if (remoteJobRegistry != null) {
+                try {
+                    String bId = UsageContext.current() == null ? "book" : UsageContext.current().bookId();
+                    int pNum = UsageContext.current() == null || UsageContext.current().pageNumber() == null ? 1 : UsageContext.current().pageNumber();
+                    remoteRecord = remoteJobRegistry.register(bId, pNum, "paddle-aistudio", credentialHash(), fingerprint, usageAttemptId);
+                } catch (Exception e) {
+                    if (e instanceof ApiException) throw (ApiException) e;
+                    throw new OcrException("远端任务登记失败", e);
+                }
+            }
+
+            if (taskId == null || taskId.isBlank()) {
+                if (cache != null && !"rejected".equals(cache.state()))
+                    throw new OcrException("PaddleOCR AI Studio 提交结果不确定；为避免重复计费未自动重提");
+                checkCancelled(cancelled);
+                HttpRequest submission = submissionRequest(png, deadline);
+                if (usage != null) try {
+                    usageAttemptId = usage.start("paddle-aistudio", model());
+                    ownerBookId = UsageContext.current().bookId();
+                } catch (java.io.IOException e) { throw new OcrException("用量账本不可用，禁止提交 AI Studio 任务", e); }
+                writeCache(fingerprint, cacheEntry(fingerprint, null, "submitting", null, ownerBookId, usageAttemptId));
+                if (remoteJobRegistry != null && remoteRecord != null) {
+                    try { remoteJobRegistry.markSubmitting(remoteRecord.handleId(), usageAttemptId); } catch (Exception ignored) {}
+                }
+                try {
+                    taskId = submit(submission, cancelled, usageAttemptId);
+                    writeCache(fingerprint, cacheEntry(fingerprint, taskId, "submitted", null, ownerBookId, usageAttemptId));
+                    if (usage != null) usage.pending(usageAttemptId);
+                    if (remoteJobRegistry != null && remoteRecord != null) {
+                        try { remoteJobRegistry.markRunning(remoteRecord.handleId(), taskId); } catch (Exception ignored) {}
+                    }
+                } catch (SubmitRejectedException e) {
+                    if (usage != null) try { usage.failed(usageAttemptId); } catch (java.io.IOException ignored) { }
+                    writeCache(fingerprint, cacheEntry(fingerprint, null, "rejected", null, ownerBookId, usageAttemptId));
+                    if (remoteJobRegistry != null && remoteRecord != null) {
+                        try { remoteJobRegistry.markTerminal(remoteRecord.handleId(), "TERMINAL_PROVEN", "rejected"); } catch (Exception ignored) {}
+                    }
+                    throw e;
+                } catch (QuotaExceededException e) {
+                    if (usage != null) try { usage.failed(usageAttemptId); } catch (java.io.IOException ignored) { }
+                    writeCache(fingerprint, cacheEntry(fingerprint, null, "rejected", null, ownerBookId, usageAttemptId));
+                    if (remoteJobRegistry != null && remoteRecord != null) {
+                        try { remoteJobRegistry.markTerminal(remoteRecord.handleId(), "TERMINAL_PROVEN", "quota-exceeded"); } catch (Exception ignored) {}
+                    }
+                    throw e;
+                } catch (CancelledException e) {
+                    writeCache(fingerprint, cacheEntry(fingerprint, null, "submit-unknown", null, ownerBookId, usageAttemptId));
+                    if (remoteJobRegistry != null && remoteRecord != null) {
+                        try { remoteJobRegistry.markSubmitUnknown(remoteRecord.handleId(), "cancelled"); } catch (Exception ignored) {}
+                    }
+                    throw e;
+                } catch (Exception e) {
+                    writeCache(fingerprint, cacheEntry(fingerprint, null, "submit-unknown", null, ownerBookId, usageAttemptId));
+                    if (remoteJobRegistry != null && remoteRecord != null) {
+                        try { remoteJobRegistry.markSubmitUnknown(remoteRecord.handleId(), "submit-unknown"); } catch (Exception ignored) {}
+                    }
+                    throw new OcrException("PaddleOCR AI Studio 提交结果不确定；为避免重复计费未自动重提");
+                }
+            }
+
+            String state = cache == null ? "submitted" : cache.state();
+            while (System.nanoTime() < deadline) {
+                checkCancelled(cancelled);
+                waiter.pause(properties.pollIntervalSeconds(), cancelled);
+                checkCancelled(cancelled);
+                JsonNode response = sendJson(pollRequest(taskId, deadline), cancelled, MAX_API_BYTES,
+                        "PaddleOCR AI Studio 任务查询失败");
+                if (usage != null) try { usage.captureUsage(usageAttemptId, response); }
+                catch (java.io.IOException e) { throw new OcrException("用量账本更新失败", e); }
+                JsonNode data = successData(response, "PaddleOCR AI Studio 任务查询失败");
+                state = data.path("state").asText("").toLowerCase(Locale.ROOT);
+                writeCache(fingerprint, cacheEntry(fingerprint, taskId, state, null, ownerBookId, usageAttemptId));
+                if (remoteJobRegistry != null && remoteRecord != null) {
+                    try { remoteJobRegistry.recordPoll(remoteRecord.handleId(), Instant.now().plusSeconds(properties.pollIntervalSeconds())); } catch (Exception ignored) {}
+                }
+                if (Set.of("pending", "running").contains(state)) continue;
+                if ("failed".equals(state)) {
+                    if (usage != null) try { usage.failed(usageAttemptId); } catch (java.io.IOException e) { throw new OcrException("用量账本更新失败", e); }
+                    if (remoteJobRegistry != null && remoteRecord != null) {
+                        try { remoteJobRegistry.markTerminal(remoteRecord.handleId(), "TERMINAL_PROVEN", "failed"); } catch (Exception ignored) {}
+                    }
+                    throw new OcrException("PaddleOCR AI Studio 远端任务失败；为避免重复计费未自动重提");
+                }
+                if (!"done".equals(state)) throw new OcrException("PaddleOCR AI Studio 返回未知任务状态");
+                // Remote completion is the billing-relevant confirmation; local JSONL parsing may still fail.
+                if (usage != null) try { usage.succeeded(usageAttemptId); }
+                catch (java.io.IOException e) { throw new OcrException("用量账本更新失败", e); }
+                if (remoteJobRegistry != null && remoteRecord != null) {
+                    try { remoteJobRegistry.markTerminal(remoteRecord.handleId(), "TERMINAL_PROVEN", null); } catch (Exception ignored) {}
+                }
+                URI resultUri = validateResultUri(data.path("resultUrl").path("jsonUrl").asText(""));
+                String jsonl = send(downloadRequest(resultUri, deadline), cancelled, MAX_RESULT_BYTES,
+                        "PaddleOCR AI Studio 结果下载失败").body();
+                JsonNode normalized = normalizeJsonLines(jsonl, width, height);
+                List<Block> blocks = channel(parser.parse(normalized, width, height, layout));
+                writeCache(fingerprint, cacheEntry(fingerprint, taskId, "done", normalized, ownerBookId, usageAttemptId));
+                return blocks;
+            }
+            writeCache(fingerprint, cacheEntry(fingerprint, taskId, state, null, ownerBookId, usageAttemptId));
+            if (remoteJobRegistry != null && remoteRecord != null) {
+                try { remoteJobRegistry.markRemoteUnknown(remoteRecord.handleId(), "poll-timeout"); } catch (Exception ignored) {}
+            }
+            throw new OcrException("PaddleOCR AI Studio 任务仍在远端处理中，可稍后重试继续查询（远端任务可能仍计费）");
+        } finally {
+            if (remotePermit != null) remotePermit.close();
+        }
     }
 
     private HttpRequest submissionRequest(byte[] png, long deadline) throws OcrException {

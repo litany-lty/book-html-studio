@@ -108,32 +108,45 @@ public class IssueImageService {
         return all.get(issueId);
     }
 
+    private ImageArtifact renderForOcrArtifact(Path source, int pageNumber) throws IOException {
+        ImageArtifact artifact = pdf.renderForOcrArtifact(source, pageNumber);
+        if (artifact != null) return artifact;
+        BufferedImage image = pdf.renderForOcr(source, pageNumber);
+        if (image != null) return new ResourceBudgetManager().wrapImage(image);
+        return null;
+    }
+
     private Map<String, Snippet> compute(Path source, Page page) throws IOException {
-        BufferedImage image = pdf.renderForOcr(source, page.pageNumber());
-        try {
-            // 阶段2：按本页来源直接定位布局，只解析相关缓存文件，不因他书缓存变化而失效
-            Map<String, List<CacheLayout>> layouts = readLayoutsFor(neededLayoutIds(page));
-            Map<String, Block> sourceRecords = new HashMap<>();
-            if (page.sourceRecords() != null) for (Block block : page.sourceRecords()) sourceRecords.put(block.id(), block);
-            LinkedHashMap<String, Snippet> result = new LinkedHashMap<>();
-            for (Block block : page.blocks()) {
-                if (!hasIssues(block)) continue;
-                Block sourceBlock = sourceRecord(block, sourceRecords);
-                CacheLayout layout = findLayout(sourceBlock, layouts, image);
-                for (ContentIssue issue : block.issues()) {
-                    if (issue == null || issue.id() == null || issue.id().isBlank()) continue;
-                    if (result.containsKey(issue.id())) {
-                        throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "疑点标识重复，无法生成原图证据");
-                    }
-                    FocusRange focus = focusRange(block, issue);
-                    Snippet snippet = precise(image, block, sourceBlock, issue, focus, layout);
-                    if (snippet == null) snippet = region(image, block, sourceBlock, issue, focus, layout);
-                    result.put(issue.id(), snippet);
-                }
+        try (ImageArtifact artifact = renderForOcrArtifact(source, page.pageNumber())) {
+            if (artifact == null || artifact.image() == null) {
+                throw new IOException("PDF 渲染返回空图像");
             }
-            return Collections.unmodifiableMap(result);
-        } finally {
-            image.flush();
+            BufferedImage image = artifact.image();
+            try {
+                // 阶段2：按本页来源直接定位布局，只解析相关缓存文件，不因他书缓存变化而失效
+                Map<String, List<CacheLayout>> layouts = readLayoutsFor(neededLayoutIds(page));
+                Map<String, Block> sourceRecords = new HashMap<>();
+                if (page.sourceRecords() != null) for (Block block : page.sourceRecords()) sourceRecords.put(block.id(), block);
+                LinkedHashMap<String, Snippet> result = new LinkedHashMap<>();
+                for (Block block : page.blocks()) {
+                    if (!hasIssues(block)) continue;
+                    Block sourceBlock = sourceRecord(block, sourceRecords);
+                    CacheLayout layout = findLayout(sourceBlock, layouts, image);
+                    for (ContentIssue issue : block.issues()) {
+                        if (issue == null || issue.id() == null || issue.id().isBlank()) continue;
+                        if (result.containsKey(issue.id())) {
+                            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "疑点标识重复，无法生成原图证据");
+                        }
+                        FocusRange focus = focusRange(block, issue);
+                        Snippet snippet = precise(image, block, sourceBlock, issue, focus, layout);
+                        if (snippet == null) snippet = region(image, block, sourceBlock, issue, focus, layout);
+                        result.put(issue.id(), snippet);
+                    }
+                }
+                return Collections.unmodifiableMap(result);
+            } finally {
+                image.flush();
+            }
         }
     }
 

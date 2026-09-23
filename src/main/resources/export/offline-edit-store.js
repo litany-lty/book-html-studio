@@ -156,11 +156,30 @@
           };
           return box;
         });
-        return { schemaVersion: 1, kind: 'book-html-offline-backup', bookUid, exportedAt: Date.now(), records: all.records };
+        return {
+          schemaVersion: 2,
+          kind: 'book-html-offline-backup',
+          bookUid,
+          recordCount: all.records.length,
+          exportedAt: Date.now(),
+          records: all.records,
+        };
       },
       async importBackupPreview(backup) {
         const result = { appliable: [], conflicts: [], invalid: [], pending: [] };
-        const list = backup && Array.isArray(backup.records) ? backup.records : null;
+        if (!backup || typeof backup !== 'object') {
+          return { ...result, invalid: [{ reason: 'NOT_A_BACKUP' }] };
+        }
+        if (backup.kind && backup.kind !== 'book-html-offline-backup') {
+          return { ...result, invalid: [{ reason: 'INVALID_BACKUP_KIND' }] };
+        }
+        if (backup.bookUid && backup.bookUid !== bookUid) {
+          return { ...result, invalid: [{ reason: 'MISMATCHED_BOOK', expected: bookUid, actual: backup.bookUid }] };
+        }
+        if (backup.schemaVersion && Number(backup.schemaVersion) > 2) {
+          return { ...result, invalid: [{ reason: 'UNSUPPORTED_SCHEMA_VERSION', version: backup.schemaVersion }] };
+        }
+        const list = Array.isArray(backup.records) ? backup.records : null;
         if (!list) return { ...result, invalid: [{ reason: 'NOT_A_BACKUP' }] };
         for (const item of list) {
           if (!item || typeof item !== 'object' || item.bookUid !== bookUid
@@ -254,9 +273,25 @@
         return { status: 'SAVED', editRevision: currentRev + 1, legacy: true };
       },
       async exportBackup() {
-        return { schemaVersion: 1, kind: 'book-html-offline-backup', bookUid, exportedAt: Date.now(), records: Object.values(readAll()) };
+        const records = Object.values(readAll());
+        return {
+          schemaVersion: 2,
+          kind: 'book-html-offline-backup',
+          bookUid,
+          recordCount: records.length,
+          exportedAt: Date.now(),
+          records,
+        };
       },
-      async importBackupPreview() { return { appliable: [], conflicts: [], invalid: [{ reason: 'LEGACY_NO_IMPORT_PREVIEW' }] }; },
+      async importBackupPreview(backup) {
+        if (backup && backup.bookUid && backup.bookUid !== bookUid) {
+          return { appliable: [], conflicts: [], invalid: [{ reason: 'MISMATCHED_BOOK', expected: bookUid, actual: backup.bookUid }], pending: [] };
+        }
+        if (backup && backup.schemaVersion && Number(backup.schemaVersion) > 2) {
+          return { appliable: [], conflicts: [], invalid: [{ reason: 'UNSUPPORTED_SCHEMA_VERSION', version: backup.schemaVersion }], pending: [] };
+        }
+        return { appliable: [], conflicts: [], invalid: [{ reason: 'LEGACY_NO_IMPORT_PREVIEW' }] };
+      },
       async confirmImport() { return [{ status: 'STORAGE_FAILED', reason: 'LEGACY_NO_IMPORT' }]; },
       onExternalChange() { return () => {}; },
       close() {},

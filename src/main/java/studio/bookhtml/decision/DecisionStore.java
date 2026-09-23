@@ -173,6 +173,17 @@ public class DecisionStore {
                 DecisionModels.DecisionSnapshot.class);
     }
 
+    public void saveContextSnapshot(String bookId, studio.bookhtml.domain.ContextSnapshot snapshot) throws IOException {
+        ensureSchema(bookId);
+        atomicWrite(subdir(bookId, "context-snapshots"), snapshot.snapshotId() + ".json", snapshot);
+    }
+
+    public Optional<studio.bookhtml.domain.ContextSnapshot> loadContextSnapshot(String bookId, String snapshotId) throws IOException {
+        checkLeaf(snapshotId);
+        return readIsolated(decisionsDir(bookId).resolve("context-snapshots").resolve(snapshotId + ".json"),
+                studio.bookhtml.domain.ContextSnapshot.class);
+    }
+
     public void saveCandidateSet(String bookId, DecisionModels.CandidateSet set) throws IOException {
         ensureSchema(bookId);
         atomicWrite(subdir(bookId, "candidates"), set.candidateSetHash() + ".json", set);

@@ -7,6 +7,7 @@ import org.springframework.stereotype.Service;
 import studio.bookhtml.domain.Block;
 import studio.bookhtml.domain.Book;
 import studio.bookhtml.domain.ContentIssue;
+import studio.bookhtml.domain.ExportSnapshot;
 import studio.bookhtml.domain.Page;
 import studio.bookhtml.store.BookStore;
 
@@ -78,8 +79,8 @@ public class ExportService {
      * 规则/模型版本摘要）；密钥、原始 HTTP 头、供应商调试数据、完整远端请求 body、
      * 无关整书上下文一律不导出。仅收录导出时刻仍适用的建议。
      */
-    String decisionsScript(String bookId, List<Integer> selected,
-                           Map<Integer, Integer> exportedNumbers) {
+    Map<String, Object> captureDecisions(String bookId, List<Integer> selected,
+                                         Map<Integer, Integer> exportedNumbers) {
         Map<String, Object> summaries = new java.util.LinkedHashMap<>();
         if (decisionCoordinator != null) for (int sourcePage : selected) {
             Integer exportPage = exportedNumbers == null ? sourcePage
@@ -90,7 +91,7 @@ public class ExportService {
             } catch (Exception e) {
                 continue;
             }
-            if (page.blocks() == null) continue;
+            if (page == null || page.blocks() == null) continue;
             for (Block block : page.blocks()) {
                 if (block == null || block.original() == null || block.issues() == null) continue;
                 for (ContentIssue issue : block.issues()) {
@@ -141,11 +142,160 @@ public class ExportService {
                 }
             }
         }
+        return summaries;
+    }
+
+    String decisionsScript(String bookId, List<Integer> selected,
+                           Map<Integer, Integer> exportedNumbers) {
+        Map<String, Object> summaries = captureDecisions(bookId, selected, exportedNumbers);
         try {
-            return "globalThis.BOOK_DECISIONS=" + json.writeValueAsString(summaries) + ";";
+            return "globalThis.BOOK_DECISIONS=" + safeJavascriptJson(summaries) + ";";
         } catch (Exception e) {
             return "globalThis.BOOK_DECISIONS={};";
         }
+    }
+
+    /**
+     * G12 / B10: 冻结导出快照生成。
+     * 固定当前 sourceSeq、页面引用版本、版式画像与覆盖版本。
+     * 最大重试 2 次检测并发写入。
+     */
+    public ExportSnapshot createSnapshot(String bookId) throws IOException {
+        return createSnapshot(bookId, (String) null);
+    }
+
+    public ExportSnapshot createSnapshot(String bookId, String pageRange) throws IOException {
+        Book book = books.get(bookId);
+        if (book == null) {
+            throw new studio.bookhtml.api.ApiException(org.springframework.http.HttpStatus.NOT_FOUND, "书籍不存在");
+        }
+        List<Integer> selected = PageRanges.parse(pageRange == null ? "all" : pageRange, book.totalPages());
+        return createSnapshotWithRetry(bookId, book, selected);
+    }
+
+    public ExportSnapshot createSnapshot(String bookId, List<Integer> selected) throws IOException {
+        Book book = books.get(bookId);
+        if (book == null) {
+            throw new studio.bookhtml.api.ApiException(org.springframework.http.HttpStatus.NOT_FOUND, "书籍不存在");
+        }
+        return createSnapshotWithRetry(bookId, book, selected);
+    }
+
+    private ExportSnapshot createSnapshotWithRetry(String bookId, Book book, List<Integer> selected) throws IOException {
+        int maxRetries = 2;
+        for (int attempt = 0; attempt <= maxRetries; attempt++) {
+            ExportSnapshot snapshot = buildSnapshot(bookId, book, selected);
+            long afterSeq = currentSourceSeq(bookId);
+            if (afterSeq == snapshot.sourceSeq()) {
+                return snapshot;
+            }
+            if (attempt == maxRetries) {
+                throw new studio.bookhtml.api.ApiException(
+                        org.springframework.http.HttpStatus.CONFLICT,
+                        "EXPORT_SOURCE_CHANGED: 书籍页面正在持续写入，请稍后重试导出");
+            }
+        }
+        throw new studio.bookhtml.api.ApiException(
+                org.springframework.http.HttpStatus.CONFLICT,
+                "EXPORT_SOURCE_CHANGED: 快照创建重试超限");
+    }
+
+    private long currentSourceSeq(String bookId) {
+        try {
+            if (store.sourceJournal() != null) {
+                return store.sourceJournal().currentSourceSeq(store.bookDir(bookId), bookId);
+            }
+        } catch (Exception ignored) {}
+        return 0L;
+    }
+
+    private ExportSnapshot buildSnapshot(String bookId, Book book, List<Integer> selected) throws IOException {
+        Path sourcePdf = store.pdf(bookId);
+        String pdfSha = sha256Hex(sourcePdf);
+        long seq = currentSourceSeq(bookId);
+
+        Long profileRev = 0L;
+        if (presentation != null) {
+            try {
+                var profile = presentation.buildProfile(bookId);
+                if (profile != null) profileRev = profile.profileRevision();
+            } catch (Exception ignored) {}
+        }
+
+        Long overrideRev = 0L;
+        if (presentation != null && presentation.overrides() != null) {
+            try {
+                var oStore = presentation.overrides().list(bookId);
+                if (oStore != null) overrideRev = oStore.overrideRevision();
+            } catch (Exception ignored) {}
+        }
+
+        List<ExportSnapshot.PageRef> pageRefs = new ArrayList<>(selected.size());
+        Map<Integer, Integer> exportedNumbers = new LinkedHashMap<>();
+        int exportIndex = 0;
+        for (int sourceNumber : selected) {
+            exportIndex++;
+            exportedNumbers.put(sourceNumber, exportIndex);
+
+            studio.bookhtml.domain.PageHead head = null;
+            try {
+                if (store.headStore() != null) {
+                    head = store.headStore().readHead(store.bookDir(bookId), sourceNumber);
+                }
+            } catch (Exception ignored) {}
+
+            int revision = 0;
+            java.util.UUID commitId = null;
+            String contentHash = "";
+            String status = "PENDING";
+            boolean processed = false;
+            boolean reviewed = false;
+
+            if (head != null) {
+                revision = head.revision();
+                commitId = head.commitId();
+                contentHash = head.contentHash() != null ? head.contentHash() : "";
+                status = head.status() != null ? head.status() : "PENDING";
+                processed = head.processed();
+                reviewed = head.reviewed();
+            } else {
+                Page page = store.readPage(bookId, sourceNumber);
+                if (page != null) {
+                    revision = BookStore.revisionOrZero(page);
+                    commitId = page.lastCommitId();
+                    try {
+                        contentHash = store.pageContentHash(page);
+                    } catch (Exception ignored) {}
+                    status = page.status() != null ? page.status() : "PENDING";
+                    processed = ready(page);
+                    reviewed = page.reviewed();
+                }
+            }
+
+            pageRefs.add(new ExportSnapshot.PageRef(
+                    sourceNumber, exportIndex, revision, commitId, contentHash,
+                    status, processed, reviewed
+            ));
+        }
+
+        Map<String, Object> frozenDecisions = captureDecisions(bookId, selected, exportedNumbers);
+
+        return new ExportSnapshot(
+                java.util.UUID.randomUUID().toString(),
+                bookId,
+                book.title(),
+                selected.size(),
+                book.totalPages(),
+                pdfSha,
+                seq,
+                selected,
+                pageRefs,
+                profileRev,
+                overrideRev,
+                2,
+                frozenDecisions,
+                java.time.Instant.now()
+        );
     }
 
     /**
@@ -174,13 +324,24 @@ public class ExportService {
 
     public void writeZip(String bookId, OutputStream output, String pageRange) throws IOException {
         Book book = books.get(bookId);
-        Path sourcePdf = store.pdf(bookId);
+        if (book == null) {
+            throw new studio.bookhtml.api.ApiException(org.springframework.http.HttpStatus.NOT_FOUND, "书籍不存在");
+        }
+        List<Integer> selected = PageRanges.parse(pageRange == null ? "all" : pageRange, book.totalPages());
+        ExportSnapshot snapshot = createSnapshotWithRetry(bookId, book, selected);
+        writeZip(snapshot, output);
+    }
+
+    public void writeZip(ExportSnapshot snapshot, OutputStream output) throws IOException {
+        Book book = books.get(snapshot.bookId());
+        if (book == null) {
+            throw new studio.bookhtml.api.ApiException(org.springframework.http.HttpStatus.NOT_FOUND, "书籍不存在");
+        }
+        Path sourcePdf = store.pdf(snapshot.bookId());
         String fontManifest = new ClassPathResource("static/fonts/manifest.json").getContentAsString(StandardCharsets.UTF_8);
         com.fasterxml.jackson.databind.JsonNode fontAssets = json.readTree(fontManifest).path("assets");
         if (!fontAssets.isArray()) throw new IOException("阅读字体清单无效");
-        List<Integer> selected = PageRanges.parse(pageRange == null ? "all" : pageRange, book.totalPages());
-        // 阶段2：先写临时文件，失败不向客户端发送残缺 ZIP；同时做磁盘空间预检
-        // R05：导出暂存使用自有子目录，不与渲染清理器共享
+
         Path tmpDir = store.exportTmpDir();
         if (tmpDir == null) tmpDir = store.tmpDir();
         if (tmpDir == null) tmpDir = Path.of(System.getProperty("java.io.tmpdir", "."));
@@ -194,7 +355,7 @@ public class ExportService {
         if (usable < need) {
             throw new studio.bookhtml.api.ApiException(org.springframework.http.HttpStatus.INSUFFICIENT_STORAGE, "磁盘空间不足，无法导出");
         }
-        Path staging = Files.createTempFile(tmpDir, "export-", ".zip.part");
+        Path staging = Files.createTempFile(tmpDir, "export-" + snapshot.snapshotId() + "-", ".zip.part");
         try {
             try (java.io.OutputStream fileOut = Files.newOutputStream(staging);
                  ZipOutputStream zip = new ZipOutputStream(new BufferedOutputStream(fileOut), StandardCharsets.UTF_8)) {
@@ -208,8 +369,7 @@ public class ExportService {
                 put(zip, "assets/issue-review.css", new ClassPathResource("export/issue-review.css").getContentAsString(StandardCharsets.UTF_8));
                 copyReaderFonts(zip, fontManifest, fontAssets);
                 copy(zip, "source.pdf", sourcePdf);
-                // 阶段4：逐页流式导出——同一时刻只保留一页 Page+一位图，内存有界；失败不发残缺 ZIP
-                writePagedPayload(zip, bookId, book, sourcePdf, selected);
+                writePagedPayload(zip, snapshot, book, sourcePdf);
             } catch (IOException e) {
                 if (e instanceof java.nio.file.FileSystemException || (e.getMessage() != null && e.getMessage().contains("No space"))) {
                     throw new studio.bookhtml.api.ApiException(org.springframework.http.HttpStatus.INSUFFICIENT_STORAGE, "磁盘空间不足，导出失败");
@@ -227,23 +387,47 @@ public class ExportService {
 
     /** 阶段4：分页渐进数据——book.js 只含元数据/目录/轻量搜索索引，正文按页懒加载（file:// 用 script 标签，无 fetch）。 */
     static final int SEARCH_INDEX_LIMIT = 20000;
-    private void writePagedPayload(ZipOutputStream zip, String bookId, Book book, Path sourcePdf, List<Integer> selected) throws IOException {
+    private void writePagedPayload(ZipOutputStream zip, ExportSnapshot snapshot, Book book, Path sourcePdf) throws IOException {
         int processed = 0, reviewed = 0;
         List<Map<String, Object>> searchIndex = new ArrayList<>();
-        // R01：索引收集与正文导出完全分离——触顶只停止收录，不退出页面循环。
         boolean searchIndexComplete = true;
         int searchIndexTotal = 0;
         List<OutlineService.OutlineEntry> outlineSource = new ArrayList<>();
         Map<Integer, Integer> exportedNumbers = new LinkedHashMap<>();
         List<Integer> writtenPages = new ArrayList<>();
-        // U3：导出开始时冻结同一书籍画像，再按所选页筛选。
+
         studio.bookhtml.domain.BookLayoutProfile frozenProfile =
-                presentation == null ? null : presentation.buildProfile(bookId);
-        int exportIndex = 0;
-        for (int sourceNumber : selected) {
-            exportIndex++;
+                presentation == null ? null : presentation.buildProfile(snapshot.bookId());
+
+        for (ExportSnapshot.PageRef ref : snapshot.pageRefs()) {
+            int sourceNumber = ref.sourcePageNumber();
+            int exportIndex = ref.exportPageNumber();
             exportedNumbers.put(sourceNumber, exportIndex);
-            Page raw = store.readPage(bookId, sourceNumber);
+
+            Page raw = null;
+            if (ref.revision() > 0) {
+                try {
+                    raw = store.readRevision(snapshot.bookId(), sourceNumber, ref.revision());
+                } catch (Exception ignored) {
+                    raw = store.readPage(snapshot.bookId(), sourceNumber);
+                }
+            } else {
+                raw = store.readPage(snapshot.bookId(), sourceNumber);
+            }
+
+            if (raw != null && ref.contentHash() != null && !ref.contentHash().isBlank()) {
+                try {
+                    String hash = store.pageContentHash(raw);
+                    if (hash != null && !hash.isBlank() && !hash.equals(ref.contentHash())) {
+                        throw new studio.bookhtml.api.ApiException(
+                                org.springframework.http.HttpStatus.CONFLICT,
+                                "SNAPSHOT_EXPIRED: 第 " + sourceNumber + " 页内容已在导出期间被修改或过期");
+                    }
+                } catch (IOException ex) {
+                    throw ex;
+                }
+            }
+
             Page page = raw != null ? raw : Page.pending(sourceNumber, 1, 1);
             if (ready(page)) processed++;
             if (page.reviewed()) reviewed++;
@@ -252,20 +436,19 @@ public class ExportService {
             exported.put("sourcePageNumber", page.pageNumber());
             exported.put("pageNumber", exportIndex);
             if (ready(page)) {
-                // 同一时刻只保留一页位图，写完立即释放
                 writeSinglePageImages(zip, sourcePdf, page, reading);
-                writeSingleIssueImages(zip, bookId, page, exported);
+                writeSingleIssueImages(zip, snapshot.bookId(), page, exported);
             } else {
                 exported.put("issueImages", Map.of());
             }
-            // 目录：使用冻结画像按页投影，保证与在线一致；重映射为连续页码
+
             List<OutlineService.OutlineEntry> pageOutline = (presentation == null || frozenProfile == null)
                     ? OutlineService.fromPages(List.of(page))
-                    : presentation.outlineForPages(bookId, List.of(page), frozenProfile);
+                    : presentation.outlineForPages(snapshot.bookId(), List.of(page), frozenProfile);
             for (OutlineService.OutlineEntry e : pageOutline) {
                 outlineSource.add(new OutlineService.OutlineEntry(exportedNumbers.get(e.pageNumber()), e.blockId(), e.title(), e.level()));
             }
-            // 轻量搜索索引：只留页码与截断文本，全文仍在分页文件中；触顶后仅停止收录
+
             if (page.blocks() != null) {
                 for (Block b : page.blocks()) {
                     if ("advertisement".equals(b.type())) continue;
@@ -283,26 +466,24 @@ public class ExportService {
             }
             writePageJs(zip, exportIndex, exported);
             writtenPages.add(exportIndex);
-            // 显式释放本页引用，下一轮覆盖
         }
-        // R01：成品校验——所有选中页的正文文件必须存在且唯一，映射必须一致；否则失败整个导出
+
         List<Integer> expectedPages = new ArrayList<>();
-        for (int i = 1; i <= selected.size(); i++) expectedPages.add(i);
-        if (!writtenPages.equals(expectedPages) || exportedNumbers.size() != selected.size()) {
+        for (int i = 1; i <= snapshot.pageRefs().size(); i++) expectedPages.add(i);
+        if (!writtenPages.equals(expectedPages) || exportedNumbers.size() != snapshot.pageRefs().size()) {
             throw new IOException("导出校验失败：分页正文缺失或页号映射不一致");
         }
-        boolean partial = selected.size() != book.totalPages();
+        boolean partial = snapshot.pageRefs().size() != snapshot.sourceTotalPages();
         Map<String, Object> bookMeta = new LinkedHashMap<>();
-        bookMeta.put("id", partial ? book.id() + ":selection:" + selected : book.id());
-        bookMeta.put("title", book.title());
+        bookMeta.put("id", partial ? snapshot.bookId() + ":selection:" + snapshot.selectedPages() : snapshot.bookId());
+        bookMeta.put("title", snapshot.title());
         bookMeta.put("filename", book.filename());
-        bookMeta.put("totalPages", selected.size());
-        bookMeta.put("sourceTotalPages", book.totalPages());
+        bookMeta.put("totalPages", snapshot.pageRefs().size());
+        bookMeta.put("sourceTotalPages", snapshot.sourceTotalPages());
         bookMeta.put("partial", partial);
         bookMeta.put("processedPages", processed);
         bookMeta.put("reviewedPages", reviewed);
-        // A1-02：原稿内容摘要 + 导出页号→源页号映射，供离线修订做可信身份绑定（流式一次，不预加载正文）
-        bookMeta.put("sourcePdfSha256", sha256Hex(sourcePdf));
+        bookMeta.put("sourcePdfSha256", snapshot.sourcePdfSha256());
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("schemaVersion", 2);
         payload.put("book", bookMeta);
@@ -315,20 +496,25 @@ public class ExportService {
             return m;
         }).toList());
         payload.put("searchIndex", List.copyOf(searchIndex));
-        // R01：索引完整性声明——截断时明确不是全文搜索
         payload.put("searchIndexComplete", searchIndexComplete);
         payload.put("searchIndexCount", searchIndex.size());
         payload.put("searchIndexTotal", searchIndexTotal);
         payload.put("searchIndexLimit", SEARCH_INDEX_LIMIT);
-        // A1-02：导出页号→源页号的可信映射（键为字符串，避免 JSON 数字键歧义）
         Map<String, Integer> pageMap = new LinkedHashMap<>();
         for (Map.Entry<Integer, Integer> e : exportedNumbers.entrySet()) pageMap.put(String.valueOf(e.getValue()), e.getKey());
         payload.put("pageMap", pageMap);
-        payload.put("pageCount", selected.size());
+        payload.put("pageCount", snapshot.pageRefs().size());
         payload.put("pages", List.of());
         writeBookJs(zip, payload);
-        // J10：只读建议摘要 sidecar（有界脱敏）；缺失时为空映射，离线照常工作
-        put(zip, "assets/decisions.js", decisionsScript(bookId, selected, exportedNumbers));
+
+        // decisions.js 从已冻结快照输出，保证与正文完全同版本
+        String decisionsContent;
+        if (!snapshot.frozenDecisions().isEmpty()) {
+            decisionsContent = "globalThis.BOOK_DECISIONS=" + safeJavascriptJson(snapshot.frozenDecisions()) + ";";
+        } else {
+            decisionsContent = decisionsScript(snapshot.bookId(), snapshot.selectedPages(), exportedNumbers);
+        }
+        put(zip, "assets/decisions.js", decisionsContent);
     }
 
     private static String sha256Hex(Path file) {
@@ -364,23 +550,34 @@ public class ExportService {
         zip.closeEntry();
     }
 
+    private ImageArtifact renderPageArtifact(Path sourcePdf, int pageNumber, int width) throws IOException {
+        ImageArtifact artifact = pdf.renderArtifact(sourcePdf, pageNumber, width);
+        if (artifact != null) return artifact;
+        BufferedImage image = pdf.render(sourcePdf, pageNumber, width);
+        if (image != null) return new ResourceBudgetManager().wrapImage(image);
+        return null;
+    }
+
     private void writeSinglePageImages(ZipOutputStream zip, Path sourcePdf, Page page, Page readingPage) throws IOException {
-        BufferedImage image = pdf.render(sourcePdf, page.pageNumber(), EXPORT_IMAGE_WIDTH);
-        try {
-            putPng(zip, "assets/pages/" + page.pageNumber() + ".png", image);
-            List<Block> blocks = readingPage.blocks() == null ? List.of() : readingPage.blocks();
-            for (int index = 0; index < blocks.size(); index++) {
-                Block block = blocks.get(index);
-                if (!imageBlock(block) || !validBbox(block.bbox())) continue;
-                BufferedImage crop = crop(image, block.bbox());
-                try {
-                    putPng(zip, figureName(page.pageNumber(), index), crop);
-                } finally {
-                    crop.flush();
+        try (ImageArtifact artifact = renderPageArtifact(sourcePdf, page.pageNumber(), EXPORT_IMAGE_WIDTH)) {
+            if (artifact == null) return;
+            BufferedImage image = artifact.image();
+            try {
+                putPng(zip, "assets/pages/" + page.pageNumber() + ".png", image);
+                List<Block> blocks = readingPage.blocks() == null ? List.of() : readingPage.blocks();
+                for (int index = 0; index < blocks.size(); index++) {
+                    Block block = blocks.get(index);
+                    if (!imageBlock(block) || !validBbox(block.bbox())) continue;
+                    BufferedImage crop = crop(image, block.bbox());
+                    try {
+                        putPng(zip, figureName(page.pageNumber(), index), crop);
+                    } finally {
+                        crop.flush();
+                    }
                 }
+            } finally {
+                image.flush();
             }
-        } finally {
-            image.flush();
         }
     }
 
@@ -446,16 +643,8 @@ public class ExportService {
                 manifest.put(entry.getKey(), Map.of("mode", snippet.mode(), "glyphCount", snippet.glyphCount(),
                         "bbox", snippet.bbox(), "boxes", snippet.boxes(), "src", asset,
                         "contextBbox", snippet.contextBbox(), "contextSrc", contextAsset));
-                ZipEntry zipEntry = new ZipEntry(asset);
-                zipEntry.setTime(0);
-                zip.putNextEntry(zipEntry);
-                zip.write(snippet.png());
-                zip.closeEntry();
-                ZipEntry contextEntry = new ZipEntry(contextAsset);
-                contextEntry.setTime(0);
-                zip.putNextEntry(contextEntry);
-                zip.write(snippet.contextPng());
-                zip.closeEntry();
+                putBytes(zip, asset, snippet.png());
+                putBytes(zip, contextAsset, snippet.contextPng());
             }
             exported.get(index).put("issueImages", manifest);
         }
@@ -540,34 +729,41 @@ public class ExportService {
     private void writeReadyPageImages(ZipOutputStream zip, Path sourcePdf, List<Page> pages) throws IOException {
         for (Page page : pages) {
             if (!ready(page)) continue;
-            BufferedImage image = pdf.render(sourcePdf, page.pageNumber(), EXPORT_IMAGE_WIDTH);
-            try {
-                putPng(zip, "assets/pages/" + page.pageNumber() + ".png", image);
-                Page readingPage = ReadingStructureNormalizer.normalize(page);
-                List<Block> blocks = readingPage.blocks() == null ? List.of() : readingPage.blocks();
-                for (int index = 0; index < blocks.size(); index++) {
-                    Block block = blocks.get(index);
-                    if (!imageBlock(block) || !validBbox(block.bbox())) continue;
-                    BufferedImage crop = crop(image, block.bbox());
-                    try {
-                        putPng(zip, figureName(page.pageNumber(), index), crop);
-                    } finally {
-                        crop.flush();
+            try (ImageArtifact artifact = renderPageArtifact(sourcePdf, page.pageNumber(), EXPORT_IMAGE_WIDTH)) {
+                if (artifact == null) continue;
+                BufferedImage image = artifact.image();
+                try {
+                    putPng(zip, "assets/pages/" + page.pageNumber() + ".png", image);
+                    Page readingPage = ReadingStructureNormalizer.normalize(page);
+                    List<Block> blocks = readingPage.blocks() == null ? List.of() : readingPage.blocks();
+                    for (int index = 0; index < blocks.size(); index++) {
+                        Block block = blocks.get(index);
+                        if (!imageBlock(block) || !validBbox(block.bbox())) continue;
+                        BufferedImage crop = crop(image, block.bbox());
+                        try {
+                            putPng(zip, figureName(page.pageNumber(), index), crop);
+                        } finally {
+                            crop.flush();
+                        }
                     }
+                } finally {
+                    image.flush();
                 }
-            } finally {
-                image.flush();
             }
         }
     }
 
-    private String safeJavascriptJson(Map<String, Object> value) throws IOException {
+    static String safeJavascriptJson(Object value, ObjectMapper json) throws IOException {
         return json.writeValueAsString(value)
             .replace("&", "\\u0026")
             .replace("<", "\\u003c")
             .replace(">", "\\u003e")
             .replace(Character.toString(0x2028), "\\u2028")
             .replace(Character.toString(0x2029), "\\u2029");
+    }
+
+    private String safeJavascriptJson(Object value) throws IOException {
+        return safeJavascriptJson(value, this.json);
     }
 
     private static boolean ready(Page page) {
@@ -646,6 +842,7 @@ public class ExportService {
     }
 
     private static ZipEntry entry(String name) {
+        SafeArchiveExtractor.validateEntryName(name);
         ZipEntry entry = new ZipEntry(name);
         entry.setTime(0);
         return entry;

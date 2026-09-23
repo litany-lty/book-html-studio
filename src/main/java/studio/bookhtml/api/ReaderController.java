@@ -22,6 +22,10 @@ public class ReaderController {
     @GetMapping public Book manifest(@PathVariable String id) { return store.readBook(id); }
     public record PageProgress(int pageNumber,String status,Integer revision,ProcessingSnapshot processing) {}
     public PageProgress progress(String id,int n) {
+        studio.bookhtml.domain.PageHead head = store.headStore().readHead(store.bookDir(id), n);
+        if (head != null) {
+            return new PageProgress(n, head.status(), head.revision(), progress.latest(id, n));
+        }
         Page page=books.page(id,n);
         return new PageProgress(n,page.status(),page.revision(),progress.latest(id,n));
     }

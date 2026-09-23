@@ -1,7 +1,7 @@
 import { api } from './api.js';
-import { state, loadPreferences, savePreferences, getBookmarks, setBookmarks, cloneBlocks, isSameSession, canonicalJson } from './store.js';
+import { state, loadPreferences, savePreferences, getBookmarks, setBookmarks, cloneBlocks, isSameSession, canonicalJson, sessionGuard } from './store.js';
 import { renderPaper, qualityOf, statusMessage } from './reader.js';
-import { renderEditor, renderIssueWorkbench, issueReferences, createOverlay, enableDrawing } from './editor.js';
+import { renderEditor, renderIssueWorkbench, unmountIssueWorkbench, issueReferences, createOverlay, enableDrawing } from './editor.js';
 import { createDecisionPanel } from './decision.js';
 import './settings.js';
 import { openBookUsage } from './usage.js';
@@ -863,7 +863,15 @@ function renderReview() {
   $('#review-empty').hidden = available;
   $('#review-content').hidden = !available;
   updateSaveStatus();
-  if (!available) return;
+  if (!available) {
+    unmountIssueWorkbench($('#issue-workbench'));
+    return;
+  }
+  const isReviewVisible = state.view === 'original' || $('#review-panel')?.classList.contains('open');
+  if (!isReviewVisible) {
+    unmountIssueWorkbench($('#issue-workbench'));
+    return;
+  }
   renderConflictBar();
   const reviewImage = $('#review-original');
   const imageUrl = api.pageImage(state.book.id, state.currentPage, 900);
@@ -1092,10 +1100,11 @@ function updateSaveStatus() {
 }
 
 async function loadIssueEvidence(issueId) {
+  const token = sessionGuard.token;
   const bookId = state.book?.id, pageNumber = state.currentPage, page = state.page, epoch = state.editorEpoch;
   if (!bookId || !page || !issueId) return null;
   const precise = await api.issueMetadata(bookId, pageNumber, issueId);
-  if (state.book?.id !== bookId || state.currentPage !== pageNumber || state.page !== page || state.editorEpoch !== epoch) return null;
+  if (!sessionGuard.isValid(token) || state.book?.id !== bookId || state.currentPage !== pageNumber || state.page !== page || state.editorEpoch !== epoch) return null;
   if (!(state.blocks || []).some(block => (block.issues || []).some(issue => issue.id === issueId))) return null;
   page.issueImages ||= {};
   page.issueImages[issueId] = precise;
@@ -1288,6 +1297,7 @@ async function goToPage(n, options = {}) {
     readingWindow.navigated();
   } else if (!readingWindow.active()) readingWindow.prefetch();
   const requestId = ++pageRequest, bookId = state.book.id;
+  const sessionToken = sessionGuard.setSession(bookId, n);
   // 阶段2：取消上一次未完成的正文请求，后端仍以自身预算为准继续或终止解码
   pageFetchController?.abort();
   pageFetchController = new AbortController();
@@ -1298,7 +1308,7 @@ async function goToPage(n, options = {}) {
   try {
     const cached = state.pageCache.get(n);
     const page = cached || await api.page(bookId, n, fetchSignal);
-    if (requestId !== pageRequest || state.book?.id !== bookId) return;
+    if (requestId !== pageRequest || state.book?.id !== bookId || !sessionGuard.isValid(sessionToken)) return;
     state.pageCache.set(n, page); state.page = page; state.blocks = cloneBlocks(page.blocks); state.reviewedDraft = Boolean(page.reviewed); renderCurrent();
     renderJobHeading();
     const position = options.restoreScroll ? Number(options.scrollTop || 0) : options.preserveScroll ? previousScrollTop : 0;
@@ -1307,18 +1317,18 @@ async function goToPage(n, options = {}) {
     // 缓存先供即时阅读，但每次实际进入页面都以本地 JSON 重新核对；
     // 旧窗口单页完成后即使不在新窗口状态中，也不会永久停留在 PENDING 原稿。
     if (cached) void api.page(bookId, n, fetchSignal).then(fresh => {
-      if (requestId !== pageRequest || state.book?.id !== bookId || state.currentPage !== n) return;
+      if (requestId !== pageRequest || state.book?.id !== bookId || state.currentPage !== n || !sessionGuard.isValid(sessionToken)) return;
       if (olderRevision(fresh, state.page) || olderRevision(fresh, state.pageCache.get(n)) ||
           (fresh.revision === cached.revision && fresh.status === cached.status)) return;
       if (fresh.status === 'READY') acceptReadyPage(n, fresh);
       else if (!currentPageProtected()) state.pageCache.set(n, fresh);
     }).catch(error => {
-      if (error?.name !== 'StaleRequest' && requestId === pageRequest && state.book?.id === bookId) showError(error);
+      if (error?.name !== 'StaleRequest' && requestId === pageRequest && state.book?.id === bookId && sessionGuard.isValid(sessionToken)) showError(error);
     });
     return true;
   } catch (error) {
     // 阶段2：被更快翻页取代的请求静默丢弃，不恢复旧页、不报错
-    if (error?.name === 'StaleRequest' || requestId !== pageRequest) return false;
+    if (error?.name === 'StaleRequest' || requestId !== pageRequest || !sessionGuard.isValid(sessionToken)) return false;
     Object.assign(state, previous);
     if (pageChanged) readingWindow.navigated();
     if (state.page) { renderCurrent(); requestAnimationFrame(() => { $('#reader').scrollTop = previousScrollTop; }); }
@@ -1353,7 +1363,7 @@ async function selectBook(id) {
   updateSaveStatus();
   jobSyncError = false; $('#job-progress').hidden = true; $('#job-recovery').hidden = true;
   // A1-01：切书开启新编辑会话并清空冲突栏
-  state.editorEpoch++; state.conflict = null; state.saveInFlight = null;
+  state.editorEpoch++; state.conflict = null; state.saveInFlight = null; sessionGuard.invalidate();
   // J08：切书换作用域，辅助推荐映射清空
   state.assistMap = {};
   if (!id) {
@@ -1532,11 +1542,13 @@ function openDrawer(type) {
   const other = type === 'toc' ? $('#review-panel') : $('#toc-panel');
   other.classList.remove('open'); panel.classList.add('open'); $('#drawer-scrim').hidden = false;
   $('#toc-toggle').setAttribute('aria-expanded', String(type === 'toc')); $('#review-toggle').setAttribute('aria-expanded', String(type === 'review'));
+  if (type === 'review') renderReview();
 }
 
 function closeDrawers(restoreFocus = false) {
   $('#toc-panel').classList.remove('open'); $('#review-panel').classList.remove('open'); $('#drawer-scrim').hidden = true;
   $('#toc-toggle').setAttribute('aria-expanded', 'false'); $('#review-toggle').setAttribute('aria-expanded', 'false');
+  if (state.view !== 'original') unmountIssueWorkbench($('#issue-workbench'));
   // A1-06：显式关闭抽屉时焦点回到触发按钮；程序化关闭（翻页/切书）不抢焦点
   if (restoreFocus && lastDrawerOpener && document.contains(lastDrawerOpener)) {
     try { lastDrawerOpener.focus({ preventScroll: true }); } catch (_) { /* 忽略 */ }

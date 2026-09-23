@@ -26,11 +26,14 @@ public class UsageController {
                                                     @RequestParam(defaultValue = "0") int offset,
                                                     @RequestParam(defaultValue = "50") int limit,
                                                     @RequestParam(required = false) String asOf,
-                                                    @RequestParam(required = false) String cursor) {
+                                                    @RequestParam(required = false) String cursor,
+                                                    @RequestParam(required = false) String snapshotToken) {
         books.get(bookId);
         try {
             return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, "no-store")
-                    .body(ledger.view(bookId, offset, limit, asOf, cursor));
+                    .body(ledger.view(bookId, offset, limit, asOf, cursor, snapshotToken));
+        } catch (ApiException e) {
+            throw e;
         } catch (IOException e) {
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "用量账本损坏或不可用，未按零费用处理");
         }

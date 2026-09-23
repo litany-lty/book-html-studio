@@ -135,6 +135,14 @@ function appendIssueMeta(parent, label, value, limit, className) {
   }
 }
 
+// G11: 校对工作台离屏/切视图卸载与资源回收
+export function unmountIssueWorkbench(container) {
+  if (!container) return;
+  container.replaceChildren();
+  container.hidden = true;
+  container.classList.remove('is-clear');
+}
+
 export function renderIssueWorkbench(container, blocks, options) {
   const refs = issueReferences(blocks);
   container.replaceChildren();

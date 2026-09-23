@@ -37,6 +37,8 @@ public class ReadingWindowService {
     private final Duration settle;
     private final ScheduledExecutorService dispatcher;
     private final LinkedHashMap<UUID, Tombstone> tombstones = new LinkedHashMap<>();
+    private final Map<UUID, Session> sessions = new ConcurrentHashMap<>();
+    private static final int MAX_SESSIONS = 16;
     private Session current;
 
     @Autowired public ReadingWindowService(BookStore store, JobService jobs, SettingsService settings) {
@@ -68,11 +70,17 @@ public class ReadingWindowService {
     }
 
     private ProcessingProgressService progress;
+    private CloudConsentService consentService;
 
     /** U4：阶段事件聚合（测试可注入；缺省关闭，正式保存不受影响）。 */
     @Autowired(required = false)
     public void setProgress(ProcessingProgressService progress) {
         this.progress = progress;
+    }
+
+    @Autowired(required = false)
+    public void setConsentService(CloudConsentService consentService) {
+        this.consentService = consentService;
     }
 
     public synchronized ReadingWindowResponse update(String bookId, ReadingWindowRequest request) {
@@ -85,35 +93,51 @@ public class ReadingWindowService {
             return ended.response;
         }
         Instant now = clock.instant();
-        // A process restart loses the in-memory reservation. An old tab's heartbeat must not recreate it.
-        if ((current == null || !current.sessionId.equals(request.sessionId()))
-                && !Boolean.TRUE.equals(request.start()))
+        Session session = sessions.get(request.sessionId());
+        if (session == null && current != null && current.sessionId.equals(request.sessionId())) {
+            session = current;
+        }
+        if (session == null && !Boolean.TRUE.equals(request.start()))
             return new ReadingWindowResponse(request.sessionId(), request.sequence(), false, "EXPIRED",
                     request.currentPage(), null, null, null, List.of(), List.of(),
                     "阅读会话已失效，请明确重新开启随读处理");
-        if (current != null && !current.enabled && current.processingPages.isEmpty()) finish(current);
-        if (current == null) {
+        if (session != null && !session.enabled && session.processingPages.isEmpty()) finish(session);
+        if (session == null) {
+            sessions.entrySet().removeIf(e -> !e.getValue().enabled && e.getValue().processingPages.isEmpty());
+            for (Session s : sessions.values()) {
+                if (s.bookId.equals(bookId) && s.enabled && !s.sessionId.equals(request.sessionId())) {
+                    throw new ApiException(HttpStatus.CONFLICT, "已有其他书籍或标签页的阅读窗口，请先停止原窗口");
+                }
+            }
+            if (current != null && current.bookId.equals(bookId) && current.enabled && !current.sessionId.equals(request.sessionId())) {
+                throw new ApiException(HttpStatus.CONFLICT, "已有其他书籍或标签页的阅读窗口，请先停止原窗口");
+            }
+            if (sessions.size() >= MAX_SESSIONS) {
+                throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "阅读会话数量已达上限（最多 16 个）");
+            }
             SettingsService.Lease lease = settings.beginWork();
             UUID reservation = UUID.randomUUID();
             try {
                 requireConfigured(request.provider());
                 jobs.reserveReading(reservation, bookId);
-                current = new Session(bookId, request, reservation, lease, now);
-                replaceWindow(current, book.totalPages(), now);
-                return snapshot(current);
+                session = new Session(bookId, request, reservation, lease, now);
+                sessions.put(request.sessionId(), session);
+                current = session;
+                replaceWindow(session, book.totalPages(), now);
+                return snapshot(session);
             } catch (RuntimeException error) {
                 jobs.releaseReading(reservation);
                 lease.close();
                 throw error;
             }
         }
-        Session session = current;
         if (!session.bookId.equals(bookId) || !session.sessionId.equals(request.sessionId()))
             throw new ApiException(HttpStatus.CONFLICT, "已有其他书籍或标签页的阅读窗口，请先停止原窗口");
         if (session.enabled && !now.isBefore(session.deadline)) {
             disable(session, "EXPIRED", "阅读窗口已过期，请重新开启");
             if (session.processingPages.isEmpty()) finish(session);
-            return current == session ? snapshot(session) : tombstones.get(request.sessionId()).response;
+            return (sessions.containsKey(session.sessionId) || current == session)
+                    ? snapshot(session) : tombstones.get(request.sessionId()).response;
         }
         if (!session.enabled) return snapshot(session);
         if (!sameOptions(session, request)) throw new ApiException(HttpStatus.CONFLICT, "阅读窗口参数已固定，请停止后新建会话");
@@ -165,8 +189,10 @@ public class ReadingWindowService {
     public synchronized ReadingWindowResponse get(String bookId, UUID sessionId) {
         store.readBook(bookId);
         if (sessionId == null) bad("缺少 sessionId");
-        if (current != null && current.bookId.equals(bookId) && current.sessionId.equals(sessionId))
-            return snapshot(current);
+        Session s = sessions.get(sessionId);
+        if (s == null && current != null && current.sessionId.equals(sessionId)) s = current;
+        if (s != null && s.bookId.equals(bookId) && s.sessionId.equals(sessionId))
+            return snapshot(s);
         Tombstone ended = tombstones.get(sessionId);
         if (ended != null && ended.bookId.equals(bookId)) return ended.response;
         return new ReadingWindowResponse(sessionId, 0, false, "IDLE", null, null, null,
@@ -188,26 +214,29 @@ public class ReadingWindowService {
             }
             return ended.response;
         }
-        if (current == null || !current.sessionId.equals(command.sessionId()) || !current.bookId.equals(bookId)) {
+        Session session = sessions.get(command.sessionId());
+        if (session == null && current != null && current.sessionId.equals(command.sessionId())) session = current;
+        if (session == null || !session.sessionId.equals(command.sessionId()) || !session.bookId.equals(bookId)) {
             ReadingWindowResponse stopped = new ReadingWindowResponse(command.sessionId(), command.sequence(), false,
                     "STOPPING", null, null, null, null, List.of(), List.of(), "阅读窗口已停止");
             remember(command.sessionId(), new Tombstone(bookId, stopped));
             return stopped;
         }
-        Session session = current;
         if (command.sequence() < session.sequence) return snapshot(session);
         session.sequence = command.sequence();
         disable(session, "STOPPING", "阅读窗口已停止；已开始的页面将自然完成");
         if (session.processingPages.isEmpty()) finish(session);
-        return current == session ? snapshot(session) : tombstones.get(command.sessionId()).response;
+        return (sessions.containsKey(session.sessionId) || current == session)
+                ? snapshot(session) : tombstones.get(command.sessionId()).response;
     }
 
     private void safeTick() {
         try { tick(); }
         catch (RuntimeException error) {
             synchronized (this) {
-                if (current != null) {
-                    Session s = current;
+                List<Session> all = new ArrayList<>(sessions.values());
+                if (current != null && !sessions.containsKey(current.sessionId)) all.add(current);
+                for (Session s : all) {
                     disable(s, "BLOCKED", "随读处理暂停：" + safeMessage(error));
                     if (s.processingPages.isEmpty() || !jobs.readingJobActive(s.reservation)) finish(s);
                 }
@@ -249,8 +278,15 @@ public class ReadingWindowService {
     }
 
     synchronized void tick() {
-        Session s = current;
-        if (s == null) return;
+        List<Session> all = new ArrayList<>(sessions.values());
+        if (current != null && !sessions.containsKey(current.sessionId)) all.add(current);
+        if (all.isEmpty()) return;
+        for (Session s : all) {
+            tickSession(s);
+        }
+    }
+
+    private void tickSession(Session s) {
         Instant now = clock.instant();
         if (s.enabled && !now.isBefore(s.deadline)) disable(s, "EXPIRED", "阅读窗口已过期，请重新开启");
         s.processingPages.removeIf(p -> {
@@ -429,6 +465,50 @@ public class ReadingWindowService {
 
     private void replaceWindow(Session s, int total, Instant now) {
         if (priority != null) priority.focus(s.bookId, s.centerPage);
+        if (consentService != null) {
+            var consent = consentService.findActiveConsent(null, s.bookId);
+            if (consent == null || !consent.permitsProvider(s.provider)) {
+                // Key present but without consent sends 0 (B04-02)
+                s.fromPage = s.centerPage;
+                s.toPage = s.centerPage;
+                s.queued.clear();
+                s.status = "SETTLING";
+                return;
+            }
+            int before = consent.preloadBefore();
+            int after = consent.preloadAfter();
+            s.fromPage = Math.max(1, s.centerPage - before);
+            s.toPage = Math.min(total, s.centerPage + after);
+            s.queued.clear();
+            int center = s.centerPage;
+            if (center <= total && eligible(store.readPage(s.bookId, center))
+                    && !s.processingPages.contains(center) && !s.dispatched.contains(center)) {
+                s.queued.addLast(center);
+            }
+            for (int i = 1; i <= after; i++) {
+                int plus = center + i;
+                if (plus <= s.toPage && eligible(store.readPage(s.bookId, plus))
+                        && !s.processingPages.contains(plus) && !s.dispatched.contains(plus)) {
+                    s.queued.addLast(plus);
+                }
+            }
+            for (int j = 1; j <= before; j++) {
+                int minus = center - j;
+                if (minus >= s.fromPage && eligible(store.readPage(s.bookId, minus))
+                        && !s.processingPages.contains(minus) && !s.dispatched.contains(minus)) {
+                    s.queued.addLast(minus);
+                }
+            }
+            // First open with valid consent: current page dispatches immediately without 1-sec settle wait
+            if (s.sequence == 1 && s.queued.contains(center)) {
+                s.notBefore = now;
+            } else {
+                s.notBefore = now.plus(settle);
+            }
+            s.status = "SETTLING";
+            return;
+        }
+
         s.fromPage = Math.max(1, s.centerPage - 3);
         s.toPage = Math.min(total, s.centerPage + 5);
         s.queued.clear();
@@ -516,7 +596,8 @@ public class ReadingWindowService {
     }
 
     private void finish(Session s) {
-        if (current != s) return;
+        if (!sessions.containsKey(s.sessionId) && current != s) return;
+        sessions.remove(s.sessionId);
         s.processingPages.clear();
         s.processingChannels.clear();
         try {
@@ -528,7 +609,9 @@ public class ReadingWindowService {
             }
             remember(s.sessionId, new Tombstone(s.bookId, last));
         } finally {
-            current = null;
+            if (current == s) {
+                current = null;
+            }
             if (priority != null) priority.clear(s.bookId);
             try { jobs.releaseReading(s.reservation); }
             finally { s.lease.close(); }
@@ -559,6 +642,12 @@ public class ReadingWindowService {
 
     @PreDestroy public synchronized void close() {
         dispatcher.shutdownNow();
+        for (Session s : List.copyOf(sessions.values())) {
+            disable(s, "STOPPING", "应用正在关闭");
+            jobs.releaseReading(s.reservation);
+            s.lease.close();
+        }
+        sessions.clear();
         if (current != null) {
             disable(current, "STOPPING", "应用正在关闭");
             jobs.releaseReading(current.reservation);

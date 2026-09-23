@@ -9,11 +9,11 @@ import java.security.MessageDigest;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Forced, verified, atomic replacement. No non-atomic fallback for authority or pages. */
-final class DurableJson {
+public final class DurableJson {
     private static final AtomicBoolean WARNED = new AtomicBoolean();
     private DurableJson() {}
 
-    static void write(Path target, Object value, ObjectMapper json, int maxBytes) throws IOException {
+    public static void write(Path target, Object value, ObjectMapper json, int maxBytes) throws IOException {
         byte[] bytes = json.writeValueAsBytes(value);
         if (bytes.length > maxBytes) throw new IOException("durable record exceeds limit");
         rejectLinks(target);
@@ -46,7 +46,7 @@ final class DurableJson {
         }
     }
 
-    static void rejectLinks(Path target) throws IOException {
+    public static void rejectLinks(Path target) throws IOException {
         // The data root is canonicalized by DataDirectoryLease before paths reach here.
         for (Path p = target; p != null; p = p.getParent()) {
             if (Files.isSymbolicLink(p)) throw new IOException("unsafe durable path");

@@ -72,7 +72,27 @@ public class BookService {
         } catch (ApiException e) { throw e; }
         catch (IOException e) { throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "更新书架失败"); }
     }
-    public List<PageSummary> pages(String id){Book b=store.readBook(id);List<PageSummary> result=new ArrayList<>(b.totalPages());for(int n=1;n<=b.totalPages();n++){Page p=requirePage(id,n);result.add(pageSummary(id,p));}return result;}
+    public List<PageSummary> pages(String id){
+        Book b=store.readBook(id);
+        if(store.indexService()!=null) {
+            List<PageSummary> summaries = store.indexService().pageSummaries(store.bookDir(id), 1, b.totalPages());
+            if (summaries != null && summaries.size() == b.totalPages()) {
+                return summaries;
+            }
+        }
+        List<PageSummary> result=new ArrayList<>(b.totalPages());
+        for(int n=1;n<=b.totalPages();n++){
+            var head = store.headStore().readHead(store.bookDir(id), n);
+            if (head != null) {
+                result.add(new PageSummary(head.pageNumber(), head.status(), head.readingBlocksCount(),
+                        head.unresolvedCount(), head.width(), head.height(), head.title(), head.reviewed()));
+            } else {
+                Page p=requirePage(id,n);
+                result.add(pageSummary(id,p));
+            }
+        }
+        return result;
+    }
     /** U3：同一投影结果选择页面代表标题；无标题回到“第 N 页”，不冒用书眉。 */
     public PageSummary pageSummary(String id,Page p){if(presentation==null)return summary(p);return presentation.pageSummary(id,p);}
     public List<OutlineService.OutlineEntry> outline(String id){return outlines.outline(id);}
@@ -89,8 +109,27 @@ public class BookService {
         // A1-C09：版本号必须为非负整数，不经截断解释
         if(targetRevision<0||expectedRevision<0)throw new ApiException(HttpStatus.BAD_REQUEST,"revision 非法");
         try{Page next=store.revertPage(id,n,targetRevision,expectedRevision);touchAfterCommit(id);return next;}catch(ApiException e){throw e;}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"回退版本失败");}}
-    public List<Map<String,Object>> search(String id,String query){Book b=store.readBook(id);String q=query==null?"":query.strip();if(q.isEmpty())return List.of();if(q.length()>200)throw new ApiException(HttpStatus.BAD_REQUEST,"搜索词过长");List<Map<String,Object>> result=new ArrayList<>();for(int n=1;n<=b.totalPages()&&result.size()<500;n++){Page p=requirePage(id,n);for(Block block:p.blocks()){if("advertisement".equals(block.type()))continue;if(contains(block.original(),q)||contains(block.simplified(),q))result.add(Map.of("pageNumber",n,"blockId",block.id(),"text",Optional.ofNullable(block.simplified()).orElse(block.original())));}}return result;}
-    public byte[] image(String id,int n,int width){page(id,n);java.awt.image.BufferedImage image=null;try{image=pdf.render(store.pdf(id),n,width);return pdf.png(image);}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"页面图片生成失败");}finally{if(image!=null)image.flush();}}
+    public List<Map<String,Object>> search(String id,String query){
+        Book b=store.readBook(id);
+        String q=query==null?"":query.strip();
+        if(q.isEmpty())return List.of();
+        if(q.length()>200)throw new ApiException(HttpStatus.BAD_REQUEST,"搜索词过长");
+        if(store.indexService()!=null) {
+            List<Map<String,Object>> indexed = store.indexService().search(store.bookDir(id), id, q, null, 500);
+            if(indexed != null && !indexed.isEmpty()) return indexed;
+        }
+        List<Map<String,Object>> result=new ArrayList<>();
+        for(int n=1;n<=b.totalPages()&&result.size()<500;n++){
+            Page p=requirePage(id,n);
+            for(Block block:p.blocks()){
+                if("advertisement".equals(block.type()))continue;
+                if(contains(block.original(),q)||contains(block.simplified(),q))
+                    result.add(Map.of("pageNumber",n,"blockId",block.id(),"text",Optional.ofNullable(block.simplified()).orElse(block.original())));
+            }
+        }
+        return result;
+    }
+    public byte[] image(String id,int n,int width){page(id,n);try(ImageArtifact artifact=pdf.renderArtifact(store.pdf(id),n,width)){return pdf.pngArtifact(artifact);}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"页面图片生成失败");}}
     public byte[] figure(String id,int n,String blockId){Page p=page(id,n);Block b=p.blocks().stream().filter(x->x.id().equals(blockId)).findFirst().orElseThrow(()->new ApiException(HttpStatus.NOT_FOUND,"未找到该内容块"));try{return pdf.cropPng(store.pdf(id),n,config.maxImageWidth(),b.bbox());}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"内容块图片生成失败");}}
     public Path pdfPath(String id){store.readBook(id);return store.pdf(id);}
     private Book refresh(Book b) {

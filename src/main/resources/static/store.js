@@ -1,10 +1,49 @@
-export const PAGE_CACHE_LIMIT = 16;
+export const PAGE_CACHE_LIMIT = 12;
+export const PAGE_CACHE_BYTES_LIMIT = 32 * 1024 * 1024; // 32 MiB
 
-class LruPageCache extends Map {
-  constructor(limit, isProtected) {
+export function estimatePageBytes(page) {
+  if (!page) return 0;
+  let bytes = 256;
+  if (typeof page.text === 'string') bytes += page.text.length * 2;
+  if (Array.isArray(page.blocks)) {
+    for (const b of page.blocks) {
+      bytes += 128;
+      if (typeof b.original === 'string') bytes += b.original.length * 2;
+      if (typeof b.target === 'string') bytes += b.target.length * 2;
+      if (Array.isArray(b.issues)) {
+        for (const iss of b.issues) {
+          bytes += 96;
+          if (typeof iss.context === 'string') bytes += iss.context.length * 2;
+          if (typeof iss.expected === 'string') bytes += iss.expected.length * 2;
+          if (typeof iss.replacement === 'string') bytes += iss.replacement.length * 2;
+        }
+      }
+    }
+  }
+  if (page.issueImages && typeof page.issueImages === 'object') {
+    for (const k in page.issueImages) {
+      const img = page.issueImages[k];
+      if (typeof img?.dataUrl === 'string') bytes += img.dataUrl.length;
+      if (typeof img?.bytes === 'number') bytes += img.bytes;
+    }
+  }
+  return Math.max(bytes, 512);
+}
+
+export class LruPageCache extends Map {
+  constructor(limit = PAGE_CACHE_LIMIT, maxBytesOrProtected = PAGE_CACHE_BYTES_LIMIT, isProtected) {
     super();
-    this.limit = limit;
-    this.isProtected = isProtected;
+    if (typeof maxBytesOrProtected === 'function') {
+      this.limit = limit;
+      this.maxBytes = PAGE_CACHE_BYTES_LIMIT;
+      this.isProtected = maxBytesOrProtected;
+    } else {
+      this.limit = limit;
+      this.maxBytes = typeof maxBytesOrProtected === 'number' ? maxBytesOrProtected : PAGE_CACHE_BYTES_LIMIT;
+      this.isProtected = isProtected;
+    }
+    this.byteSizes = new Map();
+    this.totalBytes = 0;
   }
   get(key) {
     if (!super.has(key)) return undefined;
@@ -14,20 +53,44 @@ class LruPageCache extends Map {
     return value;
   }
   set(key, value) {
+    const prevBytes = this.byteSizes.get(key) || 0;
+    const nextBytes = estimatePageBytes(value);
+
     super.delete(key);
     super.set(key, value);
-    // 阶段2：有界缓存——淘汰最久未使用页，当前页与未保存草稿所在页不得淘汰
-    while (super.size > this.limit) {
+    this.byteSizes.set(key, nextBytes);
+    this.totalBytes = Math.max(0, this.totalBytes - prevBytes + nextBytes);
+
+    // G11: 12页 / 32MiB 缓存双上限，淘汰最久未使用页，当前页与未保存草稿所在页不得淘汰
+    while (super.size > this.limit || this.totalBytes > this.maxBytes) {
       let evicted = false;
       for (const oldest of super.keys()) {
         if (typeof this.isProtected === 'function' && this.isProtected(oldest)) continue;
+        const b = this.byteSizes.get(oldest) || 0;
+        this.byteSizes.delete(oldest);
         super.delete(oldest);
+        this.totalBytes = Math.max(0, this.totalBytes - b);
         evicted = true;
         break;
       }
       if (!evicted) break;
     }
     return this;
+  }
+  delete(key) {
+    if (!super.has(key)) return false;
+    const b = this.byteSizes.get(key) || 0;
+    this.byteSizes.delete(key);
+    this.totalBytes = Math.max(0, this.totalBytes - b);
+    return super.delete(key);
+  }
+  clear() {
+    this.byteSizes.clear();
+    this.totalBytes = 0;
+    super.clear();
+  }
+  get currentBytes() {
+    return this.totalBytes;
   }
 }
 
@@ -113,3 +176,33 @@ export function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
 }
+
+// G11: 交互会话守卫——管理页切换、书切换及编辑会话代次，杜绝跨会话异步状态污染
+export class SessionGuard {
+  constructor() {
+    this.bookId = null;
+    this.page = null;
+    this.epoch = 0;
+  }
+  setSession(bookId, page) {
+    if (this.bookId !== bookId || this.page !== page) {
+      this.bookId = bookId;
+      this.page = page;
+      this.epoch++;
+    }
+    return this.token;
+  }
+  get token() {
+    return { bookId: this.bookId, page: this.page, epoch: this.epoch };
+  }
+  isValid(token) {
+    return !!token && token.bookId === this.bookId && token.page === this.page && token.epoch === this.epoch;
+  }
+  invalidate() {
+    this.epoch++;
+  }
+}
+
+export const sessionGuard = new SessionGuard();
+export function createSessionGuard() { return new SessionGuard(); }
+

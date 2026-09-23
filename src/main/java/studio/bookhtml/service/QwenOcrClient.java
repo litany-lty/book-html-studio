@@ -19,8 +19,10 @@ import java.util.function.BooleanSupplier;
 public class QwenOcrClient {
     private static final int MAX_IMAGE_BYTES=10*1024*1024;
     private final AppProperties config; private final ObjectMapper json; private final Transport transport;
+    private ProviderResourceRegistry resources;
     @Autowired public QwenOcrClient(AppProperties config,ObjectMapper json){this(config,json,request->HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build().send(request,HttpResponse.BodyHandlers.ofString()));}
     QwenOcrClient(AppProperties config,ObjectMapper json,Transport transport){this.config=config;this.json=json;this.transport=transport;}
+    @Autowired(required=false) public void setResourceRegistry(ProviderResourceRegistry resources){this.resources=resources;}
     public boolean configured(){return !config.dashscopeApiKey().isBlank()&&!config.qwenModel().isBlank();}
     /**
      * JR-04：JEV 路径单次有界复识别。无隐藏重试（429 立即返回受限，不循环三次）；
@@ -33,6 +35,11 @@ public class QwenOcrClient {
         if(!configured())throw new ApiException(HttpStatus.BAD_REQUEST,"Qwen OCR 尚未配置 DASHSCOPE_API_KEY");
         if(png.length>MAX_IMAGE_BYTES)throw new ApiException(HttpStatus.BAD_REQUEST,"送识图片超过 Qwen 10MB 限制");
         if((long)imageWidth*imageHeight>8_388_608L)throw new ApiException(HttpStatus.BAD_REQUEST,"送识图片超过 Qwen 800 万像素限制");
+        ProviderResourceRegistry.Permit permit = null;
+        if(resources!=null){
+            try{permit = resources.acquire(ProviderResourceRegistry.POOL_QWEN, true, Duration.ofSeconds(30), cancelled);}
+            catch(InterruptedException e){Thread.currentThread().interrupt(); throw new CancelledException();}
+        }
         try{
             Map<String,Object> image=Map.of("image","data:image/png;base64,"+Base64.getEncoder().encodeToString(png),"min_pixels",3072,"max_pixels",8388608,"enable_rotate",false);
             Map<String,Object> body=Map.of("model",config.qwenModel(),"input",Map.of("messages",List.of(Map.of("role","user","content",List.of(image)))),"parameters",Map.of("ocr_options",Map.of("task","advanced_recognition")));
@@ -50,11 +57,17 @@ public class QwenOcrClient {
             if(response.status()<200||response.status()>=300)throw new OcrException("Qwen 局部复识别失败（HTTP "+response.status()+"）");
             return parse(new String(response.body(),java.nio.charset.StandardCharsets.UTF_8),imageWidth,imageHeight,layout);
         }catch(ApiException|CancelledException|OcrException e){throw e;}catch(Exception e){throw new OcrException("Qwen 局部复识别请求失败",e);}
+        finally{if(permit!=null) permit.close();}
     }
     public List<Block> recognize(byte[] png,int imageWidth,int imageHeight,String layout,BooleanSupplier cancelled)throws OcrException{
         if(!configured())throw new ApiException(HttpStatus.BAD_REQUEST,"Qwen OCR 尚未配置 DASHSCOPE_API_KEY");
         if(png.length>MAX_IMAGE_BYTES)throw new ApiException(HttpStatus.BAD_REQUEST,"送识图片超过 Qwen 10MB 限制");
         if((long)imageWidth*imageHeight>8_388_608L)throw new ApiException(HttpStatus.BAD_REQUEST,"送识图片超过 Qwen 800 万像素限制");
+        ProviderResourceRegistry.Permit permit = null;
+        if(resources!=null){
+            try{permit = resources.acquire(ProviderResourceRegistry.POOL_QWEN, true, Duration.ofSeconds(30), cancelled);}
+            catch(InterruptedException e){Thread.currentThread().interrupt(); throw new CancelledException();}
+        }
         try{
             Map<String,Object> image=Map.of("image","data:image/png;base64,"+Base64.getEncoder().encodeToString(png),"min_pixels",3072,"max_pixels",8388608,"enable_rotate",false);
             Map<String,Object> body=Map.of("model",config.qwenModel(),"input",Map.of("messages",List.of(Map.of("role","user","content",List.of(image)))),"parameters",Map.of("ocr_options",Map.of("task","advanced_recognition")));
@@ -62,6 +75,7 @@ public class QwenOcrClient {
             HttpResponse<String> response=null;for(int attempt=0;attempt<3;attempt++){if(cancelled.getAsBoolean())throw new CancelledException();response=transport.send(request);if(response.statusCode()!=429)break;backoff(attempt,cancelled);}
             if(response==null||response.statusCode()==429)throw new OcrException("Qwen OCR 请求频率受限，请稍后重试");if(response.statusCode()<200||response.statusCode()>=300)throw new OcrException("Qwen OCR 失败（HTTP "+response.statusCode()+"）");return parse(response.body(),imageWidth,imageHeight,layout);
         }catch(ApiException|CancelledException|OcrException e){throw e;}catch(Exception e){throw new OcrException("Qwen OCR 请求失败",e);}
+        finally{if(permit!=null) permit.close();}
     }
     List<Block> parse(String body,int width,int height,String requestedLayout)throws OcrException{
         try{JsonNode root=json.readTree(body);JsonNode choice=root.at("/output/choices/0");if("length".equalsIgnoreCase(choice.path("finish_reason").asText()))throw new OcrException("Qwen OCR 输出被截断");List<JsonNode>wordGroups=new ArrayList<>();findFields(choice,"words_info",wordGroups);if(wordGroups.isEmpty())throw new OcrException("Qwen OCR 返回缺少 words_info");List<RawLine>lines=new ArrayList<>();int seq=0;

@@ -5,6 +5,7 @@ import java.util.Set;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import studio.bookhtml.api.ApiException;
+import studio.bookhtml.domain.Block;
 import studio.bookhtml.domain.Page;
 import studio.bookhtml.service.TraditionalConverter;
 import studio.bookhtml.store.BookStore;
@@ -32,6 +33,7 @@ public class DecisionAcceptService {
     private final TraditionalConverter converter;
     private final PdfIdentity pdfIdentity;
     private final studio.bookhtml.config.DecisionProperties config;
+    private final studio.bookhtml.service.ContextDependencyValidator contextValidator;
 
     @org.springframework.beans.factory.annotation.Autowired
     public DecisionAcceptService(BookStore store, DecisionStore decisions,
@@ -42,6 +44,7 @@ public class DecisionAcceptService {
         this.converter = converter;
         this.pdfIdentity = pdfIdentity != null ? pdfIdentity : new PdfIdentity();
         this.config = config != null ? config : assistConfig();
+        this.contextValidator = new studio.bookhtml.service.ContextDependencyValidator();
     }
 
     public DecisionAcceptService(BookStore store, DecisionStore decisions,
@@ -62,7 +65,15 @@ public class DecisionAcceptService {
 
     public record AcceptBody(String clientOperationId, String blockId, int expectedPageRevision,
                              String issueBasisHash, String candidateSetHash, String candidateId,
-                             boolean userAttestedSourceCheck) {}
+                             boolean userAttestedSourceCheck,
+                             String parentPlanHash, String reviewPlanHash, String contextSnapshotId) {
+        public AcceptBody(String clientOperationId, String blockId, int expectedPageRevision,
+                          String issueBasisHash, String candidateSetHash, String candidateId,
+                          boolean userAttestedSourceCheck) {
+            this(clientOperationId, blockId, expectedPageRevision, issueBasisHash, candidateSetHash, candidateId,
+                    userAttestedSourceCheck, null, null, null);
+        }
+    }
 
     public record AcceptResult(Page committed, boolean idempotent) {}
 
@@ -161,12 +172,67 @@ public class DecisionAcceptService {
         if (!ref.pdfSha256().equals(candidate.pdfSha256()))
             throw new ApiException(HttpStatus.CONFLICT, "候选来源 PDF 与当前问题不匹配");
 
+        studio.bookhtml.domain.ContextSnapshot contextSnapshot = null;
+        if (body.contextSnapshotId() != null && !body.contextSnapshotId().isBlank()) {
+            contextSnapshot = decisions.loadContextSnapshot(bookId, body.contextSnapshotId())
+                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "指定的上下文快照不存在"));
+            if (!bookId.equals(contextSnapshot.bookId())
+                    || sourcePage != contextSnapshot.pageNumber()
+                    || body.expectedPageRevision() != contextSnapshot.pageRevision()
+                    || !body.blockId().equals(contextSnapshot.blockId())) {
+                throw new studio.bookhtml.store.PageConflictException(body.expectedPageRevision(),
+                        "上下文快照与当前请求目标不匹配");
+            }
+            if (body.parentPlanHash() != null && !body.parentPlanHash().equals(contextSnapshot.parentPlanHash())) {
+                throw new ApiException(HttpStatus.CONFLICT, "父计划哈希不匹配: " + body.parentPlanHash());
+            }
+            if (body.reviewPlanHash() != null && !body.reviewPlanHash().equals(contextSnapshot.reviewPlanHash())) {
+                throw new ApiException(HttpStatus.CONFLICT, "评审计划哈希不匹配: " + body.reviewPlanHash());
+            }
+            Page currentPage;
+            try {
+                currentPage = store.readPage(bookId, sourcePage);
+            } catch (Exception e) {
+                throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "页面读取失败");
+            }
+            long curSeq = store.sourceJournal().currentSourceSeq(store.bookDir(bookId), bookId);
+            studio.bookhtml.service.ContextDependencyValidator.ValidationOutcome outcome =
+                    contextValidator.validate(contextSnapshot, currentPage, curSeq);
+            if (!outcome.isValid()) {
+                throw new studio.bookhtml.store.PageConflictException(body.expectedPageRevision(),
+                        "建议依赖的上下文已失效：" + outcome.reason());
+            }
+        } else if (body.parentPlanHash() != null || body.reviewPlanHash() != null) {
+            Page currentPage;
+            try {
+                currentPage = store.readPage(bookId, sourcePage);
+            } catch (Exception e) {
+                throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "页面读取失败");
+            }
+            Block block = currentPage.blocks().stream()
+                    .filter(b -> b != null && body.blockId().equals(b.id()))
+                    .findFirst().orElse(null);
+            if (block != null && block.original() != null) {
+                long curSeq = store.sourceJournal().currentSourceSeq(store.bookDir(bookId), bookId);
+                contextSnapshot = studio.bookhtml.domain.ContextSnapshot.create(
+                        bookId, sourcePage, body.expectedPageRevision(),
+                        body.parentPlanHash() != null ? body.parentPlanHash() : "plan:" + snapshot.snapshotHash(),
+                        body.reviewPlanHash() != null ? body.reviewPlanHash() : "review:" + decisionId,
+                        curSeq, body.blockId(), ref.startUtf16(), ref.endUtf16(),
+                        block.original(), snapshot.context() != null ? snapshot.context().toString() : ""
+                );
+            }
+        }
+
         String simplified = converter.toSimplified(candidate.originalScriptText());
         BookStore.IssueAcceptSpec spec = new BookStore.IssueAcceptSpec(body.blockId(), issueId,
                 body.issueBasisHash(), body.candidateSetHash(), candidate.candidateId(),
                 candidate.originalScriptText(), simplified,
                 CandidateResolutionService.CONVERTER_VERSION, body.clientOperationId(),
-                decisionId, snapshot.issueRef().pdfSha256());
+                decisionId, snapshot.issueRef().pdfSha256(),
+                body.parentPlanHash(), body.reviewPlanHash(),
+                contextSnapshot != null ? contextSnapshot.contextHash() : null,
+                contextSnapshot);
         BookStore.IssueAcceptResult applied = store.applyIssueResolution(bookId, sourcePage,
                 body.expectedPageRevision(), CommitActor.MANUAL, null, CommitOp.MANUAL_SAVE, spec);
         return new AcceptResult(applied.committed(), applied.idempotent());
