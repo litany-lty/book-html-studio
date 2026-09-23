@@ -271,9 +271,8 @@ class AcceptTest {
                 3, null, List.of(), Instant.now(), List.of(3), "paddle", "auto", false, false, true,
                 "fp");
         f.store.writeJob(BOOK, job);
-        Page processing = new Page(3, 600, 800, "PROCESSING", "paddle", current.blocks(),
-                current.warnings(), false, null, current.sourceRecords(), null);
-        f.store.commitPage(BOOK, processing, rev, CommitActor.JOB, "job-ocr", CommitOp.JOB_START);
+        // Admission does not mutate the published page; the live batch job still blocks acceptance.
+        f.store.registerPageAttempt(BOOK,3,rev,job.id(),List.of("JOB_COMPLETE","JOB_RESTORE"),false,null,null);
         ApiException occupied = assertThrows(ApiException.class, () ->
                 f.accept.accept(BOOK, 3, "i1", decisionId, acceptBody(f, decisionId, candidateId)));
         assertEquals(HttpStatus.CONFLICT, occupied.status());

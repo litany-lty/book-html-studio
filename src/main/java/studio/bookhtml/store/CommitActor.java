@@ -4,7 +4,7 @@ package studio.bookhtml.store;
 public enum CommitActor {
     /** 人工校对保存：必须携带 expectedRevision；PROCESSING 页拒绝。 */
     MANUAL,
-    /** 后台识别任务：必须携带仍有效的 expectedJobId。 */
+    /** 后台识别任务：必须携带本页当前 attempt UUID、代次和提交结果身份。 */
     JOB,
     /** 版本回退：必须携带 expectedRevision，成功生成更高的新 revision。 */
     REVERT,

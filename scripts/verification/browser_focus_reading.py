@@ -161,6 +161,8 @@ def main():
             page.evaluate("import('/store.js').then(({state})=>{state.dirty=false;})")
             page.locator('#reader').focus(); page.keyboard.press('Escape')
             page.wait_for_selector('body:not(.focus-reading) #paper .original-frame')
+            # Focus is restored on the next animation frame, after DOM replacement.
+            page.wait_for_function("document.activeElement===document.querySelector('#focus-toggle')", timeout=3000)
             check('escape_restores_previous_view_at_current_page', page.locator('#page-jump').input_value() == '2' and page.locator('#focus-toggle').evaluate('el=>el===document.activeElement'))
             page.click('#focus-toggle')
             page.locator('#reading-progress-range').evaluate("el=>{el.value='8';el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));}")

@@ -166,6 +166,10 @@ class DurableReprocessTest {
         store.writeSidecar(store.pageAttemptsPath(bookId), new PageAttempt.Journal(
                 Map.of(bookId+":1",before.intents().get(bookId+":1").withLifecycle("RUNNING")),
                 Map.of(before.operations().keySet().iterator().next(),interrupted)));
+        // A readable legacy page without the matching commit marker is not publication proof.
+        var legacy=json.valueToTree(store.readPage(bookId,1));
+        ((com.fasterxml.jackson.databind.node.ObjectNode)legacy).remove("lastCommitId");
+        json.writeValue(store.pagePath(bookId,1).toFile(),legacy);
         restart(now.plusSeconds(1));
         assertEquals("INTERRUPTED",submit(r).status());
         assertEquals("READY",store.readPage(bookId,1).status());

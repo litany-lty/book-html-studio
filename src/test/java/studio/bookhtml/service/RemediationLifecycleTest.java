@@ -186,4 +186,53 @@ class RemediationLifecycleTest {
         } finally { release.countDown(); closer.shutdownNow(); }
     }
 
+
+    @Test void repeatedStopAndCloseDoNotInterruptDurableFinalization() throws Exception {
+        var entered = new CountDownLatch(1);
+        var finalizing = new CountDownLatch(1);
+        var releaseFinalizer = new CountDownLatch(1);
+        var duplicateInterrupts = new java.util.concurrent.atomic.AtomicInteger();
+        when(processor.processBaseline(eq(bookId),eq(1),anyString(),anyString(),anyBoolean(),any()))
+                .thenAnswer(inv -> {
+                    entered.countDown();
+                    try { new CountDownLatch(1).await(5,TimeUnit.SECONDS); }
+                    catch (InterruptedException expected) { Thread.currentThread().interrupt(); }
+                    throw new CancelledException();
+                });
+        doAnswer(inv -> {
+            if ("CANCELLED".equals(inv.getArgument(1))) {
+                boolean restore = Thread.interrupted();
+                finalizing.countDown();
+                long deadline = System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+                try {
+                    while (releaseFinalizer.getCount()>0) {
+                        try { assertTrue(releaseFinalizer.await(Math.max(0,deadline-System.nanoTime()),TimeUnit.NANOSECONDS)); }
+                        catch (InterruptedException duplicate) { duplicateInterrupts.incrementAndGet(); restore=true; }
+                    }
+                    return inv.callRealMethod();
+                } finally { if (restore) Thread.currentThread().interrupt(); }
+            }
+            return inv.callRealMethod();
+        }).when(store).finishPageAttempt(any(PageAttempt.class),anyString());
+        byte[] before=java.nio.file.Files.readAllBytes(store.pagePath(bookId,1));
+        submit(request("one-interrupt",store.readPage(bookId,1).revision(),false,false));
+        assertTrue(entered.await(3,TimeUnit.SECONDS));
+        jobs.cancelReadingPage(reservation,1);
+        assertTrue(finalizing.await(3,TimeUnit.SECONDS));
+        jobs.cancelReadingPage(reservation,1);
+        var executor=java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            var closing=executor.submit(jobs::close);
+            var field=JobService.class.getDeclaredField("worker"); field.setAccessible(true);
+            var worker=(java.util.concurrent.ExecutorService)field.get(jobs);
+            await(worker::isShutdown);
+            assertFalse(closing.isDone(),"shutdown waits for the physical finalizer");
+            releaseFinalizer.countDown();
+            closing.get(5,TimeUnit.SECONDS);
+            assertEquals(0,duplicateInterrupts.get(),"stop/close must not interrupt a finalizer a second time");
+            assertEquals("CANCELLED",progress.latest(bookId,1).lifecycle());
+            assertArrayEquals(before,java.nio.file.Files.readAllBytes(store.pagePath(bookId,1)));
+        } finally { releaseFinalizer.countDown(); executor.shutdownNow(); }
+    }
+
 }

@@ -35,6 +35,7 @@ public final class DataDirectoryLease implements AutoCloseable {
         final FileChannel channel;
         final FileLock lock;
         final Object monitor = new Object();
+        final java.util.Set<java.util.UUID> revokedAttempts = new java.util.HashSet<>();
         int refCount;
         Entry(Path realPath, FileChannel channel, FileLock lock) {
             this.realPath = realPath;
@@ -57,6 +58,9 @@ public final class DataDirectoryLease implements AutoCloseable {
     public Object monitor() {
         return entry.monitor;
     }
+
+    /** Guarded by the shared monitor, same lifetime as the directory lease. */
+    java.util.Set<java.util.UUID> revokedAttempts() { return entry.revokedAttempts; }
 
     public Path realPath() {
         return entry.realPath;
