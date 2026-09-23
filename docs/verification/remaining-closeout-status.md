@@ -18,7 +18,7 @@
   "baselineSha": "eb89822cf477a3beb3472cf114ab8b3fd09b3f6e",
   "currentBranch": "harden/remaining-eb89822-20260923",
   "currentHeadSha": "eb89822cf477a3beb3472cf114ab8b3fd09b3f6e",
-  "requiredCodeGapsRemaining": ["G01", "G02", "G03", "G04", "G05", "G06", "G07", "G08", "G09", "G11", "G12", "G13", "G14", "G15", "G16"],
+  "requiredCodeGapsRemaining": ["G01", "G02", "G03", "G04", "G06", "G07", "G08", "G09", "G11", "G12", "G13", "G14", "G15", "G16"],
   "failedGates": [],
   "blockedExternal": ["E01", "E02", "E03", "E04", "E05", "E06", "E07", "E08"],
   "skippedTests": [],
@@ -32,6 +32,8 @@
 
 | 测试套件 | 运行环境 | 实测通过项 | 失败/错误 | 跳过项 | 状态 | 证据 |
 |---|---|---|---|---|---|---|
+| Java 完整套件 (B06 后) | Oracle JDK 17.0.17 | 745 | 0 | 0 | PASS | `mvn test` 全部通过 (含4套B06共15项专项用例) |
+| Java 完整套件 (B05 后) | Oracle JDK 17.0.17 | 730 | 0 | 0 | PASS | `mvn test` 全部通过 (含B05统一网络层与恢复专项) |
 | Java 完整套件 (B01 后) | Oracle JDK 17.0.17 | 666 | 0 | 0 | PASS | `mvn test` 全部通过 (含4套B01专项用例) |
 | Java 完整套件 (B00 基线) | Oracle JDK 17.0.17 | 653 | 0 | 0 | PASS | `mvn test` 全部通过 |
 | Node 端到端/退避 | Node.js v22 | 10 | 0 | 0 | PASS | `scripts/verification/probe_final_gaps.mjs` |
@@ -80,7 +82,7 @@
 | **G02** | B03 | DONE | 来源事件最小记录、永久页摘要/统计/倒排检索索引与小型页头 | 698 套件全绿，6 套新增专项实测 PASS |
 | **G03** | B05 | DONE | 全模型统一物理调用、账户并发与预算治理 | 730 套件全绿，ManagedTransport + ProviderResourceRegistry + AttemptCallBudgetStore + DelayedCallQueue 统一治理 |
 | **G04** | B05 | DONE | 异步 OCR 远端 Job 持久占位、轮询恢复与未知债务治理 | 730 套件全绿，RemoteJobRegistry + SUBMIT_UNKNOWN 保护 + crash recovery 轮询防重复开销 |
-| **G05** | B06 | PARTIAL_CODE | 跨入口、跨书、多标签分阶段优先级调度（当前页 P0 优先） | 待实现 |
+| **G05** | B06 | DONE | 跨入口、跨书、多标签分阶段优先级调度（当前页 P0 优先） | 745 套件全绿，4 套新增专项实测 PASS (抢占/公平性/阶段释放/轻量队列) |
 | **G06** | B04 | DONE | 服务端持久 CloudConsent / ReadingPolicy，有限授权下自动当前页处理 | 715 套件全绿，5 套新增专项实测 PASS |
 | **G07** | B04/B05 | PARTIAL_CODE | 统一幂等准入、operationEpoch（30天/4096上限）与批量快照持久化 | B04/B05 已完成 Epoch、批量准入与远端持久任务，待 B07/B08 计划集成 |
 | **G08** | B07 | PARTIAL_CODE | BookContentProfile + 严格 ContextSnapshot + JEV 接受锁内依赖校验 | 待实现 |
@@ -142,13 +144,19 @@
 | **B05-06** | B05 | DONE | `BaiduPpOcrClient` 并发单飞锁改造为 64-条带锁，修复删除锁导致的锁逃逸与并发双跑问题 | `OcrSingleFlightRaceTest` (2 tests) | 实测 PASS |
 | **B05-07** | B05 | DONE | 改造 MiniMax、Qwen、Paddle AI Studio 客户端，接入统一治理与账本/授权检查 | 730/730 套件回归 | 全部实测 PASS |
 | **B05-08** | B05 | DONE | B05 批次 15 项新增专项实测 PASS，全仓 730 项测试全部通过（730/730 PASS） | `mvn test` 730/730 | 全部实测 PASS |
+| **B06-01** | B06 | DONE | 实现 `PageExecutionRecord`（`studio.bookhtml.domain.PageExecutionRecord`），支持细粒度分阶段生命周期管理 | `PageStageReleaseTest` | 实测 PASS |
+| **B06-02** | B06 | DONE | 实现 `PageWorkScheduler`，支持 P0~P3 优先级队列、8 次前台让步公平性、P0 绝对抢占与动态优先级提升 | `CrossEntrySchedulerTest` (4 tests) | 实测 PASS |
+| **B06-03** | B06 | DONE | `ReadingWindowService` 扩展为多会话管理器（上限 16 会话，跨书与多标签隔离，同书互斥与墓碑生命周期） | `MultiReaderSessionTest` (5 tests) | 实测 PASS |
+| **B06-04** | B06 | DONE | 基准 OCR 与增强执行线程池解耦，基准提交即释放后续页执行，杜绝大模型增强阻塞基准流水线 | `PageStageReleaseTest` (2 tests) | 实测 PASS |
+| **B06-05** | B06 | DONE | `JobService` 队列轻量描述符化（`PageTaskDescriptor` 内存极简），`activeReserved` 按 `bookId:pageNumber` 隔离 | `BatchContinuationTest` (4 tests) | 实测 PASS |
+| **B06-06** | B06 | DONE | B06 批次 15 项新增专项实测 PASS，全仓 745 项测试全部通过（745/745 PASS） | `mvn test` 745/745 | 全部实测 PASS |
 
-*(后续批次 B06～B13 子任务随各批次执行实时更新)*
+*(后续批次 B07～B13 子任务随各批次执行实时更新)*
 
 ---
 
 ## 7. 下一步行动
-立即执行 **B06 批次**（跨入口、跨书、多标签分阶段优先级调度 / G05）：
-1. 建立统一分阶段优先级任务调度器（Foreground 当前页 P0 抢占、优先完成基准、后台预加载与批处理排队）；
-2. 调度器复用唯一 `PageProcessingService` 引擎，杜绝两套业务处理逻辑；
-3. 跨入口（随读、重试、批处理、校对）资源协调与公平让步机制。
+立即执行 **B07 批次**（BookContentProfile + ContextSnapshot + JEV 接受锁内依赖校验 / G08）：
+1. 建立 `BookContentProfile` 模型与基于事件修订号的缓存失效机制；
+2. 建立 `ContextSnapshot` 模型，实现父计划与子评审计划严格绑定与哈希校验；
+3. `BookStore` 目录写锁内注入 JEV 决策接受依赖检查，防止并发覆写脏数据。

@@ -27,14 +27,21 @@ public class JobService {
     private final PageProcessingService pageEngine;
     private Running active;
     private boolean closing;
-    private final Map<Integer, Running> activeReserved = new ConcurrentHashMap<>();
+    private final Map<String, Running> activeReserved = new ConcurrentHashMap<>();
+    private static String reservedKey(String bookId, int pageNumber) { return bookId + ":" + pageNumber; }
     // U2：页面级 attempt 登记（调度用；最终写入权限仍以 BookStore 锁内校验为准）。
     private final Map<String, PageAttempt> pageAttempts = new ConcurrentHashMap<>();
     private final java.time.Clock operationClock;
     private static final java.time.Duration OPERATION_RETENTION = java.time.Duration.ofDays(30);
+    public record PageTaskDescriptor(String bookId, int pageNumber, int expectedRevision, boolean force) {}
     private record PendingOperation(String key, String fingerprint, boolean overwrite) {}
     private UUID readingReservation;
     private String readingReservationBookId;
+    private final Map<String, UUID> readingReservations = new ConcurrentHashMap<>();
+    private final Map<UUID, String> readingReservationBooks = new ConcurrentHashMap<>();
+    private PageWorkScheduler scheduler;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    public void setScheduler(PageWorkScheduler scheduler) { this.scheduler = scheduler; }
     private SettingsService settings;
     private ProcessingProgressService progress;
     @org.springframework.beans.factory.annotation.Autowired(required=false)
@@ -96,6 +103,9 @@ public class JobService {
                 } catch (InterruptedException cancellation) { interrupted = true; }
             }
         } finally { if (interrupted) Thread.currentThread().interrupt(); }
+        if (scheduler != null) {
+            try { scheduler.close(); } catch (Exception ignored) {}
+        }
         if (shutdownFailure != null) throw shutdownFailure;
     }
 
@@ -104,43 +114,92 @@ public class JobService {
     }
     public synchronized void reserveReading(UUID reservation,String bookId){
         requireOpen();
-        if(readingReservation!=null||active!=null||!activeReserved.isEmpty())throw new ApiException(HttpStatus.CONFLICT,"已有识别任务或阅读窗口正在运行");
+        if(readingReservations.containsKey(bookId) || (active!=null && active.bookId.equals(bookId)))throw new ApiException(HttpStatus.CONFLICT,"已有识别任务或阅读窗口正在运行");
         if(store.readBook(bookId).archived())throw new ApiException(HttpStatus.CONFLICT,"本书已归档，请先恢复后再识别");
         Job current=store.readJob(bookId);
         if(current!=null&&List.of("QUEUED","RUNNING","CANCELLING").contains(current.status()))throw new ApiException(HttpStatus.CONFLICT,"已有识别任务正在运行或正在取消");
         readingReservation=Objects.requireNonNull(reservation);
         readingReservationBookId=bookId;
+        readingReservations.put(bookId, reservation);
+        readingReservationBooks.put(reservation, bookId);
         Job readingJob = new Job("reading:" + reservation, "RUNNING", 0, 0, null, null, List.of(), Instant.now(),
                 List.of(), "paddle-aistudio", "auto", false, false, false, "reading:" + reservation);
         write(bookId, readingJob);
     }
     public synchronized void releaseReading(UUID reservation){
-        if(Objects.equals(readingReservation,reservation)){
+        String bookId = readingReservationBooks.remove(reservation);
+        if (bookId != null) {
+            readingReservations.remove(bookId);
+            if (Objects.equals(readingReservation, reservation)) {
+                readingReservation = null;
+                readingReservationBookId = null;
+            }
+            cancelReservedForBook(bookId);
+            try {
+                Job cur = store.readJob(bookId);
+                if (cur != null && ("reading:" + reservation).equals(cur.id())) {
+                    write(bookId, Job.idle());
+                }
+            } catch (Exception ignored) {}
+        } else if(Objects.equals(readingReservation,reservation)){
             readingReservation=null;
-            String bookId = readingReservationBookId;
+            String b = readingReservationBookId;
             readingReservationBookId=null;
             cancelAllReserved();
-            if (bookId != null) {
+            if (b != null) {
                 try {
-                    Job cur = store.readJob(bookId);
+                    Job cur = store.readJob(b);
                     if (cur != null && ("reading:" + reservation).equals(cur.id())) {
-                        write(bookId, Job.idle());
+                        write(b, Job.idle());
                     }
                 } catch (Exception ignored) {}
             }
         }
     }
-    public synchronized boolean readingJobActive(UUID reservation){return Objects.equals(readingReservation,reservation)&&!activeReserved.isEmpty();}
-    public synchronized boolean readingJobActive(UUID reservation, int pageNumber){return Objects.equals(readingReservation,reservation)&&activeReserved.containsKey(pageNumber);}
+    public synchronized boolean readingJobActive(UUID reservation){
+        if (reservation == null) return false;
+        String b = readingReservationBooks.get(reservation);
+        if (b == null && Objects.equals(readingReservation, reservation)) b = readingReservationBookId;
+        if (b == null) return false;
+        for (Running r : activeReserved.values()) {
+            if (r.bookId.equals(b)) return true;
+        }
+        return false;
+    }
+    public synchronized boolean readingJobActive(UUID reservation, int pageNumber){
+        if (reservation == null) return false;
+        String b = readingReservationBooks.get(reservation);
+        if (b == null && Objects.equals(readingReservation, reservation)) b = readingReservationBookId;
+        if (b == null) return false;
+        Running r = activeReserved.get(reservedKey(b, pageNumber));
+        return r != null && r.bookId.equals(b);
+    }
     public synchronized void cancelReadingPage(UUID reservation, int pageNumber) {
-        if (!Objects.equals(readingReservation, reservation)) return;
-        Running running = activeReserved.get(pageNumber);
+        if (reservation == null) return;
+        String b = readingReservationBooks.get(reservation);
+        if (b == null && Objects.equals(readingReservation, reservation)) b = readingReservationBookId;
+        if (b == null) return;
+        Running running = activeReserved.get(reservedKey(b, pageNumber));
         if (running != null) {
+            if (scheduler != null) {
+                scheduler.cancel(b, pageNumber);
+            }
             // U2：只标记取消并中断，不提前从登记表删除。物理槽与登记在 worker
             // 收尾（finally）时释放；取消后仍可恢复旧可读版本（mayRestore）。
             markCancelled(running);
             interruptOnce(running);
             if (!running.started) releaseReserved(running, "CANCELLED");
+        }
+    }
+    private synchronized void cancelReservedForBook(String bookId) {
+        for (Running running : new HashSet<>(activeReserved.values())) {
+            if (running.bookId.equals(bookId)) {
+                markCancelled(running);
+                interruptOnce(running);
+            }
+        }
+        for (Running running : new HashSet<>(activeReserved.values())) {
+            if (running.bookId.equals(bookId) && !running.started) releaseReserved(running, "CANCELLED");
         }
     }
     private synchronized void cancelAllReserved() {
@@ -155,7 +214,7 @@ public class JobService {
     /** Serialize library archiving with both batch admission and reading-window reservation. */
     public synchronized Book updateLibrary(String bookId,String title,Boolean archived){
         if(Boolean.TRUE.equals(archived)
-                && ((active!=null&&active.bookId.equals(bookId)) || bookId.equals(readingReservationBookId)))
+                && ((active!=null&&active.bookId.equals(bookId)) || readingReservations.containsKey(bookId) || bookId.equals(readingReservationBookId)))
             throw new ApiException(HttpStatus.CONFLICT,"本书正在识别，请等待任务完成或停止随读后归档");
         return books.updateLibrary(bookId,title,archived);
     }
@@ -165,9 +224,13 @@ public class JobService {
 
     private Job submitReserved(UUID reservation, String bookId, JobRequest request, PendingOperation operation) {
         requireOpen();
-        if (!Objects.equals(readingReservation, reservation) || !Objects.equals(readingReservationBookId, bookId))
+        UUID expected = readingReservations.get(bookId);
+        if (expected == null && Objects.equals(readingReservation, reservation) && Objects.equals(readingReservationBookId, bookId)) {
+            expected = reservation;
+        }
+        if (!Objects.equals(expected, reservation))
             throw new ApiException(HttpStatus.CONFLICT, "阅读窗口预约已失效");
-        if (active != null) throw new ApiException(HttpStatus.CONFLICT, "已有识别任务正在运行");
+        if (active != null && active.bookId.equals(bookId)) throw new ApiException(HttpStatus.CONFLICT, "已有识别任务正在运行");
         Book book = store.readBook(bookId);
         if (book.archived()) throw new ApiException(HttpStatus.CONFLICT, "本书已归档，请先恢复后再识别");
         String provider = request.provider() == null ? (settings == null ? "paddle-aistudio" : settings.state().defaultProvider()) : request.provider();
@@ -178,7 +241,7 @@ public class JobService {
         String fingerprint = requestFingerprint(bookId, pages.toString(), provider, layout,
                 String.valueOf(request.splitSpreads()), String.valueOf(request.force()), String.valueOf(request.assistEnabled()));
         for (int page : pages) {
-            Running existing = activeReserved.get(page);
+            Running existing = activeReserved.get(reservedKey(bookId, page));
             if (existing != null) {
                 if (!existing.cancelled && existing.fingerprint.equals(fingerprint)) return existing.job;
                 throw new ApiException(HttpStatus.CONFLICT, "已有识别任务正在运行或正在取消");
@@ -197,7 +260,7 @@ public class JobService {
                 PageAttempt attempt = registerAttempt(bookId, page, BookStore.revisionOrZero(published),
                         List.of("JOB_BASELINE", "JOB_ENHANCEMENT", "JOB_COMPLETE", "JOB_RESTORE"), "reading:"+reservation, operation!=null && operation.overwrite(), operation, queued);
                 running.attempts.put(page, attempt);
-                activeReserved.put(page, running);
+                activeReserved.put(reservedKey(bookId, page), running);
                 if (progress != null) progress.begin(attempt, BookStore.revisionOrZero(published),
                         published != null && "READY".equals(published.status()));
             }
@@ -215,7 +278,7 @@ public class JobService {
             int page = entry.getKey();
             PageAttempt attempt = entry.getValue();
             completeIntent(running, page, fallbackLifecycle);
-            activeReserved.remove(page, running);
+            activeReserved.remove(reservedKey(running.bookId, page), running);
         }
         if (running.lease != null) running.lease.close();
     }
@@ -293,7 +356,7 @@ public class JobService {
         int currentRev = BookStore.revisionOrZero(current);
         if (request.expectedRevision() != null && request.expectedRevision() != currentRev)
             throw new ApiException(HttpStatus.CONFLICT, "页面已被他处更新，请刷新后重试；旧确认不覆盖新版本");
-        Running existing = activeReserved.get(pageNumber);
+        Running existing = activeReserved.get(reservedKey(bookId, pageNumber));
         if (existing != null) throw new ApiException(HttpStatus.CONFLICT, "本页已有识别任务正在运行或正在取消");
         String channel = provider == null ? "paddle-aistudio" : provider;
         JobRequest jobRequest = new JobRequest(String.valueOf(pageNumber), channel, layout,
@@ -401,7 +464,9 @@ public class JobService {
 
     /** U2：本书本页的登记是否仍归属该 attempt（不判断取消，供恢复路径使用）。 */
     private boolean ownsAttempt(Running running, UUID reservation) {
-        if (!Objects.equals(readingReservation, reservation)) return false;
+        UUID expected = readingReservations.get(running.bookId);
+        if (expected == null && Objects.equals(readingReservation, reservation)) expected = reservation;
+        if (!Objects.equals(expected, reservation)) return false;
         for (Running candidate : activeReserved.values()) {
             if (candidate == running) return true;
         }
@@ -440,9 +505,9 @@ public class JobService {
     }
     public synchronized Job submit(String bookId,JobRequest request){
         requireOpen();
-        if(readingReservation!=null)throw new ApiException(HttpStatus.CONFLICT,"阅读窗口正在运行，请先停止随读处理");
+        if(readingReservations.containsKey(bookId) || (readingReservation!=null && bookId.equals(readingReservationBookId)))throw new ApiException(HttpStatus.CONFLICT,"阅读窗口正在运行，请先停止随读处理");
         SettingsService.Lease lease=settings==null?null:settings.beginWork();boolean transferred=false;try{Book book=books.get(bookId);if(book.archived())throw new ApiException(HttpStatus.CONFLICT,"本书已归档，请先恢复后再识别");String provider=request.provider()==null?(settings==null?"paddle-aistudio":settings.state().defaultProvider()):request.provider();if(settings!=null&&!List.of("paddle-aistudio","ppocr").contains(provider))throw new ApiException(HttpStatus.BAD_REQUEST,"新任务仅支持 AI Studio 与 PP-OCRv6 通道");String layout=request.layout()==null?"auto":request.layout();List<Integer> pages=PageRanges.parse(request.pages(),book.totalPages());String fingerprint=bookId+"|"+pages+"|"+provider+"|"+layout+"|"+request.splitSpreads()+"|"+request.force()+"|"+request.assistEnabled();
-        if(active!=null){if(!active.cancelled&&active.fingerprint.equals(fingerprint))return store.readJob(bookId);throw new ApiException(HttpStatus.CONFLICT,"已有识别任务正在运行或正在取消");}
+        if(active!=null){if(active.bookId.equals(bookId)&&!active.cancelled&&active.fingerprint.equals(fingerprint))return store.readJob(bookId);throw new ApiException(HttpStatus.CONFLICT,"已有识别任务正在运行或正在取消");}
         Job current = null;
         try { current = store.readJob(bookId); } catch (Exception ignored) { }
         if(current!=null&&List.of("QUEUED","RUNNING","CANCELLING").contains(current.status()))throw new ApiException(HttpStatus.CONFLICT,"已有识别任务正在运行或正在取消，请稍后再试");
@@ -474,10 +539,13 @@ public class JobService {
     public Job get(String bookId){books.get(bookId);return store.readJob(bookId);}
     // 运行中取消先写 CANCELLING，由 worker 收尾时写 CANCELLED；排队未启动可直接取消。
     public synchronized Job cancel(String bookId){books.get(bookId);Job job=store.readJob(bookId);
-        if(bookId.equals(readingReservationBookId)){cancelAllReserved();}
+        if(readingReservations.containsKey(bookId) || bookId.equals(readingReservationBookId)){cancelReservedForBook(bookId);}
         if(active==null||!active.bookId.equals(bookId)||!List.of("QUEUED","RUNNING","CANCELLING").contains(job.status()))return job;
         if("CANCELLING".equals(job.status()))return job;
         Running running=active;markCancelled(running);
+        if (scheduler != null) {
+            scheduler.cancelBook(bookId);
+        }
         if(!running.started){running.future.cancel(false);Job cancelled=statusJob(job,"CANCELLED",job.completed(),job.total(),job.currentPage(),null,job.errors());write(bookId,cancelled);active=null;if(running.lease!=null)running.lease.close();return cancelled;}
         Job cancelling=statusJob(job,"CANCELLING",job.completed(),job.total(),job.currentPage(),null,job.errors());write(bookId,cancelling);interruptOnce(running);return cancelling;}
     private void run(Running running,Job initial,List<Integer> pages,String provider,String layout,boolean split,boolean force,boolean assist) {
@@ -536,14 +604,44 @@ public class JobService {
         }
     }
     private PageProcessingService.Result executePage(Running running,PageProcessingService.Request request) {
-        try { return pageEngine.execute(request); }
+        try {
+            if (scheduler != null) {
+                PageWorkScheduler.Priority p;
+                if (active == running) {
+                    p = PageWorkScheduler.Priority.P3;
+                } else {
+                    int center = running.job != null && running.job.currentPage() != null ? running.job.currentPage() : -1;
+                    if (request.page() == center) {
+                        p = PageWorkScheduler.Priority.P0;
+                    } else if (request.force()) {
+                        p = PageWorkScheduler.Priority.P1;
+                    } else {
+                        p = PageWorkScheduler.Priority.P2;
+                    }
+                }
+                CompletableFuture<PageProcessingService.Result> future = scheduler.schedule(request, p);
+                try {
+                    return future.get();
+                } catch (InterruptedException ie) {
+                    scheduler.cancel(request.book(), request.page());
+                    throw new CancelledException();
+                } catch (ExecutionException ee) {
+                    if (ee.getCause() instanceof CancelledException ce) throw ce;
+                    if (ee.getCause() instanceof RuntimeException re) throw re;
+                    throw new RuntimeException(ee.getCause());
+                }
+            }
+            return pageEngine.execute(request);
+        }
         finally { running.settledPages.add(request.attempt().pageNumber()); }
     }
     private void runReserved(Running running,UUID reservation,String expectedJobId,List<Integer> pages,
                              String provider,String layout,boolean split,boolean force,boolean assist) {
         try {
             synchronized(this) {
-                if(!Objects.equals(readingReservation,reservation) || running.cancelled)return;
+                UUID expected = readingReservations.get(running.bookId);
+                if (expected == null && Objects.equals(readingReservation, reservation)) expected = reservation;
+                if(!Objects.equals(expected,reservation) || running.cancelled)return;
                 running.started=true; running.thread=Thread.currentThread();
             }
             for(int page:pages) {

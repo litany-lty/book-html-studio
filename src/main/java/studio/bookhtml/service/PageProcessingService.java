@@ -25,6 +25,108 @@ public final class PageProcessingService {
     void setProgress(ProcessingProgressService value) { progress=value; }
     void setResources(QwenRequestGate value, ReadingPriority readingPriority) { gate=value; priority=readingPriority; }
     private static final Set<String> TERMINAL=Set.of("SUCCEEDED","PARTIAL","FAILED","CANCELLED","INTERRUPTED","UNKNOWN");
+    public PageExecutionRecord executeBaseline(Request request, PageExecutionRecord record) {
+        Execution e = new Execution(request);
+        boolean closeScope = false;
+        QwenExecutionScope scope = null;
+        if (QwenExecutionScope.current() == null) {
+            scope = QwenExecutionScope.open(request.attempt(), gate,
+                    priority != null && priority.foreground(request.book(), request.page()));
+            closeScope = true;
+        }
+        try {
+            e.runBaseline();
+            if (e.decided) {
+                return record.withSettled(e.lifecycle, e.message, e.published == null ? null : e.published.revision());
+            }
+            return record.withBaselineCommitted(e.published == null ? 0 : e.published.revision());
+        } catch (CancelledException | java.util.concurrent.CancellationException cancelled) {
+            e.lifecycle = "CANCELLED"; e.message = "CANCELLED_CONTENT_KEPT";
+            return record.withSettled(e.lifecycle, e.message, e.published == null ? null : e.published.revision());
+        } catch (PageConflictException conflict) {
+            e.lifecycle = e.baselineCommitted ? "PARTIAL" : "FAILED";
+            e.message = e.baselineCommitted ? "MANUAL_KEPT_ENHANCEMENT_CANDIDATE" : "BASELINE_WRITE_FAILED";
+            try {
+                if (e.publishing) e.publicationFailed();
+                else if (e.candidate != null) candidate(request, e.candidate);
+            } catch (Exception ignored) {}
+            return record.withSettled(e.lifecycle, e.message, e.published == null ? null : e.published.revision());
+        } catch (Exception failure) {
+            e.lifecycle = e.baselineCommitted ? "PARTIAL" : "FAILED";
+            e.message = e.baselineCommitted ? "ENHANCEMENT_FAILED_BASELINE_KEPT" : "PROCESSING_FAILED_CONTENT_KEPT";
+            try {
+                if (e.publishing) e.publicationFailed();
+                else if (!e.baselineCommitted && e.old != null) {
+                    String detail = JobService.safeDetail(failure);
+                    e.restore(e.old, "第 " + request.page() + " 页处理失败" + (detail == null ? "" : "：" + detail));
+                }
+            } catch (Exception ignored) {}
+            return record.withSettled(e.lifecycle, e.message, e.published == null ? null : e.published.revision());
+        } finally {
+            if (closeScope && scope != null) {
+                scope.close();
+            }
+        }
+    }
+
+    public PageExecutionRecord executeEnhancement(Request request, PageExecutionRecord record) {
+        Execution e = new Execution(request);
+        e.baselineCommitted = true;
+        e.published = store.readPage(request.book(), request.page());
+        boolean closeScope = false;
+        QwenExecutionScope scope = null;
+        if (QwenExecutionScope.current() == null) {
+            scope = QwenExecutionScope.open(request.attempt(), gate,
+                    priority != null && priority.foreground(request.book(), request.page()));
+            closeScope = true;
+        }
+        try {
+            e.runEnhancement();
+            return record.withSettled(e.lifecycle, e.message, e.published == null ? null : e.published.revision());
+        } catch (CancelledException | java.util.concurrent.CancellationException cancelled) {
+            e.lifecycle = "CANCELLED"; e.message = "CANCELLED_CONTENT_KEPT";
+            return record.withSettled(e.lifecycle, e.message, e.published == null ? null : e.published.revision());
+        } catch (PageConflictException conflict) {
+            e.lifecycle = "PARTIAL";
+            e.message = "MANUAL_KEPT_ENHANCEMENT_CANDIDATE";
+            try {
+                if (e.publishing) e.publicationFailed();
+                else if (e.candidate != null) candidate(request, e.candidate);
+            } catch (Exception ignored) {}
+            return record.withSettled(e.lifecycle, e.message, e.published == null ? null : e.published.revision());
+        } catch (Exception failure) {
+            e.lifecycle = "PARTIAL";
+            e.message = "ENHANCEMENT_FAILED_BASELINE_KEPT";
+            try {
+                if (e.publishing) e.publicationFailed();
+            } catch (Exception ignored) {}
+            return record.withSettled(e.lifecycle, e.message, e.published == null ? null : e.published.revision());
+        } finally {
+            if (closeScope && scope != null) {
+                scope.close();
+            }
+        }
+    }
+
+    public Result settle(Request request, PageExecutionRecord record) {
+        String lifecycle = record.lifecycle();
+        String message = record.messageCode();
+        if ((request.cancelled().getAsBoolean() || Thread.currentThread().isInterrupted())) {
+            lifecycle = "CANCELLED"; message = "CANCELLED_CONTENT_KEPT";
+        }
+        try {
+            if ("SUCCEEDED".equals(lifecycle)) completePageUnit(request);
+            lifecycle = effectiveOutcome(request, lifecycle);
+        } catch (RuntimeException projectionFailed) {
+            lifecycle = record.stage() == PageExecutionRecord.Stage.BASELINE_COMMITTED ? "PARTIAL" : "FAILED";
+            message = "PROGRESS_REDUCTION_FAILED";
+        } finally {
+            lifecycle = finish(request.attempt(), lifecycle, message);
+            if ("UNKNOWN".equals(lifecycle)) message = "ATTEMPT_JOURNAL_WRITE_FAILED";
+        }
+        return new Result(lifecycle, message, record.publishedRevision());
+    }
+
     public Result execute(Request request) {
         Execution e=new Execution(request);
         try (QwenExecutionScope scope=QwenExecutionScope.open(request.attempt(),gate,
@@ -62,13 +164,22 @@ public final class PageProcessingService {
         }
         return new Result(e.lifecycle,e.message,e.published==null?null:e.published.revision());
     }
+
     private final class Execution {
         final Request r;
         Page old, published, candidate;
         boolean baselineCommitted, decided, publishing;
         String lifecycle="FAILED", message="PAGE_PROCESSING_FAILED";
         Execution(Request request) { r=request; }
+
         void run() throws Exception {
+            runBaseline();
+            if (!decided) {
+                runEnhancement();
+            }
+        }
+
+        void runBaseline() throws Exception {
             check(r);
             old=store.readPage(r.book(),r.page());
             if(old==null) throw new OcrException("页面记录不存在");
@@ -106,6 +217,12 @@ public final class PageProcessingService {
             if(!enhance) { lifecycle="SUCCEEDED"; message=noText?"NO_TEXT_EVIDENCE_COMPLETE":"BASELINE_ONLY"; decided=true; return; }
             // Persist phase ownership before optional calls; never lose an already-readable baseline.
             store.finishPageAttempt(r.attempt(),"BASELINE_PUBLISHED");
+        }
+
+        void runEnhancement() throws Exception {
+            if (published == null) {
+                published = store.readPage(r.book(), r.page());
+            }
             check(r); stage(r,"STRUCTURE");
             store.verifyAttemptForDispatch(r.attempt(),CommitOp.JOB_ENHANCEMENT);
             PageProcessor.EnrichResult enhanced=processor.enrichBaseline(r.book(),r.page(),published,r.provider(),r.layout(),r.cancelled());
