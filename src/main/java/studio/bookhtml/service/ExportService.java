@@ -364,23 +364,34 @@ public class ExportService {
         zip.closeEntry();
     }
 
+    private ImageArtifact renderPageArtifact(Path sourcePdf, int pageNumber, int width) throws IOException {
+        ImageArtifact artifact = pdf.renderArtifact(sourcePdf, pageNumber, width);
+        if (artifact != null) return artifact;
+        BufferedImage image = pdf.render(sourcePdf, pageNumber, width);
+        if (image != null) return new ResourceBudgetManager().wrapImage(image);
+        return null;
+    }
+
     private void writeSinglePageImages(ZipOutputStream zip, Path sourcePdf, Page page, Page readingPage) throws IOException {
-        BufferedImage image = pdf.render(sourcePdf, page.pageNumber(), EXPORT_IMAGE_WIDTH);
-        try {
-            putPng(zip, "assets/pages/" + page.pageNumber() + ".png", image);
-            List<Block> blocks = readingPage.blocks() == null ? List.of() : readingPage.blocks();
-            for (int index = 0; index < blocks.size(); index++) {
-                Block block = blocks.get(index);
-                if (!imageBlock(block) || !validBbox(block.bbox())) continue;
-                BufferedImage crop = crop(image, block.bbox());
-                try {
-                    putPng(zip, figureName(page.pageNumber(), index), crop);
-                } finally {
-                    crop.flush();
+        try (ImageArtifact artifact = renderPageArtifact(sourcePdf, page.pageNumber(), EXPORT_IMAGE_WIDTH)) {
+            if (artifact == null) return;
+            BufferedImage image = artifact.image();
+            try {
+                putPng(zip, "assets/pages/" + page.pageNumber() + ".png", image);
+                List<Block> blocks = readingPage.blocks() == null ? List.of() : readingPage.blocks();
+                for (int index = 0; index < blocks.size(); index++) {
+                    Block block = blocks.get(index);
+                    if (!imageBlock(block) || !validBbox(block.bbox())) continue;
+                    BufferedImage crop = crop(image, block.bbox());
+                    try {
+                        putPng(zip, figureName(page.pageNumber(), index), crop);
+                    } finally {
+                        crop.flush();
+                    }
                 }
+            } finally {
+                image.flush();
             }
-        } finally {
-            image.flush();
         }
     }
 
@@ -540,23 +551,26 @@ public class ExportService {
     private void writeReadyPageImages(ZipOutputStream zip, Path sourcePdf, List<Page> pages) throws IOException {
         for (Page page : pages) {
             if (!ready(page)) continue;
-            BufferedImage image = pdf.render(sourcePdf, page.pageNumber(), EXPORT_IMAGE_WIDTH);
-            try {
-                putPng(zip, "assets/pages/" + page.pageNumber() + ".png", image);
-                Page readingPage = ReadingStructureNormalizer.normalize(page);
-                List<Block> blocks = readingPage.blocks() == null ? List.of() : readingPage.blocks();
-                for (int index = 0; index < blocks.size(); index++) {
-                    Block block = blocks.get(index);
-                    if (!imageBlock(block) || !validBbox(block.bbox())) continue;
-                    BufferedImage crop = crop(image, block.bbox());
-                    try {
-                        putPng(zip, figureName(page.pageNumber(), index), crop);
-                    } finally {
-                        crop.flush();
+            try (ImageArtifact artifact = renderPageArtifact(sourcePdf, page.pageNumber(), EXPORT_IMAGE_WIDTH)) {
+                if (artifact == null) continue;
+                BufferedImage image = artifact.image();
+                try {
+                    putPng(zip, "assets/pages/" + page.pageNumber() + ".png", image);
+                    Page readingPage = ReadingStructureNormalizer.normalize(page);
+                    List<Block> blocks = readingPage.blocks() == null ? List.of() : readingPage.blocks();
+                    for (int index = 0; index < blocks.size(); index++) {
+                        Block block = blocks.get(index);
+                        if (!imageBlock(block) || !validBbox(block.bbox())) continue;
+                        BufferedImage crop = crop(image, block.bbox());
+                        try {
+                            putPng(zip, figureName(page.pageNumber(), index), crop);
+                        } finally {
+                            crop.flush();
+                        }
                     }
+                } finally {
+                    image.flush();
                 }
-            } finally {
-                image.flush();
             }
         }
     }

@@ -18,7 +18,7 @@
   "baselineSha": "eb89822cf477a3beb3472cf114ab8b3fd09b3f6e",
   "currentBranch": "harden/remaining-eb89822-20260923",
   "currentHeadSha": "eb89822cf477a3beb3472cf114ab8b3fd09b3f6e",
-  "requiredCodeGapsRemaining": ["G01", "G02", "G03", "G04", "G05", "G06", "G07", "G08", "G09", "G10", "G11", "G12", "G13", "G14", "G15", "G16"],
+  "requiredCodeGapsRemaining": ["G01", "G02", "G03", "G04", "G05", "G06", "G07", "G08", "G09", "G11", "G12", "G13", "G14", "G15", "G16"],
   "failedGates": [],
   "blockedExternal": ["E01", "E02", "E03", "E04", "E05", "E06", "E07", "E08"],
   "skippedTests": [],
@@ -28,11 +28,12 @@
 
 ---
 
-## 2. 基线测试实测证据 (B00 产物)
+## 2. 基线与批次测试实测证据
 
 | 测试套件 | 运行环境 | 实测通过项 | 失败/错误 | 跳过项 | 状态 | 证据 |
 |---|---|---|---|---|---|---|
-| Java 完整套件 | Oracle JDK 17.0.17 | 653 | 0 | 0 | PASS | `mvn test` 全部通过 |
+| Java 完整套件 (B01 后) | Oracle JDK 17.0.17 | 666 | 0 | 0 | PASS | `mvn test` 全部通过 (含4套B01专项用例) |
+| Java 完整套件 (B00 基线) | Oracle JDK 17.0.17 | 653 | 0 | 0 | PASS | `mvn test` 全部通过 |
 | Node 端到端/退避 | Node.js v22 | 10 | 0 | 0 | PASS | `scripts/verification/probe_final_gaps.mjs` |
 | Node 专注模式探针 | Node.js v22 | 3 | 0 | 0 | PASS | `scripts/verification/probe_focus_reading.mjs` |
 | Node 扫描回退探针 | Node.js v22 | 5 | 0 | 0 | PASS | `scripts/verification/probe_scan_empty.mjs` |
@@ -84,7 +85,7 @@
 | **G07** | B04/B05 | PARTIAL_CODE | 统一幂等准入、operationEpoch（30天/4096上限）与批量快照持久化 | 待实现 |
 | **G08** | B07 | PARTIAL_CODE | BookContentProfile + 严格 ContextSnapshot + JEV 接受锁内依赖校验 | 待实现 |
 | **G09** | B08 | TODO_CODE | 完整 V3 固定计划（父 planHash/子 reviewPlanHash/contextHash/持久 eventSeq） | 待实现 |
-| **G10** | B01 | PARTIAL_CODE | 图像解码图、子图、PNG、Base64、请求体及临时磁盘完整字节租约 | **进行中 (B01)** |
+| **G10** | B01 | DONE | 图像解码图、子图、PNG、Base64、请求体及临时磁盘完整字节租约 | 666 套件全绿，4 套新增专项实测 PASS |
 | **G11** | B09 | PARTIAL_CODE | 前端 12页/32MiB 缓存双上限、校对工作台按需挂载、交互会话守卫 | 待实现 |
 | **G12** | B10 | TODO_VERIFY | 冻结 ExportSnapshot、不可信脚本转义、ZIP 路径穿越与离线一致性 | 待实现 |
 | **G13** | B11 | PARTIAL_CODE | LAN 配对与能力分级认证、统一外发白名单、严格 CSP、秘密轮换演练 | 待实现 |
@@ -103,19 +104,23 @@
 | **B00-03** | B00 | DONE | 建立全模型物理调用外发清单（13个外发点与凭据属性） | 见本文件第 3 节 | 清单已建立 |
 | **B00-04** | B00 | DONE | 运行 Java 17 653 套件、Node 3 套探针、Python 19 套件、密钥扫描 | 见本文件第 2 节 | 全部实测 PASS |
 | **B00-05** | B00 | DONE | 建立全局容量配置与溢出检查清单（5项高危问题） | 见本文件第 4 节 | 规划进对应批次 |
-| **B01-01** | B01 | TODO_CODE | 新增 `ResourceBudgetManager`，实现引用计数租约与防溢出预算 | 待编写 | 待测试 |
-| **B01-02** | B01 | TODO_CODE | `PdfService` 返回 `ImageArtifact`，调用者持有租约至消费结束 | 待编写 | 待测试 |
-| **B01-03** | B01 | TODO_CODE | 子图与缩放图所有权管理，按需编码输出限制 | 待编写 | 待测试 |
-| **B01-04** | B01 | TODO_CODE | Controller 输出、证据收集与导出持有租约至流关闭 | 待编写 | 待测试 |
-| **B01-05** | B01 | TODO_CODE | 隔离渲染进程与临时磁盘限额管理 | 待编写 | 待测试 |
-| **B01-06** | B01 | TODO_CODE | 多页/多模型混合资源并发压力回归 | 待编写 | 待测试 |
+| **B01-01** | B01 | DONE | 新增 `ResourceBudgetManager`，实现引用计数租约与防溢出预算 | `ResidentImageBudgetTest` | 实测 PASS |
+| **B01-02** | B01 | DONE | `PdfService` 返回 `ImageArtifact`，调用者持有租约至消费结束 | `ImageOwnershipTest` | 实测 PASS |
+| **B01-03** | B01 | DONE | 子图与缩放图所有权管理，按需编码输出限制 | `BoundedByteOutputStream`，`cropArtifact` | 实测 PASS |
+| **B01-04** | B01 | DONE | Controller 输出、证据收集与导出持有租约至流关闭 | `ExportService`、`BookService` 改造 | 实测 PASS |
+| **B01-05** | B01 | DONE | 隔离渲染进程与临时磁盘限额管理 | `RenderProcessResourceTest` | 实测 PASS |
+| **B01-06** | B01 | DONE | 多页/多模型混合资源并发压力回归 | `ResidentImageBudgetTest` 溢出与上限 | 666/666 PASS |
+| **B02-01** | B02 | TODO_CODE | 实现 `DurableEventJournal` 与 `AtomicManifestStore` | `LedgerJournalTest` | 待实现 |
+| **B02-02** | B02 | TODO_CODE | `UsageLedger` 改造为追加日志写与内存分片索引 | `UsageLedgerTest` | 待实现 |
+| **B02-03** | B02 | TODO_CODE | 实现定期 Checkpoint 生成与 WAL 截断归档 | `LedgerCheckpointRecoveryTest` | 待实现 |
+| **B02-04** | B02 | TODO_CODE | 保持 UNKNOWN 债务在归档时的完整性 | `LedgerAdmissionScaleTest` | 待实现 |
 
-*(后续批次 B02～B13 子任务随各批次执行实时更新)*
+*(后续批次 B03～B13 子任务随各批次执行实时更新)*
 
 ---
 
 ## 7. 下一步行动
-立即执行 **B01 批次**（图像/请求内存、渲染与临时磁盘的完整所有权）：
-1. 编写失败用例与保护测试：`ImageOwnershipTest` 与 `ResidentImageBudgetTest`。
-2. 实现 `ImageArtifact`、`EncodedImageArtifact` 与 `ResourceBudgetManager`。
-3. 改造 `PdfService` 与调用方，保证图像在真实使用期内持续持有字节租约，支持跨线程安全释放与引用计数。
+立即执行 **B02 批次**（账本有界追加日志、检查点、分页索引、增量汇总与归档 / G01）：
+1. 编写失败用例与恢复测试：`LedgerJournalTest`、`LedgerCheckpointRecoveryTest`、`LedgerAdmissionScaleTest`。
+2. 实现 `DurableEventJournal` 与 `AtomicManifestStore`。
+3. 改造 `UsageLedger`，消除 10 万条热路径全局扫描，实现原子检查点与有界追加写。

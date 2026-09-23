@@ -98,15 +98,22 @@ public class PdfService {
             return result;
         }
     }
-    public BufferedImage render(Path pdf, int pageNumber, int requestedWidth) throws IOException {
+    public PdfService(RenderBudget budget, IsolatedPdfRender isolated) {
+        this(1800, PdfService::decoderAvailable, budget, isolated);
+    }
+
+    public ImageArtifact renderArtifact(Path pdf, int pageNumber, int requestedWidth) throws IOException {
         int width = Math.max(196, Math.min(requestedWidth, maxImageWidth));
         Dimensions dimensions = dimensions(pdf, pageNumber);
         float dpi = boundedDpi(dimensions, pageNumber, width, 36, 300, MAX_RENDER_PIXELS);
         long pixels = renderedPixels(dimensions.width(), dpi) * renderedPixels(dimensions.height(), dpi);
+        long estimatedBytes = ResourceBudgetManager.calculatePixelBytes(
+                (int) Math.max(1, renderedPixels(dimensions.width(), dpi)),
+                (int) Math.max(1, renderedPixels(dimensions.height(), dpi)));
         // 阶段2：高风险页走独立进程，避免坏页拖垮主服务；普通页走共享预算
         if (isolated != null && isolated.shouldIsolate(pdf, pixels, pageNumber)) {
             try {
-                return isolated.renderIsolated(pdf, pageNumber, false, width, pixels * 4, PdfService::interrupted);
+                return isolated.renderIsolatedArtifact(pdf, pageNumber, false, width, estimatedBytes, PdfService::interrupted);
             } catch (CancelledException e) {
                 throw new IOException("页面渲染已取消", e);
             } catch (ApiException e) {
@@ -115,38 +122,66 @@ public class PdfService {
                 throw new IOException("页面渲染失败", e);
             }
         }
-        // 阶段2：共享预算租约覆盖解码至图片/编码副本不再使用；所有异常/finally 路径归还配额。
-        // 注意：此处不 catch OutOfMemoryError——监测只用于提前调度，不能作为 OOM 恢复机制。
-        try (RenderBudget.Lease ignored = acquire(pixels * 4)) {
-            try (PDDocument document = loadPdf(pdf)) {
-                validatePage(document, pageNumber); PDPage page = document.getPage(pageNumber - 1);
-                BufferedImage source = renderPage(document, pageNumber, dpi);
-                double scale = Math.min(1d, Math.min(width / (double)source.getWidth(), Math.sqrt(MAX_RENDER_PIXELS / (double)((long)source.getWidth()*source.getHeight()))));
-                if (scale >= .999) return source;
-                width = Math.max(1, (int)Math.floor(source.getWidth()*scale));
-                int height = Math.max(1, (int)Math.floor(source.getHeight()*scale));
-                BufferedImage scaled = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
-                Graphics2D g = scaled.createGraphics();
-                try { g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC); g.drawImage(source, 0, 0, width, height, null); }
-                finally { g.dispose(); source.flush(); }
-                return scaled;
-            }
+        RenderBudget.Lease lease;
+        try {
+            lease = acquire(estimatedBytes);
         } catch (CancelledException e) {
             throw new IOException("页面渲染已取消", e);
         } catch (ApiException e) {
             throw e;
         } catch (Exception e) {
+            throw new IOException("页面渲染预算获取失败", e);
+        }
+        try {
+            BufferedImage scaled;
+            try (PDDocument document = loadPdf(pdf)) {
+                validatePage(document, pageNumber);
+                PDPage page = document.getPage(pageNumber - 1);
+                BufferedImage source = renderPage(document, pageNumber, dpi);
+                double scale = Math.min(1d, Math.min(width / (double)source.getWidth(), Math.sqrt(MAX_RENDER_PIXELS / (double)((long)source.getWidth()*source.getHeight()))));
+                if (scale >= .999) {
+                    scaled = source;
+                } else {
+                    width = Math.max(1, (int)Math.floor(source.getWidth()*scale));
+                    int height = Math.max(1, (int)Math.floor(source.getHeight()*scale));
+                    scaled = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+                    Graphics2D g = scaled.createGraphics();
+                    try {
+                        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+                        g.drawImage(source, 0, 0, width, height, null);
+                    } finally {
+                        g.dispose();
+                        source.flush();
+                    }
+                }
+            }
+            ResourceBudgetManager.Ticket byteTicket = lease.detachImageByteTicket();
+            RenderBudget effectiveBudget = budget != null ? budget : UNLIMITED;
+            return effectiveBudget.manager().wrapImage(scaled, byteTicket);
+        } catch (Exception e) {
+            lease.close();
+            if (e instanceof ApiException api) throw api;
             if (e instanceof IOException io) throw io;
             throw new IOException("页面渲染失败", e);
         }
     }
-    public BufferedImage renderForOcr(Path pdf,int pageNumber)throws IOException{
+
+    public BufferedImage render(Path pdf, int pageNumber, int requestedWidth) throws IOException {
+        try (ImageArtifact artifact = renderArtifact(pdf, pageNumber, requestedWidth)) {
+            return artifact.image();
+        }
+    }
+
+    public ImageArtifact renderForOcrArtifact(Path pdf, int pageNumber) throws IOException {
         Dimensions dimensions = dimensions(pdf, pageNumber);
         float dpi = boundedDpi(dimensions, pageNumber, 4200, 72, 400, MAX_OCR_PIXELS);
         long pixels = renderedPixels(dimensions.width(), dpi) * renderedPixels(dimensions.height(), dpi);
+        long estimatedBytes = ResourceBudgetManager.calculatePixelBytes(
+                (int) Math.max(1, renderedPixels(dimensions.width(), dpi)),
+                (int) Math.max(1, renderedPixels(dimensions.height(), dpi)));
         if (isolated != null && isolated.shouldIsolate(pdf, pixels, pageNumber)) {
             try {
-                return isolated.renderIsolated(pdf, pageNumber, true, 1800, pixels * 4, PdfService::interrupted);
+                return isolated.renderIsolatedArtifact(pdf, pageNumber, true, 1800, estimatedBytes, PdfService::interrupted);
             } catch (CancelledException e) {
                 throw new IOException("页面渲染已取消", e);
             } catch (ApiException e) {
@@ -155,36 +190,95 @@ public class PdfService {
                 throw new IOException("页面渲染失败", e);
             }
         }
-        try (RenderBudget.Lease ignored = acquire(pixels * 4)) {
-            try(PDDocument document=loadPdf(pdf)){validatePage(document,pageNumber);PDPage page=document.getPage(pageNumber-1);BufferedImage source=renderPage(document,pageNumber,dpi);double scale=Math.min(1d,Math.sqrt(MAX_OCR_PIXELS/(double)((long)source.getWidth()*source.getHeight())));if(scale>=.999)return source;int w=Math.max(1,(int)Math.floor(source.getWidth()*scale)),h=Math.max(1,(int)Math.floor(source.getHeight()*scale));BufferedImage result=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB);Graphics2D g=result.createGraphics();try{g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,RenderingHints.VALUE_INTERPOLATION_BICUBIC);g.drawImage(source,0,0,w,h,null);}finally{g.dispose();source.flush();}return result;}
+        RenderBudget.Lease lease;
+        try {
+            lease = acquire(estimatedBytes);
         } catch (CancelledException e) {
             throw new IOException("页面渲染已取消", e);
         } catch (ApiException e) {
             throw e;
         } catch (Exception e) {
+            throw new IOException("页面渲染预算获取失败", e);
+        }
+        try {
+            BufferedImage scaled;
+            try (PDDocument document = loadPdf(pdf)) {
+                validatePage(document, pageNumber);
+                PDPage page = document.getPage(pageNumber - 1);
+                BufferedImage source = renderPage(document, pageNumber, dpi);
+                double scale = Math.min(1d, Math.sqrt(MAX_OCR_PIXELS / (double)((long)source.getWidth() * source.getHeight())));
+                if (scale >= .999) {
+                    scaled = source;
+                } else {
+                    int w = Math.max(1, (int)Math.floor(source.getWidth() * scale));
+                    int h = Math.max(1, (int)Math.floor(source.getHeight() * scale));
+                    scaled = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+                    Graphics2D g = scaled.createGraphics();
+                    try {
+                        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+                        g.drawImage(source, 0, 0, w, h, null);
+                    } finally {
+                        g.dispose();
+                        source.flush();
+                    }
+                }
+            }
+            ResourceBudgetManager.Ticket byteTicket = lease.detachImageByteTicket();
+            RenderBudget effectiveBudget = budget != null ? budget : UNLIMITED;
+            return effectiveBudget.manager().wrapImage(scaled, byteTicket);
+        } catch (Exception e) {
+            lease.close();
+            if (e instanceof ApiException api) throw api;
             if (e instanceof IOException io) throw io;
             throw new IOException("页面渲染失败", e);
         }
     }
+
+    public BufferedImage renderForOcr(Path pdf, int pageNumber) throws IOException {
+        try (ImageArtifact artifact = renderForOcrArtifact(pdf, pageNumber)) {
+            return artifact.image();
+        }
+    }
+
     private static final RenderBudget UNLIMITED =
-            new RenderBudget(1024, Long.MAX_VALUE, 1, () -> 0, () -> 0);
+            new RenderBudget(new ResourceBudgetManager(1024, Long.MAX_VALUE, 1, () -> 0, () -> 0));
+
     private RenderBudget.Lease acquire(long estimatedBytes) throws Exception {
         // 测试构造（budget==null）走无限制预算，保持原有纯解码行为可测
         if (budget == null) return UNLIMITED.acquire(0, () -> false);
         return budget.acquire(estimatedBytes, PdfService::interrupted);
     }
+
     private static boolean interrupted() { return Thread.currentThread().isInterrupted(); }
+
     public byte[] png(BufferedImage image) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream(); ImageIO.write(image, "png", out); return out.toByteArray();
+        BoundedByteOutputStream out = new BoundedByteOutputStream(10 * 1024 * 1024L);
+        if (!ImageIO.write(image, "png", out)) {
+            throw new IOException("PNG 图像编码失败");
+        }
+        return out.toByteArray();
     }
+
+    public byte[] pngArtifact(ImageArtifact artifact) throws IOException {
+        return png(artifact.image());
+    }
+
+    public ImageArtifact cropArtifact(ImageArtifact source, double[] bbox) {
+        BlockValidator.validateBbox(bbox);
+        BufferedImage image = source.image();
+        int x = clamp((int)Math.floor(bbox[0] * image.getWidth()), 0, image.getWidth()-1);
+        int y = clamp((int)Math.floor(bbox[1] * image.getHeight()), 0, image.getHeight()-1);
+        int w = clamp((int)Math.ceil(bbox[2] * image.getWidth()), 1, image.getWidth()-x);
+        int h = clamp((int)Math.ceil(bbox[3] * image.getHeight()), 1, image.getHeight()-y);
+        return source.subImage(x, y, w, h);
+    }
+
     public byte[] cropPng(Path pdf, int page, int width, double[] bbox) throws IOException {
-        BlockValidator.validateBbox(bbox); BufferedImage image = render(pdf, page, width);
-        try {int x = clamp((int)Math.floor(bbox[0] * image.getWidth()), 0, image.getWidth()-1);
-            int y = clamp((int)Math.floor(bbox[1] * image.getHeight()), 0, image.getHeight()-1);
-            int w = clamp((int)Math.ceil(bbox[2] * image.getWidth()), 1, image.getWidth()-x);
-            int h = clamp((int)Math.ceil(bbox[3] * image.getHeight()), 1, image.getHeight()-y);
-            return png(image.getSubimage(x, y, w, h));
-        } finally { image.flush(); }
+        BlockValidator.validateBbox(bbox);
+        try (ImageArtifact artifact = renderArtifact(pdf, page, width);
+             ImageArtifact cropped = cropArtifact(artifact, bbox)) {
+            return png(cropped.image());
+        }
     }
     private static int clamp(int n, int low, int high) { return Math.max(low, Math.min(n, high)); }
     private static float boundedDpi(Dimensions dimensions, int pageNumber, int targetWidth,

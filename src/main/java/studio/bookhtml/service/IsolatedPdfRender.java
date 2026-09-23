@@ -90,8 +90,8 @@ public class IsolatedPdfRender {
         return riskyPages.contains(riskKey(pdf, pageNumber));
     }
 
-    public BufferedImage renderIsolated(Path pdf, int pageNumber, boolean ocr, int width,
-                                        long estimatedBytes, BooleanSupplier cancelled) throws Exception {
+    public ImageArtifact renderIsolatedArtifact(Path pdf, int pageNumber, boolean ocr, int width,
+                                                long estimatedBytes, BooleanSupplier cancelled) throws Exception {
         Path source = pdf.toAbsolutePath().normalize();
         if (!Files.isRegularFile(source)) throw new ApiException(HttpStatus.NOT_FOUND, "页码不存在");
         Files.createDirectories(tmpDir);
@@ -100,15 +100,29 @@ public class IsolatedPdfRender {
             throw new ApiException(HttpStatus.INSUFFICIENT_STORAGE, "临时磁盘空间不足，无法渲染本页");
         }
         // 父子总预算：主预算在途字节 + 同活 worker 数上限；租约覆盖子进程存活期
-        try (RenderBudget.Lease ignored = budget.acquire(estimatedBytes, cancelled)) {
+        RenderBudget.Lease lease = budget.acquire(estimatedBytes, cancelled);
+        try {
             if (!isolatedPermits.tryAcquire(Math.max(1, timeoutSeconds), TimeUnit.SECONDS)) {
                 throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "系统繁忙，请稍后重试");
             }
+            BufferedImage image;
             try {
-                return runWorker(source, pageNumber, ocr, width, cancelled);
+                image = runWorker(source, pageNumber, ocr, width, cancelled);
             } finally {
                 isolatedPermits.release();
             }
+            ResourceBudgetManager.Ticket byteTicket = lease.detachImageByteTicket();
+            return budget.manager().wrapImage(image, byteTicket);
+        } catch (Exception e) {
+            lease.close();
+            throw e;
+        }
+    }
+
+    public BufferedImage renderIsolated(Path pdf, int pageNumber, boolean ocr, int width,
+                                        long estimatedBytes, BooleanSupplier cancelled) throws Exception {
+        try (ImageArtifact artifact = renderIsolatedArtifact(pdf, pageNumber, ocr, width, estimatedBytes, cancelled)) {
+            return artifact.image();
         }
     }
 

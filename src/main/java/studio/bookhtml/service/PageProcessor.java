@@ -10,6 +10,7 @@ import studio.bookhtml.store.BookStore;
 
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.function.BooleanSupplier;
@@ -43,6 +44,22 @@ public class PageProcessor {
     public ProcessingResult processBaseline(String bookId,int pageNumber,String provider,String layout,boolean split,BooleanSupplier cancelled)throws Exception{
         return process(bookId,pageNumber,provider,layout,split,false,cancelled);
     }
+    private ImageArtifact renderForOcrArtifact(Path pdfPath, int pageNumber) throws IOException {
+        ImageArtifact artifact = pdf.renderForOcrArtifact(pdfPath, pageNumber);
+        if (artifact != null) return artifact;
+        BufferedImage img = pdf.renderForOcr(pdfPath, pageNumber);
+        if (img != null) return new ResourceBudgetManager().wrapImage(img);
+        return null;
+    }
+
+    private ImageArtifact renderArtifact(Path pdfPath, int pageNumber, int targetWidth) throws IOException {
+        ImageArtifact artifact = pdf.renderArtifact(pdfPath, pageNumber, targetWidth);
+        if (artifact != null) return artifact;
+        BufferedImage img = pdf.render(pdfPath, pageNumber, targetWidth);
+        if (img != null) return new ResourceBudgetManager().wrapImage(img);
+        return null;
+    }
+
     public ProcessingResult process(String bookId,int pageNumber,String provider,String layout,boolean split,boolean assist,BooleanSupplier cancelled)throws Exception{
         try(UsageContext.Scope ignored=UsageContext.open(bookId,pageNumber,"OCR_PAGE");
             QwenExecutionScope execution=QwenExecutionScope.open(bookId,pageNumber,gate,
@@ -52,11 +69,13 @@ public class PageProcessor {
         if(nativeBlocks.isPresent()&&!nativeBlocks.get().isEmpty()&&!preferOcrOverNative(store.pdf(bookId),pageNumber,nativeBlocks.get(),warnings,cancelled)){
             blocks=nativeBlocks.get();sourceRecords=List.copyOf(blocks);actualProvider="native";
             if(assist&&PaddleOcrPipeline.isPaddle(provider)){AssistResult result=assistWithQwen(store.pdf(bookId),pageNumber,blocks,layout,cancelled);blocks=guardedAssist(blocks,result.blocks(),warnings,"Qwen3.8-Max 结构辅助来源校验失败，已保留原生文字层",QualityGate.GateOp.REORDER_OR_RECLASSIFY);blocks=simplify(blocks);if(result.assisted())actualProvider="native+qwen-assist";else warnings.add(result.warning());}
-            else if(assist&&"qwen".equals(provider)){if(miniMax.configured()){BufferedImage image=pdf.renderForOcr(store.pdf(bookId),pageNumber);try{List<Block> assisted=miniMax.assist(qwenOcr.encodeWithin(image).bytes(),blocks,layout,cancelled);blocks=simplify(guardedAssist(blocks,assisted,warnings,"MiniMax 结构辅助来源校验失败，已保留原生文字层",QualityGate.GateOp.REORDER_OR_RECLASSIFY));actualProvider="native+minimax";}catch(CancelledException e){throw e;}catch(Exception e){blocks=sourceRecords;warnings.add("MiniMax 结构辅助失败，本页保留原生文字层结果");}finally{image.flush();}}else warnings.add("MiniMax 辅助未配置，本页仅使用原生文字层");}
+            else if(assist&&"qwen".equals(provider)){if(miniMax.configured()){try(ImageArtifact artifact=renderForOcrArtifact(store.pdf(bookId),pageNumber)){if(artifact==null||artifact.image()==null)throw new OcrException("渲染页面图像为空");BufferedImage image=artifact.image();try{List<Block> assisted=miniMax.assist(qwenOcr.encodeWithin(image).bytes(),blocks,layout,cancelled);blocks=simplify(guardedAssist(blocks,assisted,warnings,"MiniMax 结构辅助来源校验失败，已保留原生文字层",QualityGate.GateOp.REORDER_OR_RECLASSIFY));actualProvider="native+minimax";}catch(CancelledException e){throw e;}catch(Exception e){blocks=sourceRecords;warnings.add("MiniMax 结构辅助失败，本页保留原生文字层结果");}}}else warnings.add("MiniMax 辅助未配置，本页仅使用原生文字层");}
             warnings.add("原生文字层已提取；自动顺序、图框与坐标仍需人工抽查");
         }else{
-            BufferedImage image=("qwen".equals(provider)||PaddleOcrPipeline.isPaddle(provider))?pdf.renderForOcr(store.pdf(bookId),pageNumber):pdf.render(store.pdf(bookId),pageNumber,1800);
-            try{
+            try(ImageArtifact artifact=("qwen".equals(provider)||PaddleOcrPipeline.isPaddle(provider))?renderForOcrArtifact(store.pdf(bookId),pageNumber):renderArtifact(store.pdf(bookId),pageNumber,1800)){
+                if(artifact==null||artifact.image()==null)throw new OcrException("渲染页面图像为空");
+                BufferedImage image=artifact.image();
+                try{
                 if(PaddleOcrPipeline.isPaddle(provider)){
                     PaddleResult paddleResult=recognizePaddleWithFallback(image,layout,split,provider,cancelled);
                     if(paddleResult.fallbackNote()!=null)warnings.add(paddleResult.fallbackNote());
@@ -127,7 +146,7 @@ public class PageProcessor {
                         throw new OcrException("本地 OCR 未返回可用文字，图像另有墨量，已标记失败供重试");
                     }
                     warnings.add("本地 OCR 仅为初稿，复杂图表、竖排和手写内容可能存在明显错字");}
-            }finally{image.flush();}
+            }finally{image.flush();}}
         }
         // 保真门和局部复核结束后才分类：只改派生块类型，原始 OCR sourceRecords 保持原样。
         AdvertisementFilter.Result advertisements=AdvertisementFilter.classify(blocks,previous.reviewed(),converter);
@@ -148,16 +167,19 @@ public class PageProcessor {
         double area=nativeBlocks.stream().filter(Objects::nonNull).map(Block::bbox).filter(b->b!=null&&b.length==4).mapToDouble(b->Math.max(0,b[2])*Math.max(0,b[3])).sum();
         if(chars>=200&&area>=0.05) return false;
         if(cancelled.getAsBoolean()) throw new CancelledException();
-        BufferedImage preview=null;
-        try{preview=this.pdf.render(pdfPath,pageNumber,900);}
+        final ImageArtifact previewArtifact;
+        try{previewArtifact=renderArtifact(pdfPath,pageNumber,900);}
         catch(CancelledException e){throw e;}
         catch(Exception e){if(cancelled.getAsBoolean())throw new CancelledException();warnings.add("原生文字层覆盖不足且原图预览失败，已保守改走图像识别");return true;}
-        if(preview==null){warnings.add("原生文字层覆盖不足且原图预览为空，已保守改走图像识别");return true;}
-        try{
-            boolean prefer=QualityGate.shouldPreferOcr(nativeBlocks,preview);
-            if(prefer) warnings.add("检测到原生文字层覆盖不足（字符少、图像墨量大），已改用图像识别以防漏识扫描内容");
-            return prefer;
-        }finally{if(preview!=null) preview.flush();}
+        if(previewArtifact==null || previewArtifact.image()==null){if(previewArtifact!=null) previewArtifact.close();warnings.add("原生文字层覆盖不足且原图预览为空，已保守改走图像识别");return true;}
+        try(ImageArtifact artifactToClose=previewArtifact){
+            BufferedImage preview = artifactToClose.image();
+            try{
+                boolean prefer=QualityGate.shouldPreferOcr(nativeBlocks,preview);
+                if(prefer) warnings.add("检测到原生文字层覆盖不足（字符少、图像墨量大），已改用图像识别以防漏识扫描内容");
+                return prefer;
+            }finally{preview.flush();}
+        }
     }
     /** 阶段3/F02：来源门禁——调用方显式声明操作类别；校验失败回退原始并警告，不悄悄交付。 */
     private List<Block> guardedAssist(List<Block> source,List<Block> assisted,List<String> warnings,String message,QualityGate.GateOp op){
@@ -327,7 +349,7 @@ public class PageProcessor {
         }
     }
 
-    private AssistResult assistWithQwen(Path pdfPath,int pageNumber,List<Block>source,String layout,BooleanSupplier cancelled)throws Exception{if(!qwenLayout.configured())return new AssistResult(source,false,"Qwen3.8-Max 结构辅助未配置，本页仅保留原生文字层");BufferedImage image=pdf.renderForOcr(pdfPath,pageNumber);try{return new AssistResult(qwenLayout.assist(qwenOcr.encodeWithin(image).bytes(),source,layout,cancelled),true,null);}catch(CancelledException e){throw e;}catch(Exception e){String detail=JobService.safeDetail(e);return new AssistResult(source,false,"Qwen3.8-Max 结构辅助失败，本页已保留原生文字层"+(detail==null?"":"："+detail));}finally{image.flush();}}
+    private AssistResult assistWithQwen(Path pdfPath,int pageNumber,List<Block>source,String layout,BooleanSupplier cancelled)throws Exception{if(!qwenLayout.configured())return new AssistResult(source,false,"Qwen3.8-Max 结构辅助未配置，本页仅保留原生文字层");try(ImageArtifact artifact=renderForOcrArtifact(pdfPath,pageNumber)){if(artifact==null||artifact.image()==null)return new AssistResult(source,false,"Qwen3.8-Max 结构辅助失败，渲染页面图像为空");BufferedImage image=artifact.image();try{return new AssistResult(qwenLayout.assist(qwenOcr.encodeWithin(image).bytes(),source,layout,cancelled),true,null);}catch(CancelledException e){throw e;}catch(Exception e){String detail=JobService.safeDetail(e);return new AssistResult(source,false,"Qwen3.8-Max 结构辅助失败，本页已保留原生文字层"+(detail==null?"":"："+detail));}}}
     /**
      * U4：可选增强阶段。只产生候选/派生结构，从不直接保存整页；调用方（JobService）
      * 经质量门与版本校验后最多发布一次合并结果。编排镜像 process() 内同名分支
@@ -356,7 +378,9 @@ public class PageProcessor {
         boolean baseNative=actualProvider.startsWith("native");
         boolean wantPaddle=PaddleOcrPipeline.isPaddle(provider);
         boolean wantQwen="qwen".equals(provider);
-        BufferedImage image=pdf.renderForOcr(store.pdf(bookId),pageNumber);
+        try(ImageArtifact artifact=renderForOcrArtifact(store.pdf(bookId),pageNumber)){
+        if(artifact==null||artifact.image()==null)throw new OcrException("渲染页面图像为空");
+        BufferedImage image=artifact.image();
         try{
             if(baseNative&&wantPaddle){
                 ChunkedOut chunked=tryChunkedAssist(bookId,pageNumber,blocks,image,layout,actualProvider,cancelled);
@@ -399,7 +423,7 @@ public class PageProcessor {
             if(advertisements.marked()>0)warnings.add("已标记 "+advertisements.marked()+" 个独立页边广告块；原稿和原始识别记录保留可查看");
             if(advertisements.heldForReview()>0)warnings.add("有 "+advertisements.heldForReview()+" 个疑似广告块含已确认疑点，未自动隐藏，请人工复核");
             return new EnrichResult(List.copyOf(blocks),actualProvider,List.copyOf(warnings),complete);
-        }finally{image.flush();}
+        }finally{image.flush();}}
         }
     }
     private List<Block>simplify(List<Block>blocks)throws OcrException{List<Block>result=new ArrayList<>();for(Block b:blocks){String original=b.original()==null?"":b.original();String simplified=converter.toSimplified(original);List<ContentIssue>issues=mapIssues(original,b.issues(),converter);result.add(new Block(b.id(),b.type(),b.order(),b.bbox(),b.writingMode(),b.original(),simplified,b.confidence(),true,false,b.headingLevel(),b.source(),b.sourceIds(),b.suggestion(),b.sourceRect(),issues));}BlockValidator.validate(result);return List.copyOf(result);}
