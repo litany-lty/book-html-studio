@@ -48,6 +48,20 @@ public class PhysicalCallService implements AutoCloseable {
         this.json = Objects.requireNonNull(json, "json");
     }
 
+    private studio.bookhtml.config.OutboundDestinationPolicy outboundPolicy =
+            new studio.bookhtml.config.OutboundDestinationPolicy();
+
+    @Autowired(required = false)
+    public void setOutboundPolicy(studio.bookhtml.config.OutboundDestinationPolicy outboundPolicy) {
+        if (outboundPolicy != null) {
+            this.outboundPolicy = outboundPolicy;
+        }
+    }
+
+    public studio.bookhtml.config.OutboundDestinationPolicy outboundPolicy() {
+        return outboundPolicy;
+    }
+
     @Autowired(required = false)
     public void setUsageLedger(UsageLedger ledger) {
         this.ledger = ledger;
@@ -129,6 +143,14 @@ public class PhysicalCallService implements AutoCloseable {
             HttpRequest request = factory.buildRequest();
             if (request == null) {
                 return new CallOutcome.NotSent("请求工厂未生成有效请求");
+            }
+
+            if (outboundPolicy != null && request.uri() != null) {
+                studio.bookhtml.config.OutboundDestinationPolicy.ValidationResult check =
+                        outboundPolicy.validate(request.uri());
+                if (!check.isAllowed()) {
+                    return new CallOutcome.NotSent("外发请求目的地址被策略阻断: " + check.reason());
+                }
             }
 
             // 6. Record possibly-sent state in durable ledger before network transport

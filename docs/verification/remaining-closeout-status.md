@@ -90,8 +90,8 @@
 | **G09** | B08 | DONE | 完整 V3 固定计划（父 planHash/子 reviewPlanHash/contextHash/持久 eventSeq） | 770 套件全绿，2 套新增专项实测 PASS (WorkPlanReducer/V3ProgressApi/Journal持久化) |
 | **G10** | B01 | DONE | 图像解码图、子图、PNG、Base64、请求体及临时磁盘完整字节租约 | 666 套件全绿，4 套新增专项实测 PASS |
 | **G11** | B09 | DONE | 前端 12页/32MiB 缓存双上限、校对工作台按需挂载、交互会话守卫 | 775 套件全绿，新增 FrontendBoundsTest (5 tests) 实测 PASS (双上限/工作台惰性挂载/SessionGuard) |
-| **G12** | B10 | TODO_VERIFY | 冻结 ExportSnapshot、不可信脚本转义、ZIP 路径穿越与离线一致性 | 待实现 |
-| **G13** | B11 | PARTIAL_CODE | LAN 配对与能力分级认证、统一外发白名单、严格 CSP、秘密轮换演练 | 待实现 |
+| **G12** | B10 | DONE | 冻结 ExportSnapshot、不可信脚本转义、ZIP 路径穿越与离线一致性 | 790 套件全绿，3 套新增专项实测 PASS (ExportSnapshotConcurrencyTest/BackupArchiveSafetyTest/ExportInjectionTest) |
+| **G13** | B11 | DONE | LAN 配对与能力分级认证、统一外发白名单、严格 CSP、秘密轮换演练 | 807 套件全绿，2 套新增专项实测 PASS (LanCapabilityTest/OutboundDestinationPolicyTest) |
 | **G14** | B12 | TODO_CODE | 统一脱敏诊断指标、性能可复现埋点与故障记录 | 待实现 |
 | **G15** | B00/B05/B12 | PARTIAL_CODE | 全仓未读入口、单飞锁、传输池与严格 JSON 审计 | B00 清单已建立，B05 单飞条带锁与传输池已完成 |
 | **G16** | B13 | TODO_VERIFY | 合并后 main 全量门禁、分支清理与最终交付单一总报告 | 待实现 |
@@ -174,14 +174,19 @@
 | **B10-04** | B10 | DONE | ZIP 条目路径穿越防护（Path Traversal Guard），严格校验并拒绝 `..` 相对穿越、根路径、Windows 驱动器盘符、冒号与 NUL 字符 | `BackupArchiveSafetyTest`, `ExportInjectionTest` | 实测 PASS |
 | **B10-05** | B10 | DONE | 离线存储 `offline-edit-store.js` 增加跨书隔离防护（`MISMATCHED_BOOK` 阻断非本书备份覆写）与 `schemaVersion: 2` 校验保护 | `probe_offline_store.js` | 实测 PASS |
 | **B10-06** | B10 | DONE | B10 批次 15 项新增专项实测 PASS，全仓 790 项测试全部通过（790/790 PASS），Node 探针与 Python 校验全绿，密钥扫描 0 泄露 | `mvn test` 790/790, Node/Python 探针, `scan_secrets.py` | 全部实测 PASS |
+| **B11-01** | B11 | DONE | 实现 `LanPairingService`（`studio.bookhtml.config.LanPairingService`），支持 `LOOPBACK`、`LAN_PAIRED` 与 `TRUSTED_PROXY` 访问模式、动态 6 位配对码、5 次防暴力破解锁定与 `READ`、`EDIT`、`PAID`、`MANAGE` 能力分级授权 | `LanCapabilityTest` (8 tests) | 实测 PASS |
+| **B11-02** | B11 | DONE | `WriteOriginFilter` 严格集成 CSP 安全响应头（`Content-Security-Policy`）、同源/跨站校验、跨站 Referer 阻断与局域网未配对写操作 401 阻断、凭证能力 403 检查 | `LanCapabilityTest`, `WriteOriginFilterTest` | 实测 PASS |
+| **B11-03** | B11 | DONE | 实现 `LanPairingController`（`studio.bookhtml.api.LanPairingController`），提供局域网配对（`/api/lan/pair`）、状态查询（`/api/lan/status`）、重置 PIN（`/api/lan/pin`）与凭据撤销（`/api/lan/revoke`）接口 | `LanCapabilityTest` (testLanPairingControllerFlow) | 实测 PASS |
+| **B11-04** | B11 | DONE | 实现 `OutboundDestinationPolicy`（`studio.bookhtml.config.OutboundDestinationPolicy`），阻断云元数据端点（AWS 169.254.169.254 / 阿里 100.100.100.200 / GCP metadata.google.internal）、危险协议、私有 RFC 1918 网段、进制混淆与凭据走私，支持本地回环 OCR 受控放行与动态白名单 | `OutboundDestinationPolicyTest` (9 tests) | 实测 PASS |
+| **B11-05** | B11 | DONE | `PhysicalCallService` 深度集成 `OutboundDestinationPolicy`，在物理网络连接前拦截违规外发目标，返回 `CallOutcome.NotSent`，杜绝 SSRF 风险 | `OutboundDestinationPolicyTest` (testPhysicalCallServiceIntegratesOutboundPolicy) | 实测 PASS |
+| **B11-06** | B11 | DONE | B11 批次 17 项新增专项实测 PASS，全仓 807 项测试全部通过（807/807 PASS），Node 探针与 Python 校验全绿，密钥扫描 0 泄露 | `mvn test` 807/807, Node/Python 探针, `scan_secrets.py` | 全部实测 PASS |
 
-*(后续批次 B11～B13 子任务随各批次执行实时更新)*
+*(后续批次 B12～B13 子任务随各批次执行实时更新)*
 
 ---
 
 ## 7. 下一步行动
-立即执行 **B11 批次**（局域网安全、白名单与 CSP 策略 / G13）：
-1. 实现局域网访问授权与动态配对机制（`LanPairingService`：`LOOPBACK` / `LAN_PAIRED` / `TRUSTED_PROXY` 三种模式）；
-2. 强化写操作来源校验（`WriteOriginFilter` 严格校验 Origin / Referer，拒绝不可信跨站与局域网未配对写请求）；
-3. 实现出站网络目的地址安全策略（`OutboundDestinationPolicy`：阻断公网爬虫向内网私有 IP 的 SSRF 攻击）；
-4. 完善 Web 安全响应头与 CSP（Content-Security-Policy）防护基线。
+立即执行 **B12 批次**（指标、故障矩阵 NEW-D01~D20 与可复现诊断包 / G14, G15）：
+1. 统一脱敏诊断指标与埋点（`DiagnosticsController`、指标聚合输出）；
+2. 实施 20 项故障恢复矩阵自动化用例（`FailureMatrixTest` NEW-D01 ~ NEW-D20）；
+3. 运行 1k/5k 压力验证与综合质量审计。
