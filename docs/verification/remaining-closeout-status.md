@@ -92,8 +92,8 @@
 | **G11** | B09 | DONE | 前端 12页/32MiB 缓存双上限、校对工作台按需挂载、交互会话守卫 | 775 套件全绿，新增 FrontendBoundsTest (5 tests) 实测 PASS (双上限/工作台惰性挂载/SessionGuard) |
 | **G12** | B10 | DONE | 冻结 ExportSnapshot、不可信脚本转义、ZIP 路径穿越与离线一致性 | 790 套件全绿，3 套新增专项实测 PASS (ExportSnapshotConcurrencyTest/BackupArchiveSafetyTest/ExportInjectionTest) |
 | **G13** | B11 | DONE | LAN 配对与能力分级认证、统一外发白名单、严格 CSP、秘密轮换演练 | 807 套件全绿，2 套新增专项实测 PASS (LanCapabilityTest/OutboundDestinationPolicyTest) |
-| **G14** | B12 | TODO_CODE | 统一脱敏诊断指标、性能可复现埋点与故障记录 | 待实现 |
-| **G15** | B00/B05/B12 | PARTIAL_CODE | 全仓未读入口、单飞锁、传输池与严格 JSON 审计 | B00 清单已建立，B05 单飞条带锁与传输池已完成 |
+| **G14** | B12 | DONE | 统一脱敏诊断指标、性能可复现埋点与故障记录 | 828 套件全绿，DiagnosticsController 脱敏诊断指标与 FailureMatrixTest 20 项故障恢复矩阵实测全 PASS |
+| **G15** | B00/B05/B12 | DONE | 全仓未读入口、单飞锁、传输池与严格 JSON 审计 | 全仓未读入口/单飞条带锁/传输池/严格 JSON 审计完成，FailureMatrixTest NEW-D01~D20 覆盖全景故障闭环 |
 | **G16** | B13 | TODO_VERIFY | 合并后 main 全量门禁、分支清理与最终交付单一总报告 | 待实现 |
 
 ---
@@ -181,12 +181,21 @@
 | **B11-05** | B11 | DONE | `PhysicalCallService` 深度集成 `OutboundDestinationPolicy`，在物理网络连接前拦截违规外发目标，返回 `CallOutcome.NotSent`，杜绝 SSRF 风险 | `OutboundDestinationPolicyTest` (testPhysicalCallServiceIntegratesOutboundPolicy) | 实测 PASS |
 | **B11-06** | B11 | DONE | B11 批次 17 项新增专项实测 PASS，全仓 807 项测试全部通过（807/807 PASS），Node 探针与 Python 校验全绿，密钥扫描 0 泄露 | `mvn test` 807/807, Node/Python 探针, `scan_secrets.py` | 全部实测 PASS |
 
-*(后续批次 B12～B13 子任务随各批次执行实时更新)*
+| **B12-01** | B12 | DONE | `DiagnosticsController` 统一脱敏诊断指标与埋点，集成 Provider 物理资源在途监控与局域网配对安全脱敏状态 | `DiagnosticsControllerTest` | 实测 PASS |
+| **B12-02** | B12 | DONE | 实施故障恢复矩阵 NEW-D01 ~ NEW-D10（租约崩溃接管、WAL 截断校验、页头重建、索引发布栅栏、授权撤销与纪元过期） | `FailureMatrixTest` (NEW-D01 ~ NEW-D10) | 实测 PASS |
+| **B12-03** | B12 | DONE | 实施故障恢复矩阵 NEW-D11 ~ NEW-D20（并发槽位限制、前台防饥饿、延迟退避、预算退款、调度抢占、上下文锁内漂移拦截、权重不变量、ZIP 炸弹防御、导出快照失效拦截、SSRF 阻断） | `FailureMatrixTest` (NEW-D11 ~ NEW-D20) | 实测 PASS |
+| **B12-04** | B12 | DONE | `DataDirectoryLease.acquire` 增强 `OverlappingFileLockException` 捕获映射为 409 CONFLICT 租约冲突 | `FailureMatrixTest` (testNewD01) | 实测 PASS |
+| **B12-05** | B12 | DONE | B12 批次 21 项新增专项实测 PASS，全仓 828 项测试全部通过（828/828 PASS），Node 探针与 Python 校验全绿，密钥扫描 0 泄露 | `mvn test` 828/828, Node/Python 探针, `scan_secrets.py` | 全部实测 PASS |
+
+*(后续批次 B13 子任务随合并与验收实时更新)*
 
 ---
 
 ## 7. 下一步行动
-立即执行 **B12 批次**（指标、故障矩阵 NEW-D01~D20 与可复现诊断包 / G14, G15）：
-1. 统一脱敏诊断指标与埋点（`DiagnosticsController`、指标聚合输出）；
-2. 实施 20 项故障恢复矩阵自动化用例（`FailureMatrixTest` NEW-D01 ~ NEW-D20）；
-3. 运行 1k/5k 压力验证与综合质量审计。
+立即执行 **B13 批次**（合并主干、分支清理与最终交付 / G16）：
+1. 确认工作分支 `harden/remaining-eb89822-20260923` 状态干净并提交 B12 成果；
+2. 切换并合并回 `main` 分支；
+3. 在 `main` 分支执行全量端到端验证门禁（Maven 828+ 用例、Node 探针、Python 校验、全历史密钥扫描）；
+4. 安全清理工作分支；
+5. 输出最终实施与验收交付报告。
+

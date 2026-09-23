@@ -25,6 +25,20 @@ public class DiagnosticsController {
         this.store = store;
     }
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private studio.bookhtml.service.ProviderResourceRegistry providerRegistry;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private studio.bookhtml.config.LanPairingService lanPairingService;
+
+    public void setProviderRegistry(studio.bookhtml.service.ProviderResourceRegistry providerRegistry) {
+        this.providerRegistry = providerRegistry;
+    }
+
+    public void setLanPairingService(studio.bookhtml.config.LanPairingService lanPairingService) {
+        this.lanPairingService = lanPairingService;
+    }
+
     @GetMapping("/diagnostics")
     public Map<String, Object> diagnostics() {
         MemoryMXBean memory = ManagementFactory.getMemoryMXBean();
@@ -42,6 +56,17 @@ public class DiagnosticsController {
         result.put("renderInFlightBytes", budget == null ? 0 : budget.inFlightBytes());
         result.put("renderAvailablePermits", budget == null ? 0 : budget.availablePermits());
         result.put("tmpUsableBytes", tmpUsable);
+        if (providerRegistry != null) {
+            Map<String, Object> providers = new LinkedHashMap<>();
+            providers.put("qwenInFlight", providerRegistry.inFlight("qwen"));
+            providers.put("ocrInFlight", providerRegistry.inFlight("ocr"));
+            providers.put("minimaxInFlight", providerRegistry.inFlight("minimax"));
+            result.put("providerResources", providers);
+        }
+        if (lanPairingService != null) {
+            result.put("lanActiveTokens", lanPairingService.activeTokenCount());
+            result.put("lanLocked", lanPairingService.isLocked());
+        }
         result.put("schemaVersion", 2);
         return result;
     }

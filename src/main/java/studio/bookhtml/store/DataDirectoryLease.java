@@ -98,6 +98,10 @@ public final class DataDirectoryLease implements AutoCloseable {
         final FileLock lock;
         try {
             lock = channel.tryLock();
+        } catch (java.nio.channels.OverlappingFileLockException e) {
+            closeQuietly(channel);
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "数据目录正被另一进程使用：" + real + "，已拒绝共享写入（锁文件本身存在不代表被持有）");
         } catch (IOException e) {
             closeQuietly(channel);
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
