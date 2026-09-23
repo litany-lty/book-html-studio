@@ -77,7 +77,7 @@
 | GAP ID | 对应批次 | 当前状态 | 描述与目标 | 完成标记与证据 |
 |---|---|---|---|---|
 | **G01** | B02 | DONE | 账本有界追加日志、检查点、分页索引、增量汇总与归档 | 679 套件全绿，8 套新增账本专项实测 PASS |
-| **G02** | B03 | TODO_CODE | 来源事件最小记录、永久页摘要/统计/倒排检索索引与小型页头 | 待实现 |
+| **G02** | B03 | DONE | 来源事件最小记录、永久页摘要/统计/倒排检索索引与小型页头 | 698 套件全绿，6 套新增专项实测 PASS |
 | **G03** | B05 | PARTIAL_CODE | 全模型统一物理调用、账户并发与预算治理 | 待实现 |
 | **G04** | B05 | TODO_CODE | 异步 OCR 远端 Job 持久占位、轮询恢复与未知债务治理 | 待实现 |
 | **G05** | B06 | PARTIAL_CODE | 跨入口、跨书、多标签分阶段优先级调度（当前页 P0 优先） | 待实现 |
@@ -119,13 +119,22 @@
 | **B02-07** | B02 | DONE | 归档机制验证，跨轮次累计计数与总金额准确性保证 | `LedgerArchiveTest` (2 tests) | 实测 PASS |
 | **B02-08** | B02 | DONE | 账本完整性审计与诊断接口 `auditIntegrity`、`diagnose` | `FinalGapRegressionTest` (5 tests) | 实测 PASS |
 | **B02-09** | B02 | DONE | 全量回归与并发执行验证（679 项全通过） | `mvn test` 679/679 | 全部实测 PASS |
+| **B03-01** | B03 | DONE | 实现 `SourceChange` 与 `SourceChangeJournal`（`source-events/` 追加 WAL、CRC32、崩溃截断修复） | `SourceChangeRecoveryTest` (4 tests) | 实测 PASS |
+| **B03-02** | B03 | DONE | 实现 `PageHead` 与 `PageHeadStore`（`heads/<page>.json` <=64KB 小头、O(1) 状态/修订/疑点/尝试查询） | `PageHeadStoreTest` (4 tests) | 实测 PASS |
+| **B03-03** | B03 | DONE | `BookStore` 单页提交/发布联动更新 `source-events` 与 `heads/`，提供崩溃幂等修复 | `SourceChangeRecoveryTest` | 实测 PASS |
+| **B03-04** | B03 | DONE | 实现 `BookIndexManifest`、`PageIndexRecord` 与 `BookIndexService`（128页分片、中文1/2/3-gram倒排、单飞构建） | `PersistentBookIndexTest` (2 tests) | 实测 PASS |
+| **B03-05** | B03 | DONE | 实现索引发布原子栅栏（`sourceSeq == startSeq` 校验，并发更新安全回滚） | `IndexPublishFenceTest` (3 tests) | 实测 PASS |
+| **B03-06** | B03 | DONE | 实现检索与摘要查询跨书隔离、只读事务固定与 5 分钟游标分页快照隔离 | `IndexSearchIsolationTest` (3 tests) | 实测 PASS |
+| **B03-07** | B03 | DONE | 读热路径优化：`ReaderController.progress` 与 `ProcessingProgressService.latest` 避免全页反序列化 | `ReaderHotPathBoundTest` (3 tests) | 实测 PASS |
+| **B03-08** | B03 | DONE | B03 批次及全仓全量回归，广告块疑点/搜索过滤保真，698 项全通过 | `mvn test` 698/698 | 全部实测 PASS |
 
-*(后续批次 B03～B13 子任务随各批次执行实时更新)*
+*(后续批次 B04～B13 子任务随各批次执行实时更新)*
 
 ---
 
 ## 7. 下一步行动
-立即执行 **B03 批次**（来源事件最小记录、永久页摘要/统计/倒排检索索引与小型页头 / G02）：
-1. 编写失败测试：验证页级别独立头文件写入与加载（避免整本读取）、来源事件记录与倒排检索、统计缓存快速重建。
-2. 实现 `SourceChangeJournal` 与 `PageHeadStore`（`heads/<page>.json`），并优化 `BookStore.commitPage` / `ReaderController` / `ProcessingProgressService`。
-3. 验证 1000 页下无整本 `page-attempts.json` / `pages.json` 读放大，保持向后兼容。
+立即执行 **B04 批次**（持久 CloudConsent / ReadingPolicy 与 operationEpoch 幂等治理 / G06, G07）：
+1. 编写失败测试：验证服务端持久化 `books/<bookId>/cloud-consent.json`，无授权拒绝云端调用，单页云端识别显式带入；
+2. 实现 `CloudConsentStore` 与 `ReadingPolicyStore`，管理持久化授权凭证（含时间戳、操作人、授权模式、有限撤销机制）；
+3. 实现 `operationEpoch`（30天/4096条上限滑动窗口有界持久化淘汰机制）与批量操作快照持久化；
+4. 验证并发重复提交、重放防护与云端外发合规门禁。

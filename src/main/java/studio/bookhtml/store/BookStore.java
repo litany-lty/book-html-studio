@@ -15,6 +15,11 @@ import studio.bookhtml.domain.Page;
 import studio.bookhtml.domain.PageAttempt;
 import studio.bookhtml.domain.ReprocessOperation;
 
+import studio.bookhtml.domain.PageHead;
+import studio.bookhtml.domain.SourceChange;
+import studio.bookhtml.service.BookIndexService;
+import studio.bookhtml.service.HeadingText;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.*;
@@ -34,6 +39,9 @@ public class BookStore {
     private final SourceIdentityGuard sourceIdentity = new SourceIdentityGuard();
     private final PageCommitJournal commits;
     private final AttemptAuthority authority;
+    private final SourceChangeJournal sourceJournal;
+    private final PageHeadStore headStore;
+    private BookIndexService indexService;
     public record PageChange(String bookId, Page previous, Page committed, long sourceEpoch) {}
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong> pageEpochs = new java.util.concurrent.ConcurrentHashMap<>();
     private final List<java.util.function.Consumer<PageChange>> pageListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
@@ -54,8 +62,18 @@ public class BookStore {
         this.json = json;
         this.commits = new PageCommitJournal(json);
         this.authority = new AttemptAuthority(dirLock, sourceIdentity, commits, lease.revokedAttempts());
+        this.sourceJournal = new SourceChangeJournal(json);
+        this.headStore = new PageHeadStore(json);
+        this.indexService = new BookIndexService(json);
         Files.createDirectories(booksRoot);
     }
+
+    public SourceChangeJournal sourceJournal() { return sourceJournal; }
+    public PageHeadStore headStore() { return headStore; }
+    public BookIndexService indexService() { return indexService; }
+    public void setIndexService(BookIndexService indexService) { this.indexService = indexService; }
+    public PageCommitJournal pageCommitJournal() { return commits; }
+    public String pageContentHash(Page page) throws IOException { return commits.hash(page); }
 
     public PageAttempt registerPageAttempt(String id, int page, int revision, String jobId,
             List<String> operations, boolean overwrite, String operationKey,
@@ -100,6 +118,7 @@ public class BookStore {
                         synchronized(dirLock) { commits.reconcile(bookDir(book.id()),book.id(),page,readPage(book.id(),page)); }
                     }
                 }
+                synchronized(dirLock) { sourceJournal.reconcile(bookDir(book.id()), book.id(), this); }
             } catch (Exception invalid) {
                 System.getLogger(BookStore.class.getName()).log(System.Logger.Level.WARNING,
                         "Publication journal needs inspection; page content is preserved and affected writes fail closed");
@@ -260,8 +279,13 @@ public class BookStore {
         var epoch=pageEpochs.computeIfAbsent(id,ignored->new java.util.concurrent.atomic.AtomicLong());
         long settled=Math.addExact(epoch.get(),2); epoch.set(settled-1);
         try {
-            if (current==null) atomic(pagePath(id,saved.pageNumber()),saved);
-            else publishRecorded(id,current,saved,operation,claim);
+            if (current==null) {
+                atomic(pagePath(id,saved.pageNumber()),saved);
+                try {
+                    headStore.createOrUpdatePublication(bookDir(id), saved, commits.hash(saved), 0L,
+                            HeadingText.pageTitle(saved), null, null, null, null);
+                } catch (Exception ignored) {}
+            } else publishRecorded(id,current,saved,operation,claim);
             PageChange event=new PageChange(id,current,saved,settled);
             for (var listener:pageListeners) {
                 try { listener.accept(event); } catch (RuntimeException ignored) { /* Projection cannot undo publication. */ }
@@ -275,9 +299,18 @@ public class BookStore {
         Path dir=bookDir(id); int page=saved.pageNumber();
         var before=commits.reconcile(dir,id,page,current);
         PageAttempt a=claim==null ? null : claim.attempt();
+        String prevHash = commits.hash(current);
+        String nextHash = commits.hash(saved);
+        int prevRev = revisionOrZero(current);
+        int nextRev = saved.revision();
+
+        long sourceSeq = sourceJournal.nextSourceSeq(dir, id);
+        var sourceChange = sourceJournal.prepare(dir, id, "PAGE", page, saved.lastCommitId(), null,
+                prevRev, nextRev, prevHash, nextHash, operation.name());
+
         var entry=new PageCommitJournal.Entry(saved.lastCommitId(),id,page,a==null?null:a.attemptId(),a==null?0:a.generation(),
-                operation.name(),claim==null?"SUCCEEDED":claim.outcome(),revisionOrZero(current),saved.revision(),
-                commits.hash(current),commits.hash(saved),"PREPARED",java.time.Instant.now());
+                operation.name(),claim==null?"SUCCEEDED":claim.outcome(),prevRev,nextRev,
+                prevHash,nextHash,"PREPARED",java.time.Instant.now());
         var prepared=commits.append(before,entry);
         commitCheckpoint("commit-intent");
         commits.write(dir,page,prepared);
@@ -294,17 +327,30 @@ public class BookStore {
                 published=commits.matches(entry,actual);
                 commits.reconcile(dir,id,page,actual);
             } catch (IOException | RuntimeException unknown) { /* Preserve PREPARED for conservative recovery. */ }
-            if (!published) throw failure;
+            if (!published) {
+                sourceJournal.markNotPublished(dir, id, sourceSeq);
+                throw failure;
+            }
         }
         // Nothing below may turn a confirmed saved page into a misleading save failure.
         try {
             commitCheckpoint("page-published");
             commitCheckpoint("commit-completion");
             commits.write(dir,page,commits.mark(prepared,entry.commitId(),"COMMITTED"));
+            sourceJournal.commit(dir, id, sourceSeq, page, saved.lastCommitId(), nextRev, nextHash);
             commitCheckpoint("commit-settled");
         } catch (IOException | RuntimeException failure) {
             System.getLogger(BookStore.class.getName()).log(System.Logger.Level.WARNING,
                     "Page published; commit metadata will be reconciled from its exact identity");
+        }
+        try {
+            headStore.createOrUpdatePublication(dir, saved, nextHash, sourceSeq,
+                    HeadingText.pageTitle(saved), a == null ? null : a.attemptId(),
+                    a == null ? null : a.generation(), claim == null ? "SUCCEEDED" : claim.outcome(),
+                    a == null ? null : a.lifecycle());
+        } catch (Exception ex) {
+            System.getLogger(BookStore.class.getName()).log(System.Logger.Level.WARNING,
+                    "Page published; head will be reconciled from page data");
         }
     }
     /** Test subclasses can interrupt a precise boundary; no HTTP/config switch exposes it. */

@@ -177,21 +177,51 @@ public class ProcessingProgressService {
             if(entry!=null) return snapshot(entry);
         }
         if(store==null) return null;
+
         // Never hold the progress monitor while acquiring the storage authority monitor.
         PageAttempt attempt=store.pageAttempt(bookId,pageNumber);
-        if(attempt==null) return null;
-        var page=store.readPage(bookId,pageNumber);
-        boolean readable=page!=null && "READY".equals(page.status());
-        String lifecycle=attempt.lifecycle();
-        boolean terminal=TERMINAL.contains(lifecycle);
-        ProcessingSnapshot recovered=new ProcessingSnapshot(2,bookId,pageNumber,attempt.attemptId(),0,
-                lifecycle,"RECOVERED",readable?"OCR_READABLE":"ORIGINAL_ONLY",
-                attempt.expectedRevision(),attempt.startedAt(),attempt.updatedAt(),attempt.updatedAt(),
-                new ProcessingSnapshot.UnitCounts("RECOVERED",0,0,0,0,0,0),readable,!terminal,
-                terminal && !Set.of("UNKNOWN","SUCCEEDED").contains(lifecycle),"PERSISTED_ATTEMPT_STATE",attempt.generation());
-        synchronized(this) {
-            Entry latest=latestByPage.get(pageKey(bookId,pageNumber));
-            return latest!=null && latest.attemptSeq>=attempt.generation()?snapshot(latest):recovered;
+        if(attempt!=null) {
+            boolean readable;
+            studio.bookhtml.domain.PageHead head = store.headStore() != null ? store.headStore().readHead(store.bookDir(bookId), pageNumber) : null;
+            if (head != null) {
+                readable = head.processed();
+            } else {
+                var page = store.readPage(bookId, pageNumber);
+                readable = page != null && "READY".equals(page.status());
+            }
+
+            String lifecycle=attempt.lifecycle();
+            boolean terminal=TERMINAL.contains(lifecycle);
+            ProcessingSnapshot recovered=new ProcessingSnapshot(2,bookId,pageNumber,attempt.attemptId(),0,
+                    lifecycle,"RECOVERED",readable?"OCR_READABLE":"ORIGINAL_ONLY",
+                    attempt.expectedRevision(),attempt.startedAt(),attempt.updatedAt(),attempt.updatedAt(),
+                    new ProcessingSnapshot.UnitCounts("RECOVERED",0,0,0,0,0,0),readable,!terminal,
+                    terminal && !Set.of("UNKNOWN","SUCCEEDED").contains(lifecycle),"PERSISTED_ATTEMPT_STATE",attempt.generation());
+            synchronized(this) {
+                Entry latest=latestByPage.get(pageKey(bookId,pageNumber));
+                return latest!=null && latest.attemptSeq>=attempt.generation()?snapshot(latest):recovered;
+            }
         }
+
+        studio.bookhtml.domain.PageHead head = store.headStore() != null ? store.headStore().readHead(store.bookDir(bookId), pageNumber) : null;
+        if (head != null && head.attemptId() != null) {
+            String lifecycle = head.attemptLifecycle() != null ? head.attemptLifecycle() : "RUNNING";
+            boolean terminal = TERMINAL.contains(lifecycle);
+            boolean readable = head.processed();
+            ProcessingSnapshot fromHead = new ProcessingSnapshot(2, bookId, pageNumber, head.attemptId(), 0,
+                    lifecycle, head.attemptStage() != null ? head.attemptStage() : "RECOVERED",
+                    readable ? "OCR_READABLE" : "ORIGINAL_ONLY",
+                    head.revision(), head.updatedAt(), head.updatedAt(), head.updatedAt(),
+                    new ProcessingSnapshot.UnitCounts("RECOVERED", 0, 0, 0, 0, 0, 0),
+                    readable, !terminal,
+                    terminal && !Set.of("UNKNOWN", "SUCCEEDED").contains(lifecycle),
+                    "PERSISTED_ATTEMPT_HEAD", head.attemptSeq() != null ? head.attemptSeq() : 1);
+            synchronized(this) {
+                Entry latest = latestByPage.get(pageKey(bookId, pageNumber));
+                return latest != null && latest.attemptSeq >= fromHead.attemptSeq() ? snapshot(latest) : fromHead;
+            }
+        }
+
+        return null;
     }
 }
