@@ -17,8 +17,8 @@
   "readyForRelease": false,
   "baselineSha": "eb89822cf477a3beb3472cf114ab8b3fd09b3f6e",
   "currentBranch": "harden/remaining-eb89822-20260923",
-  "currentHeadSha": "eb89822cf477a3beb3472cf114ab8b3fd09b3f6e",
-  "requiredCodeGapsRemaining": ["G01", "G02", "G03", "G04", "G06", "G07", "G08", "G09", "G11", "G12", "G13", "G14", "G15", "G16"],
+  "currentHeadSha": "9db952c",
+  "requiredCodeGapsRemaining": ["G11", "G12", "G13", "G14", "G15", "G16"],
   "failedGates": [],
   "blockedExternal": ["E01", "E02", "E03", "E04", "E05", "E06", "E07", "E08"],
   "skippedTests": [],
@@ -87,7 +87,7 @@
 | **G06** | B04 | DONE | 服务端持久 CloudConsent / ReadingPolicy，有限授权下自动当前页处理 | 715 套件全绿，5 套新增专项实测 PASS |
 | **G07** | B04/B05 | PARTIAL_CODE | 统一幂等准入、operationEpoch（30天/4096上限）与批量快照持久化 | B04/B05 已完成 Epoch、批量准入与远端持久任务，待 B07/B08 计划集成 |
 | **G08** | B07 | DONE | BookContentProfile + 严格 ContextSnapshot + JEV 接受锁内依赖校验 | 760 套件全绿，3 套新增专项实测 PASS (BookContentProfile/ContextSnapshot/JEV锁内校验) |
-| **G09** | B08 | TODO_CODE | 完整 V3 固定计划（父 planHash/子 reviewPlanHash/contextHash/持久 eventSeq） | 待实现 |
+| **G09** | B08 | DONE | 完整 V3 固定计划（父 planHash/子 reviewPlanHash/contextHash/持久 eventSeq） | 770 套件全绿，2 套新增专项实测 PASS (WorkPlanReducer/V3ProgressApi/Journal持久化) |
 | **G10** | B01 | DONE | 图像解码图、子图、PNG、Base64、请求体及临时磁盘完整字节租约 | 666 套件全绿，4 套新增专项实测 PASS |
 | **G11** | B09 | PARTIAL_CODE | 前端 12页/32MiB 缓存双上限、校对工作台按需挂载、交互会话守卫 | 待实现 |
 | **G12** | B10 | TODO_VERIFY | 冻结 ExportSnapshot、不可信脚本转义、ZIP 路径穿越与离线一致性 | 待实现 |
@@ -157,13 +157,18 @@
 | **B07-04** | B07 | DONE | 实现 `ContextDependencyValidator`（`studio.bookhtml.service.ContextDependencyValidator`），提供上下文有效性校验与 `validateInLock` 锁内复核，返回结构化校验状态 | `DecisionContextStalenessTest` | 实测 PASS |
 | **B07-05** | B07 | DONE | `DecisionAcceptService` 与 `BookStore.applyIssueResolution` 目录写锁内深度集成，校验计划哈希、上下文原文漂移与版本推进，防止过期决策覆盖人工修改 | `DecisionContextStalenessTest` (5 tests) | 实测 PASS |
 | **B07-06** | B07 | DONE | B07 批次 15 项新增专项实测 PASS，全仓 760 项测试全部通过（760/760 PASS） | `mvn test` 760/760 | 全部实测 PASS |
+| **B08-01** | B08 | DONE | 实现 `WorkPlan`（`studio.bookhtml.domain.WorkPlan`）两层冻结模型（`parentPlanHash` 与 `reviewPlanHash`），阶段权重 OCR(30)/STRUCTURE(20)/REVIEW(35)/VALIDATING(10)/PUBLISHING(5)，冻结分母不变量与确定性哈希 | `WorkPlanReducerTest` (5 tests) | 实测 PASS |
+| **B08-02** | B08 | DONE | 实现 `ProgressJournal`（`studio.bookhtml.service.ProgressJournal`），记录连续持久 `eventSeq` 与原子文件日志，支持进程重启与崩溃后全保真重放 | `V3ProgressApiTest` (5 tests) | 实测 PASS |
+| **B08-03** | B08 | DONE | `ProcessingProgressService` 与 `ProcessingSnapshot` 深度集成 V3 计划与流水，暴露加权完成率与准确率，向后兼容 `schemaVersion=2` | `ProcessingProgressServiceTest`, `ProcessingProgressTest`, `V3ProgressApiTest` | 实测 PASS |
+| **B08-04** | B08 | DONE | 前端 `page-progress.js` 更新 `terminal.PARTIAL` 语义为“本轮结束 · 部分待核对”，区分阶段完成比例与文字核对准确率 | 静态检查与组件渲染验证 | 实测 PASS |
+| **B08-05** | B08 | DONE | B08 批次 10 项新增专项实测 PASS，全仓 770 项测试全部通过（770/770 PASS） | `mvn test` 770/770 | 全部实测 PASS |
 
-*(后续批次 B08～B13 子任务随各批次执行实时更新)*
+*(后续批次 B09～B13 子任务随各批次执行实时更新)*
 
 ---
 
 ## 7. 下一步行动
-立即执行 **B08 批次**（完整 V3 固定计划与持久进度 / G09）：
-1. 建立 `WorkPlan` 与子计划两层冻结模型（父 planHash/子 reviewPlanHash/contextHash/持久 eventSeq）；
-2. 实现 `ProgressJournal` 记录连续持久 `eventSeq`；
-3. 区分完成率与准确率，PARTIAL 结算语义为“本轮结束 · 部分待核对”；保持 V2 适配器兼容。
+立即执行 **B09 批次**（前端内存上限与视口裁剪 / G11）：
+1. 实现 12 页 / 32 MiB 双上限 LRU 缓存与溢出回收；
+2. 实现校对工作台按需惰性挂载，离开视口及时卸载；
+3. 实现交互会话守卫防止跨会话状态泄漏。

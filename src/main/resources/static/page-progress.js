@@ -7,7 +7,7 @@ export function progressView(snapshot, page) {
   const value = Number(snapshot.percent);
   const percent = Number.isFinite(value) ? Math.max(0, Math.min(100, Math.floor(value))) : 0;
   const phase = { PREPARING: '准备', OCR: '识别', BASELINE_PUBLISHING: '保存正文', STRUCTURE: '整理', REVIEW: '核对', VALIDATING: '校验', PUBLISHING: '保存' };
-  const terminal = { SUCCEEDED: '已处理', PARTIAL: '部分完成', FAILED: '处理失败', CANCELLED: '已停止', INTERRUPTED: '已中断', UNKNOWN: '结果待确认' };
+  const terminal = { SUCCEEDED: '已处理', PARTIAL: '本轮结束 · 部分待核对', FAILED: '处理失败', CANCELLED: '已停止', INTERRUPTED: '已中断', UNKNOWN: '结果待确认' };
   const name = terminal[snapshot.lifecycle] || phase[snapshot.stage] || '处理中';
   if (snapshot.stage === 'RECOVERED') return { hidden: snapshot.lifecycle === 'SUCCEEDED', percent: null, label: `${name} · 状态已恢复`, state: terminal[snapshot.lifecycle] ? 'settled' : 'processing' };
   return { hidden: snapshot.lifecycle === 'SUCCEEDED', percent, label: `${name} · ${percent}%`, state: terminal[snapshot.lifecycle] ? 'settled' : 'processing' };
@@ -30,7 +30,12 @@ export function createPageProgress({ api, onPublished }) {
     else element.setAttribute('aria-valuenow', String(view.percent));
     element.setAttribute('aria-valuetext', view.label);
     element.style.setProperty('--page-progress', `${view.percent ?? 0}%`);
-    element.title = '当前页处理阶段完成比例，不是文字准确率或剩余时间。疑点仍须对照原稿核对。';
+    if (snapshot?.accuracyRatio != null && Number.isFinite(Number(snapshot.accuracyRatio)) && Number(snapshot.accuracyRatio) < 1.0) {
+      const acc = Math.round(Number(snapshot.accuracyRatio) * 100);
+      element.title = `阶段完成度 ${view.percent ?? 0}%（非全文准确率），当前阶段准确率 ${acc}%。疑点仍须对照原稿核对。`;
+    } else {
+      element.title = '当前页处理阶段完成比例，不是文字准确率或剩余时间。疑点仍须对照原稿核对。';
+    }
   }
   function update(next) {
     if (!current || !next || next.bookId !== current.id || Number(next.pageNumber) !== current.n) return;

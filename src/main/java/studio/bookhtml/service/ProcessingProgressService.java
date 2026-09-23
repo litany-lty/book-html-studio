@@ -3,6 +3,7 @@ package studio.bookhtml.service;
 import org.springframework.stereotype.Service;
 import studio.bookhtml.domain.PageAttempt;
 import studio.bookhtml.domain.ProcessingSnapshot;
+import studio.bookhtml.domain.WorkPlan;
 
 import java.time.Instant;
 import java.util.*;
@@ -11,8 +12,25 @@ import java.util.*;
 @Service
 public class ProcessingProgressService {
     private studio.bookhtml.store.BookStore store;
+    private ProgressJournal journal;
+
     @org.springframework.beans.factory.annotation.Autowired(required=false)
-    public void setStore(studio.bookhtml.store.BookStore store) { this.store=store; }
+    public void setStore(studio.bookhtml.store.BookStore store) {
+        this.store = store;
+        if (this.journal == null && store != null) {
+            this.journal = new ProgressJournal(store);
+        }
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    public void setJournal(ProgressJournal journal) {
+        this.journal = journal;
+    }
+
+    public ProgressJournal getJournal() {
+        return this.journal;
+    }
+
     private static final int MAX_TRACKED = 512;
     private static final Set<String> TERMINAL = Set.of("SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "INTERRUPTED", "UNKNOWN");
     private final Map<String, Entry> entries = new LinkedHashMap<>();
@@ -39,6 +57,9 @@ public class ProcessingProgressService {
         boolean canStop = true;
         boolean canRetry;
         String messageCode = "PROCESSING_STARTED";
+
+        WorkPlan workPlan;
+        long eventSeqCounter = 0;
 
         Entry(String bookId, int pageNumber, UUID attemptId, long attemptSeq, int revision, boolean readable) {
             this.bookId = bookId; this.pageNumber = pageNumber; this.attemptId = attemptId;
@@ -81,6 +102,7 @@ public class ProcessingProgressService {
         }
         if (entries.size() >= MAX_TRACKED) throw new IllegalStateException("progress capacity exhausted");
         Entry entry = new Entry(bookId, pageNumber, attemptId, seq, revision, readable);
+        entry.workPlan = WorkPlan.createDefault(bookId, pageNumber, revision, seq, null);
         entries.put(id, entry);
         // Event counts from different attempts are incomparable. Only the authority's sequence orders attempts.
         if (latest == null || seq > latest.attemptSeq) latestByPage.put(pageKey(bookId, pageNumber), entry);
@@ -91,6 +113,19 @@ public class ProcessingProgressService {
         Entry e = entries.get(key(bookId, pageNumber, attemptId));
         if (e == null || e.terminal() || Objects.equals(e.stage, stage)) return;
         e.stage = Objects.requireNonNull(stage); e.stageStartedAt = Instant.now(); e.changed();
+        if (e.workPlan != null) {
+            e.workPlan = e.workPlan.transitionStage(stage);
+        }
+        if (journal != null) {
+            journal.recordEvent(e.bookId, e.pageNumber, e.attemptId, e.attemptSeq,
+                    new ProgressJournal.JournalEvent(
+                            ++e.eventSeqCounter, "STAGE_TRANSITION", stage, null, null, null, null,
+                            e.workPlan != null ? e.workPlan.parentPlanHash() : null,
+                            e.workPlan != null ? e.workPlan.reviewPlanHash() : null,
+                            e.workPlan != null ? e.workPlan.contextHash() : null,
+                            e.total, Instant.now()
+                    ));
+        }
     }
 
     public synchronized void plan(String bookId, int pageNumber, UUID attemptId, String unitKind, int total) {
@@ -102,6 +137,41 @@ public class ProcessingProgressService {
         if (e.total == total && Objects.equals(e.unitKind, unitKind)) return;
         e.unitKind = Objects.requireNonNull(unitKind); e.total = total;
         e.inFlight = Math.min(e.inFlight, Math.max(0, total - e.endedUnits.size())); e.changed();
+        if (e.workPlan != null) {
+            try {
+                e.workPlan = e.workPlan.freezeReviewSubPlan(total, null);
+            } catch (Exception ignore) {}
+        }
+        if (journal != null) {
+            journal.recordEvent(e.bookId, e.pageNumber, e.attemptId, e.attemptSeq,
+                    new ProgressJournal.JournalEvent(
+                            ++e.eventSeqCounter, "PLAN_FROZEN", e.stage, null, null, null, null,
+                            e.workPlan != null ? e.workPlan.parentPlanHash() : null,
+                            e.workPlan != null ? e.workPlan.reviewPlanHash() : null,
+                            e.workPlan != null ? e.workPlan.contextHash() : null,
+                            e.total, Instant.now()
+                    ));
+        }
+    }
+
+    public synchronized void plan(String bookId, int pageNumber, UUID attemptId, WorkPlan workPlan) {
+        Entry e = entries.get(key(bookId, pageNumber, attemptId));
+        if (e == null || e.terminal()) return;
+        Objects.requireNonNull(workPlan);
+        e.workPlan = workPlan;
+        if (workPlan.reviewSubPlan() != null) {
+            e.total = workPlan.reviewSubPlan().totalUnits();
+            e.unitKind = "CHUNK";
+        }
+        e.changed();
+        if (journal != null) {
+            journal.recordEvent(e.bookId, e.pageNumber, e.attemptId, e.attemptSeq,
+                    new ProgressJournal.JournalEvent(
+                            ++e.eventSeqCounter, "PLAN_FROZEN", e.stage, null, null, null, null,
+                            workPlan.parentPlanHash(), workPlan.reviewPlanHash(), workPlan.contextHash(),
+                            e.total, Instant.now()
+                    ));
+        }
     }
 
     /** Compatibility adapter for callers with one completion callback per unit. */
@@ -126,6 +196,21 @@ public class ProcessingProgressService {
             default -> e.skipped++;
         }
         e.inFlight = Math.min(Math.max(0, e.inFlight - 1), e.total - e.endedUnits.size()); e.changed();
+        if (e.workPlan != null) {
+            try {
+                e.workPlan = e.workPlan.recordUnitDone(e.stage, unitId, outcome);
+            } catch (Exception ignore) {}
+        }
+        if (journal != null) {
+            journal.recordEvent(e.bookId, e.pageNumber, e.attemptId, e.attemptSeq,
+                    new ProgressJournal.JournalEvent(
+                            ++e.eventSeqCounter, "UNIT_DONE", e.stage, unitId, outcome, null, null,
+                            e.workPlan != null ? e.workPlan.parentPlanHash() : null,
+                            e.workPlan != null ? e.workPlan.reviewPlanHash() : null,
+                            e.workPlan != null ? e.workPlan.contextHash() : null,
+                            e.total, Instant.now()
+                    ));
+        }
     }
 
     public synchronized void inFlight(String bookId, int pageNumber, UUID attemptId, int delta) {
@@ -156,6 +241,19 @@ public class ProcessingProgressService {
                 && (e.failed + e.skipped + e.cancelled > 0 || e.endedUnits.size() < e.total);
         e.lifecycle = incomplete ? "PARTIAL" : lifecycle;
         e.messageCode = incomplete ? "WORK_PLAN_INCOMPLETE" : messageCode; e.canRetry = canRetry || incomplete; e.canStop = false; e.inFlight = 0; e.changed();
+        if (e.workPlan != null) {
+            e.workPlan = e.workPlan.finish(e.lifecycle);
+        }
+        if (journal != null) {
+            journal.recordEvent(e.bookId, e.pageNumber, e.attemptId, e.attemptSeq,
+                    new ProgressJournal.JournalEvent(
+                            ++e.eventSeqCounter, "FINISHED", e.stage, null, null, e.lifecycle, e.messageCode,
+                            e.workPlan != null ? e.workPlan.parentPlanHash() : null,
+                            e.workPlan != null ? e.workPlan.reviewPlanHash() : null,
+                            e.workPlan != null ? e.workPlan.contextHash() : null,
+                            e.total, Instant.now()
+                    ));
+        }
     }
 
     public synchronized ProcessingSnapshot snapshot(String bookId, int pageNumber, UUID attemptId) {
@@ -164,11 +262,19 @@ public class ProcessingProgressService {
     }
 
     private ProcessingSnapshot snapshot(Entry e) {
+        String parentPlanHash = e.workPlan != null ? e.workPlan.parentPlanHash() : null;
+        String reviewPlanHash = e.workPlan != null ? e.workPlan.reviewPlanHash() : null;
+        String contextHash = e.workPlan != null ? e.workPlan.contextHash() : null;
+        int weightedPercent = e.workPlan != null ? e.workPlan.weightedPercent() : -1;
+        double accuracyRatio = e.workPlan != null ? e.workPlan.accuracyRatio() : (
+                (e.succeeded + e.failed + e.skipped + e.cancelled == 0) ? 1.0 : (double) e.succeeded / (e.succeeded + e.failed + e.skipped + e.cancelled)
+        );
         return new ProcessingSnapshot(2, e.bookId, e.pageNumber, e.attemptId, e.snapshotVersion,
                 e.lifecycle, e.stage, e.availability, e.publishedRevision, e.startedAt,
                 e.stageStartedAt, e.lastProgressAt,
                 new ProcessingSnapshot.UnitCounts(e.unitKind, e.total, e.succeeded, e.failed, e.skipped, e.cancelled, e.inFlight),
-                e.canRead, e.canStop, e.canRetry, e.messageCode, e.attemptSeq);
+                e.canRead, e.canStop, e.canRetry, e.messageCode, e.attemptSeq,
+                parentPlanHash, reviewPlanHash, contextHash, weightedPercent, accuracyRatio);
     }
 
     public ProcessingSnapshot latest(String bookId, int pageNumber) {
@@ -177,6 +283,29 @@ public class ProcessingProgressService {
             if(entry!=null) return snapshot(entry);
         }
         if(store==null) return null;
+
+        if (journal != null && journal.hasJournal(bookId, pageNumber)) {
+            var recovered = journal.replay(bookId, pageNumber);
+            if (recovered != null) {
+                boolean readable = false;
+                studio.bookhtml.domain.PageHead head = store.headStore() != null ? store.headStore().readHead(store.bookDir(bookId), pageNumber) : null;
+                if (head != null) {
+                    readable = head.processed();
+                } else {
+                    var page = store.readPage(bookId, pageNumber);
+                    readable = page != null && "READY".equals(page.status());
+                }
+                var page = store.readPage(bookId, pageNumber);
+                int revision = store.revisionOrZero(page);
+                ProcessingSnapshot snap = recovered.toSnapshot(revision, readable);
+                synchronized(this) {
+                    Entry latest = latestByPage.get(pageKey(bookId, pageNumber));
+                    if (latest == null || latest.attemptSeq < recovered.attemptSeq()) {
+                        return snap;
+                    }
+                }
+            }
+        }
 
         // Never hold the progress monitor while acquiring the storage authority monitor.
         PageAttempt attempt=store.pageAttempt(bookId,pageNumber);
