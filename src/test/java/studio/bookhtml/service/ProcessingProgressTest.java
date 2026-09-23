@@ -126,7 +126,7 @@ class ProcessingProgressTest {
     }
     @Test void batchProgressUsesDurableAttemptSequenceAndActualPublishedRevision() throws Exception {
         setup(1);
-        when(processor.process(eq(book.id()),eq(1),anyString(),anyString(),anyBoolean(),anyBoolean(),any()))
+        when(processor.processBaseline(eq(book.id()),eq(1),anyString(),anyString(),anyBoolean(),any()))
                 .thenReturn(baselineResult(1,"批处理正文"));
         jobs.submit(book.id(),new JobRequest("1","paddle-aistudio","auto",false,false,false));
         await(()->{var v=progress.latest(book.id(),1);return v!=null && "SUCCEEDED".equals(v.lifecycle());});

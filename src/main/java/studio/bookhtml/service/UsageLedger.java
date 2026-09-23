@@ -331,7 +331,7 @@ public class UsageLedger {
      * these generated forms; arbitrary corrupt operations still fail closed.
      */
     private static Entry normalizeLegacyOperation(Entry e) {
-        if(e==null || e.operation()==null || e.executionId()!=null || e.taskHash()!=null) return e;
+        if(e==null || e.operation()==null || e.executionId()!=null || e.taskHash()!=null || e.attemptSeq()!=null) return e;
         String operation=e.operation(), task;
         if(operation.startsWith("QWEN_STRUCTURE:")) {
             task=operation.substring("QWEN_STRUCTURE:".length());

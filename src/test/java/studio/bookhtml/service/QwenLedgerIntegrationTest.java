@@ -176,6 +176,23 @@ class QwenLedgerIntegrationTest {
         try(var ctx=UsageContext.open(book,1,"QWEN_STRUCTURE")){ledger.succeeded(id);ledger.start("qwen","qwen-fixture");}
         assertEquals(2L,totals().get("requests"));
     }
+    @Test void legacyAdapterCannotDiscardNewAttemptIdentityOrCoerceNumbers() throws Exception {
+        String id;
+        try(var ctx=UsageContext.open(book,1,"QWEN_STRUCTURE")){id=ledger.start("qwen","qwen-fixture");}
+        Path path=store.bookDir(book).resolve("usage").resolve(id+".json");
+        byte[] original=Files.readAllBytes(path);
+        for(String sequence:List.of("1","-1","0","1.5","\"1\"","9223372036854775808")) {
+            String modified=new String(original,java.nio.charset.StandardCharsets.UTF_8)
+                    .replace("\"operation\":\"QWEN_STRUCTURE\"","\"operation\":\"QWEN_STRUCTURE:1\"")
+                    .replace("\"attemptSeq\":null","\"attemptSeq\":"+sequence);
+            Files.writeString(path,modified);
+            assertThrows(IOException.class,this::entries,"malformed mixed-version identity must remain visible");
+            assertEquals(modified,Files.readString(path),"read does not rewrite history");
+        }
+        Files.write(path,original);
+        assertEquals("QWEN_STRUCTURE",entries().get(0).get("operation"));
+    }
+
     @Test void duplicateKeysAndUnrecognizedLegacyOperationsStillFailClosed() throws Exception {
         String id;
         try(var ctx=UsageContext.open(book,1,"QWEN_STRUCTURE")){id=ledger.start("qwen","qwen-fixture");}

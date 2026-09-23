@@ -88,9 +88,9 @@ jobs:
           mkdir -p test-results/full-suite
           cp target/surefire-reports/TEST-*.xml test-results/full-suite/
           for round in 1 2 3; do
-            mvn --batch-mode -Dtest=ReadingWindowServiceTest,PageAttemptLifecycleTest,RemediationLifecycleTest,ProgressReducerRegressionTest,QwenRequestGateTest,DurableReprocessTest,PageStatisticsCacheTest,PagePublicationAuthorityTest,PublicationProcessCrashTest test
+            mvn --batch-mode -Dtest=ReadingWindowServiceTest,PageAttemptLifecycleTest,RemediationLifecycleTest,ProgressReducerRegressionTest,QwenRequestGateTest,DurableReprocessTest,PageStatisticsCacheTest,PagePublicationAuthorityTest,PublicationProcessCrashTest,UnifiedPageEngineTest,QwenPhysicalCallTest,QwenLedgerIntegrationTest test
             mkdir -p "test-results/lifecycle-repeat-$round"
-            for suite in ReadingWindowServiceTest PageAttemptLifecycleTest RemediationLifecycleTest ProgressReducerRegressionTest QwenRequestGateTest DurableReprocessTest PageStatisticsCacheTest PagePublicationAuthorityTest PublicationProcessCrashTest; do
+            for suite in ReadingWindowServiceTest PageAttemptLifecycleTest RemediationLifecycleTest ProgressReducerRegressionTest QwenRequestGateTest DurableReprocessTest PageStatisticsCacheTest PagePublicationAuthorityTest PublicationProcessCrashTest UnifiedPageEngineTest QwenPhysicalCallTest QwenLedgerIntegrationTest; do
               cp "target/surefire-reports/TEST-studio.bookhtml.service.$suite.xml" "test-results/lifecycle-repeat-$round/"
             done
           done

@@ -62,6 +62,9 @@ public class BookStore {
             java.util.function.Function<PageAttempt,ReprocessOperation> receipt) throws IOException {
         return authority.admit(this,id,page,revision,jobId,operations,overwrite,operationKey,receipt);
     }
+    public PageAttempt pageAttempt(String id,int page) {
+        synchronized(dirLock) { return authority.read(this,id).intents().get(id+":"+page); }
+    }
     public void finishPageAttempt(PageAttempt owner, String lifecycle) throws IOException { authority.finish(this,owner,lifecycle); }
     public void revokePageAttempt(PageAttempt owner) throws IOException { authority.revoke(this,owner); }
     public String recoveredAttemptOutcome(PageAttempt owner) {

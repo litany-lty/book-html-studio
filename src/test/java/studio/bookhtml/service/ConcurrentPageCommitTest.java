@@ -127,7 +127,7 @@ class ConcurrentPageCommitTest {
         java.util.concurrent.CountDownLatch inProcessor = new java.util.concurrent.CountDownLatch(1);
         java.util.concurrent.CountDownLatch releaseProcessor = new java.util.concurrent.CountDownLatch(1);
         PageProcessor processor = mock(PageProcessor.class);
-        when(processor.process(eq(id), eq(1), anyString(), anyString(), anyBoolean(), anyBoolean(), any())).thenAnswer(inv -> {
+        when(processor.processBaseline(eq(id), eq(1), anyString(), anyString(), anyBoolean(),any())).thenAnswer(inv -> {
             inProcessor.countDown();
             assertTrue(releaseProcessor.await(10, TimeUnit.SECONDS));
             Block ocr = textBlock("ocr-1", "识别结果文字内容");

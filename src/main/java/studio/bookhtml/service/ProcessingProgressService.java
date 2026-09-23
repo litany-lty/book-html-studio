@@ -135,10 +135,14 @@ public class ProcessingProgressService {
 
     /** Must be called with the actual commit return value, never an inferred revision. */
     public synchronized void baselinePublished(String bookId, int pageNumber, UUID attemptId, int revision, boolean enhanced) {
+        publication(bookId,pageNumber,attemptId,revision,true,enhanced);
+    }
+    public synchronized void publication(String bookId,int pageNumber,UUID attemptId,int revision,boolean readable,boolean enhanced) {
         Entry e = entries.get(key(bookId, pageNumber, attemptId));
         if (e == null || e.terminal() || revision < e.publishedRevision) return;
-        e.publishedRevision = revision; e.availability = enhanced ? "ENHANCED" : "OCR_READABLE";
-        e.canRead = true; e.changed();
+        e.publishedRevision = revision;
+        e.availability = readable ? enhanced ? "ENHANCED" : "OCR_READABLE" : "ORIGINAL_ONLY";
+        e.canRead = readable; e.changed();
     }
 
     public synchronized void finish(String bookId, int pageNumber, UUID attemptId, String lifecycle, String messageCode, boolean canRetry) {
