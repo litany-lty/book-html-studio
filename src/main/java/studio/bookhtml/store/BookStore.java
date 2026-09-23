@@ -45,6 +45,7 @@ public class BookStore {
     private final CloudConsentStore consentStore;
     private final ReadingPolicyStore policyStore;
     private final OperationEpochStore epochStore;
+    private final studio.bookhtml.service.ContextDependencyValidator contextValidator = new studio.bookhtml.service.ContextDependencyValidator();
     public record PageChange(String bookId, Page previous, Page committed, long sourceEpoch) {}
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong> pageEpochs = new java.util.concurrent.ConcurrentHashMap<>();
     private final List<java.util.function.Consumer<PageChange>> pageListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
@@ -535,7 +536,19 @@ public class BookStore {
                                   String candidateSetHash, String candidateId,
                                   String originalReplacement, String simplifiedReplacement,
                                   String converterVersion, String clientOperationId,
-                                  String decisionId, String basisPdfSha256) {}
+                                  String decisionId, String basisPdfSha256,
+                                  String parentPlanHash, String reviewPlanHash,
+                                  String contextHash, studio.bookhtml.domain.ContextSnapshot contextSnapshot) {
+        public IssueAcceptSpec(String blockId, String issueId, String expectedBasisHash,
+                               String candidateSetHash, String candidateId,
+                               String originalReplacement, String simplifiedReplacement,
+                               String converterVersion, String clientOperationId,
+                               String decisionId, String basisPdfSha256) {
+            this(blockId, issueId, expectedBasisHash, candidateSetHash, candidateId,
+                    originalReplacement, simplifiedReplacement, converterVersion, clientOperationId,
+                    decisionId, basisPdfSha256, null, null, null, null);
+        }
+    }
 
     public record IssueAcceptResult(Page committed, boolean idempotent) {}
 
@@ -589,6 +602,18 @@ public class BookStore {
             }
             if (!basis.equals(spec.expectedBasisHash()))
                 throw new PageConflictException(currentRev, "问题基线已变化，请刷新后重试");
+
+            // G08: 锁内 JEV 决策接受上下文与计划依赖校验
+            if (spec.contextSnapshot() != null || spec.contextHash() != null || spec.parentPlanHash() != null) {
+                long curSeq = sourceJournal.currentSourceSeq(bookDir(id), id);
+                studio.bookhtml.service.ContextDependencyValidator.ValidationOutcome outcome =
+                        contextValidator.validateInLock(current, spec, curSeq);
+                if (!outcome.isValid()) {
+                    throw new PageConflictException(currentRev,
+                            "JEV建议依赖的上下文在提交锁内已失效或发生并发冲突: " + outcome.reason());
+                }
+            }
+
             if (spec.originalReplacement() == null || spec.originalReplacement().isBlank())
                 throw new ApiException(HttpStatus.BAD_REQUEST, "候选正文为空");
             java.time.Instant now = java.time.Instant.now();
@@ -629,6 +654,7 @@ public class BookStore {
      * 存的是派生索引与人工选择，不是原文；删 sidecar 可重建（人工覆盖需保留）。
      */
     public Path layoutProfilePath(String id) { return bookDir(id).resolve("layout-profile.json"); }
+    public Path contentProfilePath(String id) { return bookDir(id).resolve("content-profile.json"); }
     public Path presentationOverridesPath(String id) { return bookDir(id).resolve("presentation-overrides.json"); }
     /** U4：页面 attempt 恢复意图（IN_PROGRESS → 终态；重启对照，不重发云请求）。 */
     public Path pageAttemptsPath(String id) { return bookDir(id).resolve("page-attempts.json"); }

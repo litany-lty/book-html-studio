@@ -32,6 +32,7 @@
 
 | 测试套件 | 运行环境 | 实测通过项 | 失败/错误 | 跳过项 | 状态 | 证据 |
 |---|---|---|---|---|---|---|
+| Java 完整套件 (B07 后) | Oracle JDK 17.0.17 | 760 | 0 | 0 | PASS | `mvn test` 全部通过 (含3套B07共15项专项用例) |
 | Java 完整套件 (B06 后) | Oracle JDK 17.0.17 | 745 | 0 | 0 | PASS | `mvn test` 全部通过 (含4套B06共15项专项用例) |
 | Java 完整套件 (B05 后) | Oracle JDK 17.0.17 | 730 | 0 | 0 | PASS | `mvn test` 全部通过 (含B05统一网络层与恢复专项) |
 | Java 完整套件 (B01 后) | Oracle JDK 17.0.17 | 666 | 0 | 0 | PASS | `mvn test` 全部通过 (含4套B01专项用例) |
@@ -85,7 +86,7 @@
 | **G05** | B06 | DONE | 跨入口、跨书、多标签分阶段优先级调度（当前页 P0 优先） | 745 套件全绿，4 套新增专项实测 PASS (抢占/公平性/阶段释放/轻量队列) |
 | **G06** | B04 | DONE | 服务端持久 CloudConsent / ReadingPolicy，有限授权下自动当前页处理 | 715 套件全绿，5 套新增专项实测 PASS |
 | **G07** | B04/B05 | PARTIAL_CODE | 统一幂等准入、operationEpoch（30天/4096上限）与批量快照持久化 | B04/B05 已完成 Epoch、批量准入与远端持久任务，待 B07/B08 计划集成 |
-| **G08** | B07 | PARTIAL_CODE | BookContentProfile + 严格 ContextSnapshot + JEV 接受锁内依赖校验 | 待实现 |
+| **G08** | B07 | DONE | BookContentProfile + 严格 ContextSnapshot + JEV 接受锁内依赖校验 | 760 套件全绿，3 套新增专项实测 PASS (BookContentProfile/ContextSnapshot/JEV锁内校验) |
 | **G09** | B08 | TODO_CODE | 完整 V3 固定计划（父 planHash/子 reviewPlanHash/contextHash/持久 eventSeq） | 待实现 |
 | **G10** | B01 | DONE | 图像解码图、子图、PNG、Base64、请求体及临时磁盘完整字节租约 | 666 套件全绿，4 套新增专项实测 PASS |
 | **G11** | B09 | PARTIAL_CODE | 前端 12页/32MiB 缓存双上限、校对工作台按需挂载、交互会话守卫 | 待实现 |
@@ -150,13 +151,19 @@
 | **B06-04** | B06 | DONE | 基准 OCR 与增强执行线程池解耦，基准提交即释放后续页执行，杜绝大模型增强阻塞基准流水线 | `PageStageReleaseTest` (2 tests) | 实测 PASS |
 | **B06-05** | B06 | DONE | `JobService` 队列轻量描述符化（`PageTaskDescriptor` 内存极简），`activeReserved` 按 `bookId:pageNumber` 隔离 | `BatchContinuationTest` (4 tests) | 实测 PASS |
 | **B06-06** | B06 | DONE | B06 批次 15 项新增专项实测 PASS，全仓 745 项测试全部通过（745/745 PASS） | `mvn test` 745/745 | 全部实测 PASS |
+| **B07-01** | B07 | DONE | 实现 `BookContentProfile`（`studio.bookhtml.domain.BookContentProfile`）模型与 `BookContentProfileService`，提供全书文字体系倾向、排版主模式、章节分布及字符估算的缓存与原子持久化（`content-profile.json`），基于 `sourceEventSeq` 与监听器主动失效，单调递增保护 | `BookContentProfileTest` (5 tests) | 实测 PASS |
+| **B07-02** | B07 | DONE | 实现严格 `ContextSnapshot`（`studio.bookhtml.domain.ContextSnapshot`）模型，强绑定 `parentPlanHash` 与 `reviewPlanHash`，严格校验 UTF-16 区间、Unicode 码点计数、UTF-8 字节长度与最大字节预算，禁止切断 UTF-16 代理对 | `ContextSnapshotTest` (5 tests) | 实测 PASS |
+| **B07-03** | B07 | DONE | `DecisionStore` 增加 `saveContextSnapshot` 与 `loadContextSnapshot`，实现上下文快照原子落盘与反查 | `ContextSnapshotTest` | 实测 PASS |
+| **B07-04** | B07 | DONE | 实现 `ContextDependencyValidator`（`studio.bookhtml.service.ContextDependencyValidator`），提供上下文有效性校验与 `validateInLock` 锁内复核，返回结构化校验状态 | `DecisionContextStalenessTest` | 实测 PASS |
+| **B07-05** | B07 | DONE | `DecisionAcceptService` 与 `BookStore.applyIssueResolution` 目录写锁内深度集成，校验计划哈希、上下文原文漂移与版本推进，防止过期决策覆盖人工修改 | `DecisionContextStalenessTest` (5 tests) | 实测 PASS |
+| **B07-06** | B07 | DONE | B07 批次 15 项新增专项实测 PASS，全仓 760 项测试全部通过（760/760 PASS） | `mvn test` 760/760 | 全部实测 PASS |
 
-*(后续批次 B07～B13 子任务随各批次执行实时更新)*
+*(后续批次 B08～B13 子任务随各批次执行实时更新)*
 
 ---
 
 ## 7. 下一步行动
-立即执行 **B07 批次**（BookContentProfile + ContextSnapshot + JEV 接受锁内依赖校验 / G08）：
-1. 建立 `BookContentProfile` 模型与基于事件修订号的缓存失效机制；
-2. 建立 `ContextSnapshot` 模型，实现父计划与子评审计划严格绑定与哈希校验；
-3. `BookStore` 目录写锁内注入 JEV 决策接受依赖检查，防止并发覆写脏数据。
+立即执行 **B08 批次**（完整 V3 固定计划与持久进度 / G09）：
+1. 建立 `WorkPlan` 与子计划两层冻结模型（父 planHash/子 reviewPlanHash/contextHash/持久 eventSeq）；
+2. 实现 `ProgressJournal` 记录连续持久 `eventSeq`；
+3. 区分完成率与准确率，PARTIAL 结算语义为“本轮结束 · 部分待核对”；保持 V2 适配器兼容。

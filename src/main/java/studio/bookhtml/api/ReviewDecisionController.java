@@ -64,7 +64,17 @@ public class ReviewDecisionController {
     public record AcceptDecisionBody(String clientOperationId, String blockId,
                                      Integer expectedPageRevision, String issueBasisHash,
                                      String candidateSetHash, String candidateId,
-                                     Boolean userAttestedSourceCheck) {}
+                                     Boolean userAttestedSourceCheck,
+                                     String parentPlanHash, String reviewPlanHash,
+                                     String contextSnapshotId) {
+        public AcceptDecisionBody(String clientOperationId, String blockId,
+                                  Integer expectedPageRevision, String issueBasisHash,
+                                  String candidateSetHash, String candidateId,
+                                  Boolean userAttestedSourceCheck) {
+            this(clientOperationId, blockId, expectedPageRevision, issueBasisHash,
+                    candidateSetHash, candidateId, userAttestedSourceCheck, null, null, null);
+        }
+    }
 
     @RequestMapping(value = "/books/{bookId}/pages/{page}/issues/{issueId}/decisions/{decisionId}/accept",
             method = RequestMethod.POST)
@@ -82,7 +92,8 @@ public class ReviewDecisionController {
                 decisionId, new DecisionAcceptService.AcceptBody(body.clientOperationId(),
                         body.blockId(), body.expectedPageRevision(), body.issueBasisHash(),
                         body.candidateSetHash(), body.candidateId(),
-                        Boolean.TRUE.equals(body.userAttestedSourceCheck())));
+                        Boolean.TRUE.equals(body.userAttestedSourceCheck()),
+                        body.parentPlanHash(), body.reviewPlanHash(), body.contextSnapshotId()));
         Map<String, Object> response = new LinkedHashMap<>();
         // 成功后返回此次实际 committed Page/revision，不再 readPage 取可能被推进的版本
         response.put("pageRevision", BookStore.revisionOrZero(result.committed()));
