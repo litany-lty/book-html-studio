@@ -48,12 +48,14 @@ public class BaiduPpOcrClient {
     private final ObjectMapper json;
     private final BaiduPpOcrParser parser;
     private final Transport transport;
-    private final Map<String, Object> locks = new ConcurrentHashMap<>();
+    private static final int LOCK_STRIPES = 64;
+    private final Object[] locks = new Object[LOCK_STRIPES];
     private String accessToken = "";
     private long tokenExpiresAt;
     private long tokenSettingsRevision = -1;
     private SettingsService settings;
     private UsageLedger usage;
+    private ProviderResourceRegistry resources;
 
     @Autowired
     public BaiduPpOcrClient(AppProperties config, PpOcrProperties ppocr, ObjectMapper json, BaiduPpOcrParser parser) {
@@ -66,8 +68,10 @@ public class BaiduPpOcrClient {
         this.json = json;
         this.parser = parser;
         this.transport = transport;
+        for (int i = 0; i < locks.length; i++) locks[i] = new Object();
     }
 
+    @Autowired(required = false) public void setResourceRegistry(ProviderResourceRegistry resources) { this.resources = resources; }
     @Autowired public void setSettings(SettingsService settings) { this.settings = settings; }
     @Autowired public void setUsageLedger(UsageLedger usage) { this.usage = usage; }
     private String apiKey() { return settings == null ? config.baiduOcrApiKey() : settings.state().ppocrApiKey(); }
@@ -83,13 +87,22 @@ public class BaiduPpOcrClient {
             throw new ApiException(HttpStatus.BAD_REQUEST, "送识 PNG 超过 PP-OCRv6 10MB 限制");
         if (width <= 0 || height <= 0) throw new ApiException(HttpStatus.BAD_REQUEST, "送识图片尺寸无效");
         String hash = fingerprint(png);
-        Object lock = locks.computeIfAbsent(hash, key -> new Object());
-        synchronized (lock) {
+        Object lock = locks[Math.floorMod(hash.hashCode(), locks.length)];
+        ProviderResourceRegistry.Permit permit = null;
+        if (resources != null) {
             try {
-                return recognizeLocked(hash, png, width, height, layout, cancelled);
-            } finally {
-                locks.remove(hash, lock);
+                permit = resources.acquire(ProviderResourceRegistry.POOL_OCR, true, Duration.ofSeconds(30), cancelled);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new CancelledException();
             }
+        }
+        try {
+            synchronized (lock) {
+                return recognizeLocked(hash, png, width, height, layout, cancelled);
+            }
+        } finally {
+            if (permit != null) permit.close();
         }
     }
 
@@ -218,9 +231,21 @@ public class BaiduPpOcrClient {
         query.put("client_secret", secretKey());
         HttpRequest request = HttpRequest.newBuilder(URI.create(AUTH_URI + "?" + form(query)))
                 .timeout(Duration.ofSeconds(30)).POST(HttpRequest.BodyPublishers.noBody()).build();
-        JsonNode response = sendJson(request, cancelled, null);
-        String code = errorCode(response);
-        if (code != null) throw new OcrException("百度 OCR 认证失败（错误码 " + code + "）");
+        String authAttemptId = null;
+        if (usage != null) try { authAttemptId = usage.start("ppocr-auth", "token"); } catch (Exception ignored) {}
+        JsonNode response;
+        try {
+            response = sendJson(request, cancelled, authAttemptId);
+            String code = errorCode(response);
+            if (code != null) {
+                if (usage != null && authAttemptId != null) try { usage.failed(authAttemptId); } catch (Exception ignored) {}
+                throw new OcrException("百度 OCR 认证失败（错误码 " + code + "）");
+            }
+            if (usage != null && authAttemptId != null) try { usage.succeeded(authAttemptId); } catch (Exception ignored) {}
+        } catch (Exception e) {
+            if (usage != null && authAttemptId != null) try { usage.failed(authAttemptId); } catch (Exception ignored) {}
+            throw e;
+        }
         String token = response.path("access_token").asText("");
         if (token.isBlank()) throw new OcrException("百度 OCR 认证失败");
         long expires = Math.max(60, response.path("expires_in").asLong(3600));

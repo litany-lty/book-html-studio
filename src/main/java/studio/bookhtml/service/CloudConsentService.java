@@ -142,6 +142,10 @@ public class CloudConsentService {
         return consent != null && consent.permitsProvider(provider);
     }
 
+    public boolean isCloudAuthorized(String bookId, String provider) {
+        return hasConsent(bookId, provider);
+    }
+
     public void validateAuthorization(String subjectId, String bookId, String provider, boolean enhance, boolean regionalRecovery) {
         String sub = resolveSubject(subjectId);
         // Only cloud providers require persistent consent

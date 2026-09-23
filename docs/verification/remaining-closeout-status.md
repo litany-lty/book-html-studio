@@ -78,11 +78,11 @@
 |---|---|---|---|---|
 | **G01** | B02 | DONE | 账本有界追加日志、检查点、分页索引、增量汇总与归档 | 679 套件全绿，8 套新增账本专项实测 PASS |
 | **G02** | B03 | DONE | 来源事件最小记录、永久页摘要/统计/倒排检索索引与小型页头 | 698 套件全绿，6 套新增专项实测 PASS |
-| **G03** | B05 | PARTIAL_CODE | 全模型统一物理调用、账户并发与预算治理 | 待实现 |
-| **G04** | B05 | TODO_CODE | 异步 OCR 远端 Job 持久占位、轮询恢复与未知债务治理 | 待实现 |
+| **G03** | B05 | DONE | 全模型统一物理调用、账户并发与预算治理 | 730 套件全绿，ManagedTransport + ProviderResourceRegistry + AttemptCallBudgetStore + DelayedCallQueue 统一治理 |
+| **G04** | B05 | DONE | 异步 OCR 远端 Job 持久占位、轮询恢复与未知债务治理 | 730 套件全绿，RemoteJobRegistry + SUBMIT_UNKNOWN 保护 + crash recovery 轮询防重复开销 |
 | **G05** | B06 | PARTIAL_CODE | 跨入口、跨书、多标签分阶段优先级调度（当前页 P0 优先） | 待实现 |
 | **G06** | B04 | DONE | 服务端持久 CloudConsent / ReadingPolicy，有限授权下自动当前页处理 | 715 套件全绿，5 套新增专项实测 PASS |
-| **G07** | B04/B05 | PARTIAL_CODE | 统一幂等准入、operationEpoch（30天/4096上限）与批量快照持久化 | B04 已完成 Epoch 与批量准入，待 B05 异步任务集成 |
+| **G07** | B04/B05 | PARTIAL_CODE | 统一幂等准入、operationEpoch（30天/4096上限）与批量快照持久化 | B04/B05 已完成 Epoch、批量准入与远端持久任务，待 B07/B08 计划集成 |
 | **G08** | B07 | PARTIAL_CODE | BookContentProfile + 严格 ContextSnapshot + JEV 接受锁内依赖校验 | 待实现 |
 | **G09** | B08 | TODO_CODE | 完整 V3 固定计划（父 planHash/子 reviewPlanHash/contextHash/持久 eventSeq） | 待实现 |
 | **G10** | B01 | DONE | 图像解码图、子图、PNG、Base64、请求体及临时磁盘完整字节租约 | 666 套件全绿，4 套新增专项实测 PASS |
@@ -90,7 +90,7 @@
 | **G12** | B10 | TODO_VERIFY | 冻结 ExportSnapshot、不可信脚本转义、ZIP 路径穿越与离线一致性 | 待实现 |
 | **G13** | B11 | PARTIAL_CODE | LAN 配对与能力分级认证、统一外发白名单、严格 CSP、秘密轮换演练 | 待实现 |
 | **G14** | B12 | TODO_CODE | 统一脱敏诊断指标、性能可复现埋点与故障记录 | 待实现 |
-| **G15** | B00/B05/B12 | TODO_VERIFY | 全仓未读入口、单飞锁、传输池与严格 JSON 审计 | B00 已建立清单 |
+| **G15** | B00/B05/B12 | PARTIAL_CODE | 全仓未读入口、单飞锁、传输池与严格 JSON 审计 | B00 清单已建立，B05 单飞条带锁与传输池已完成 |
 | **G16** | B13 | TODO_VERIFY | 合并后 main 全量门禁、分支清理与最终交付单一总报告 | 待实现 |
 
 ---
@@ -134,14 +134,21 @@
 | **B04-05** | B04 | DONE | `JobService` 接入统一幂等与准入检查，重放返回已有 Job 回执，参数冲突返回 409，持久化 `DurableBatchAdmission` | `DurableBatchAdmissionTest` (2 tests) | 实测 PASS |
 | **B04-06** | B04 | DONE | `OcrTextRecovery` 区域重试预算保护（基准 + 4 上限），未解析区域标为 `ocr-region-unresolved`，全空抛出异常 | `RegionalRecoveryBudgetTest` (4 tests) | 实测 PASS |
 | **B04-07** | B04 | DONE | B04 专项测试与全仓回归，17 项新增专项 + 715 项全量通过（715/715 PASS） | `mvn test` 715/715 | 全部实测 PASS |
+| **B05-01** | B05 | DONE | 实现统一网络层 `ManagedTransport`、`PhysicalCallCommand`、`CallOutcome`、`RequestFactory` 脱敏处理 | 单元测试 & 协议脱敏校验 | 实测 PASS |
+| **B05-02** | B05 | DONE | 实现全局容量与槽位治理 `ProviderResourceRegistry`（Qwen/Main OCR/Remote Jobs并发与前后台槽位隔离） | `AllProviderCallGovernanceTest` (4 tests) | 实测 PASS |
+| **B05-03** | B05 | DONE | 实现单次 Attempt 物理调用预算追踪 `AttemptCallBudgetStore`（OCR<=5, 增强<=8，退款语义 CONC-08/09） | `MixedProviderBudgetTest` (2 tests) | 实测 PASS |
+| **B05-04** | B05 | DONE | 实现异步 OCR 远端 Job 持久化与恢复 `RemoteJobRegistry`（`remote-jobs/<id>.json`，轮询持久持有槽位，未知债务防重提 CONC-12/13） | `RemoteJobRecoveryTest` (3 tests) | 实测 PASS |
+| **B05-05** | B05 | DONE | 实现非阻塞 429 延迟退避队列 `DelayedCallQueue`，立即关闭输入流与释放物理槽位（CONC-07） | `DelayedRetryOwnershipTest` (4 tests) | 实测 PASS |
+| **B05-06** | B05 | DONE | `BaiduPpOcrClient` 并发单飞锁改造为 64-条带锁，修复删除锁导致的锁逃逸与并发双跑问题 | `OcrSingleFlightRaceTest` (2 tests) | 实测 PASS |
+| **B05-07** | B05 | DONE | 改造 MiniMax、Qwen、Paddle AI Studio 客户端，接入统一治理与账本/授权检查 | 730/730 套件回归 | 全部实测 PASS |
+| **B05-08** | B05 | DONE | B05 批次 15 项新增专项实测 PASS，全仓 730 项测试全部通过（730/730 PASS） | `mvn test` 730/730 | 全部实测 PASS |
 
-*(后续批次 B05～B13 子任务随各批次执行实时更新)*
+*(后续批次 B06～B13 子任务随各批次执行实时更新)*
 
 ---
 
 ## 7. 下一步行动
-立即执行 **B05 批次**（统一物理调用池、凭据脱敏、异步 OCR 远端 Job 持久占位与轮询恢复 / G03, G04, G15）：
-1. 统一 HttpClient 与 OkHttpClient 物理连接池管理，配置最大空闲与保活上限；
-2. 实现全模型调用请求头、URL 与请求体中敏感凭据（Token / Key）严格脱敏校验；
-3. 实现异步 OCR 远端 Job 持久化占位（`remote-jobs/<jobId>.json`），崩溃重启后主动轮询恢复状态，避免重复提交与计费双重消耗；
-4. 治理未知债务与单飞排队锁。
+立即执行 **B06 批次**（跨入口、跨书、多标签分阶段优先级调度 / G05）：
+1. 建立统一分阶段优先级任务调度器（Foreground 当前页 P0 抢占、优先完成基准、后台预加载与批处理排队）；
+2. 调度器复用唯一 `PageProcessingService` 引擎，杜绝两套业务处理逻辑；
+3. 跨入口（随读、重试、批处理、校对）资源协调与公平让步机制。
