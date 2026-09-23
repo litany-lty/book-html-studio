@@ -44,7 +44,9 @@ public class PageProcessor {
         return process(bookId,pageNumber,provider,layout,split,false,cancelled);
     }
     public ProcessingResult process(String bookId,int pageNumber,String provider,String layout,boolean split,boolean assist,BooleanSupplier cancelled)throws Exception{
-        try(UsageContext.Scope ignored=UsageContext.open(bookId,pageNumber,"OCR_PAGE")){
+        try(UsageContext.Scope ignored=UsageContext.open(bookId,pageNumber,"OCR_PAGE");
+            QwenExecutionScope execution=QwenExecutionScope.open(bookId,pageNumber,gate,
+                    priority != null && priority.foreground(bookId,pageNumber))){
         if(cancelled.getAsBoolean())throw new CancelledException();Page previous=store.readPage(bookId,pageNumber);String nativeLayout="vertical".equals(layout)?"vertical":"horizontal".equals(layout)?"horizontal":"auto";
         Optional<List<Block>>nativeBlocks=nativeText.extract(store.pdf(bookId),pageNumber,nativeLayout);List<Block>blocks;List<Block>sourceRecords;String actualProvider;List<String>warnings=new ArrayList<>();
         if(nativeBlocks.isPresent()&&!nativeBlocks.get().isEmpty()&&!preferOcrOverNative(store.pdf(bookId),pageNumber,nativeBlocks.get(),warnings,cancelled)){
@@ -326,7 +328,9 @@ public class PageProcessor {
         }
     }
     public EnrichResult enrichBaseline(String bookId,int pageNumber,Page baseline,String provider,String layout,BooleanSupplier cancelled)throws Exception{
-        try(UsageContext.Scope ignored=UsageContext.open(bookId,pageNumber,"ENRICH_PAGE")){
+        try(UsageContext.Scope ignored=UsageContext.open(bookId,pageNumber,"ENRICH_PAGE");
+            QwenExecutionScope execution=QwenExecutionScope.open(bookId,pageNumber,gate,
+                    priority != null && priority.foreground(bookId,pageNumber))){
         if(cancelled.getAsBoolean())throw new CancelledException();
         List<Block> sourceRecords=baseline.sourceRecords()==null?List.of():baseline.sourceRecords();
         List<String> warnings=new ArrayList<>();

@@ -98,11 +98,22 @@ public class QwenAssistCoordinator {
                                        String layout,
                                        boolean foreground,
                                        BooleanSupplier cancelled) throws Exception {
+        try (QwenExecutionScope execution=QwenExecutionScope.open(bookId,pageNumber,gate,foreground)) {
+            return coordinateWithinScope(bookId,pageNumber,baselineBlocks,parentTexts,plan,
+                    regionImages,overviewImage,layout,foreground,cancelled);
+        }
+    }
+
+    private CoordinateResult coordinateWithinScope(String bookId, int pageNumber,
+                                       List<Block> baselineBlocks, Map<String,String> parentTexts,
+                                       QwenTaskPlanner.PlannedReview plan, Map<String,byte[]> regionImages,
+                                       byte[] overviewImage, String layout, boolean foreground,
+                                       BooleanSupplier cancelled) throws Exception {
         if (reviewClient == null || structureClient == null)
             throw new OcrException("Qwen 分组增强未装配（缺核对/结构客户端）");
         List<String> warnings = new ArrayList<>();
-        QwenRequestGate.Budget budget = gate == null
-                ? new QwenRequestGate.Budget(8) : gate.newBudget();
+        QwenExecutionScope.Value execution=QwenExecutionScope.current();
+        QwenRequestGate.Budget budget = execution.budget();
 
         // 1. 轻量全局结构：只定区域/读序/角色建议，不逐字重抄。
         List<String> baselineOrder = baselineBlocks.stream()
@@ -110,9 +121,9 @@ public class QwenAssistCoordinator {
                 .map(Block::id).toList();
         List<String> confirmedOrder = new ArrayList<>(baselineOrder);
         if (!plan.chunks().isEmpty() && structureClient.configured()) {
-            if (budget.reserve(1)) {
+            if (budget.remaining() > 0) {
                 try (UsageContext.Scope ignored =
-                             UsageContext.open(bookId, pageNumber, "QWEN_STRUCTURE:" + pageNumber)) {
+                             UsageContext.open(bookId, pageNumber, "QWEN_STRUCTURE", String.valueOf(pageNumber))) {
                     List<String> proposed = structureClient.structurePlan(
                             regionImages.get("__overview__"), baselineBlocks, layout, cancelled, foreground);
                     if (isPermutation(baselineOrder, proposed)) {
@@ -149,8 +160,10 @@ public class QwenAssistCoordinator {
                 try {
                     future = CompletableFuture.supplyAsync(() -> {
                         if (attemptId != null) progress.inFlight(bookId, pageNumber, attemptId, 1);
-                        try { return runChunk(bookId, pageNumber, chunk, parentTexts, regionImages.get(chunk.chunkId()),
-                                overviewImage, foreground, budget, cancelled); }
+                        try (QwenExecutionScope childScope=QwenExecutionScope.attach(execution)) {
+                            return runChunk(bookId, pageNumber, chunk, parentTexts, regionImages.get(chunk.chunkId()),
+                                    overviewImage, foreground, budget, cancelled);
+                        }
                         finally { /* Completion accounting happens for success, failure and cancellation alike. */ }
                     }, pool());
                 } catch (java.util.concurrent.RejectedExecutionException full) {
@@ -248,7 +261,7 @@ public class QwenAssistCoordinator {
                                       boolean foreground, QwenRequestGate.Budget budget,
                                       BooleanSupplier cancelled, int regroupDepth) {
         // 子任务显式携带 book/page/task；进入工作线程打开 scope，finally 关闭。
-        UsageContext.Scope scope = UsageContext.open(bookId, pageNumber, "QWEN_TEXT_REVIEW:" + chunk.chunkId());
+        UsageContext.Scope scope = UsageContext.open(bookId, pageNumber, "QWEN_TEXT_REVIEW", chunk.chunkId());
         try {
             QwenTextReviewClient.ReviewResult result = reviewClient.reviewChunk(chunk, parentTexts,
                     regionImage, overviewImage, foreground, budget, cancelled);

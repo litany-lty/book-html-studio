@@ -36,6 +36,12 @@ public class JobService {
     private String readingReservationBookId;
     private SettingsService settings;
     private ProcessingProgressService progress;
+    private QwenRequestGate qwenGate;
+    private ReadingPriority readingPriority;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    public void setQwenExecutionDependencies(QwenRequestGate gate, ReadingPriority priority) {
+        this.qwenGate=gate; this.readingPriority=priority;
+    }
     @org.springframework.beans.factory.annotation.Autowired
     public JobService(BookStore store,BookService books,PageProcessor processor){
         this(store, books, processor, java.time.Clock.systemUTC());
@@ -464,7 +470,12 @@ public class JobService {
                     progress.plan(running.bookId, pageNumber, attemptId, "PAGE", 1);
                     progress.stage(running.bookId, pageNumber, attemptId, "OCR");
                 }
-                ProcessingResult result=processor.process(running.bookId,pageNumber,provider,layout,split,assist,()->running.cancelled||Thread.currentThread().isInterrupted());
+                ProcessingResult result;
+                try (QwenExecutionScope execution=QwenExecutionScope.open(admitted,qwenGate,
+                        readingPriority!=null && readingPriority.foreground(running.bookId,pageNumber))) {
+                    result=processor.process(running.bookId,pageNumber,provider,layout,split,assist,
+                            ()->running.cancelled||Thread.currentThread().isInterrupted());
+                }
                 Page page=mergeUnresolvedIssues(old,result.page());
                 if(result.category()==ProcessingResult.Category.TEXT_PARTIAL)errors.add("第 "+pageNumber+" 页仅恢复部分转录，需对照原稿核对");
                 if(running.cancelled||Thread.currentThread().isInterrupted())throw new CancelledException();
@@ -569,7 +580,8 @@ public class JobService {
                 UUID attemptId = progress == null || admitted == null ? null : admitted.attemptId();
                 // U4 跨 catch 可见：基线已发布时，取消不再恢复旧版（基线即有效可读版）。
                 boolean pageBaselinePublished = false;
-                try{
+                try(QwenExecutionScope execution=QwenExecutionScope.open(admitted,qwenGate,
+                        readingPriority!=null && readingPriority.foreground(running.bookId,pageNumber))){
                     // U4：两阶段。基线（OCR/原生）先行发布可读；增强（Qwen 整理/局部核对）
                     // 只产候选，经门与版本校验后最多发布一次。任一阶段取消/失败不丢基线。
                     boolean baselinePublishedThisPage = false;

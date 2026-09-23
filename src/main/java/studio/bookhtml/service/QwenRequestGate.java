@@ -131,6 +131,15 @@ public class QwenRequestGate {
     public static final class Budget {
         private final AtomicInteger remaining;
         private final int total;
+        private Long deadlineNanos;
+        /** One monotonic deadline for the whole shared execution, never reset by retries. */
+        public synchronized long deadline(int timeoutSeconds) {
+            long now = System.nanoTime();
+            long candidate = now + TimeUnit.SECONDS.toNanos(Math.max(1,Math.min(600,timeoutSeconds)));
+            if (deadlineNanos == null || candidate - deadlineNanos < 0) deadlineNanos = candidate;
+            return deadlineNanos;
+        }
+        public int limit() { return total; }
         Budget(int total) {
             if (total < 1) throw new IllegalArgumentException("invalid call budget");
             this.total = total;
@@ -154,5 +163,21 @@ public class QwenRequestGate {
             }
         }
         public int remaining() { return remaining.get(); }
+        /** A single owner may refund only before attempting a physical send. */
+        public Reservation claim() { return reserve(1) ? new Reservation(this) : null; }
+        public static final class Reservation implements AutoCloseable {
+            private final Budget budget;
+            private boolean sent, closed;
+            private Reservation(Budget budget) { this.budget = budget; }
+            public synchronized void markSent() {
+                if (closed || sent) throw new IllegalStateException("reservation already settled");
+                sent = true;
+            }
+            @Override public synchronized void close() {
+                if (closed) return;
+                closed = true;
+                if (!sent) budget.release(1);
+            }
+        }
     }
 }

@@ -187,6 +187,31 @@ class RemediationLifecycleTest {
     }
 
 
+    @Test void bothProcessingPhasesShareTheDurableAttemptBudget() throws Exception {
+        var gate=new QwenRequestGate(new QwenAssistProperties());
+        jobs.setQwenExecutionDependencies(gate,null);
+        var observed=new java.util.concurrent.atomic.AtomicReference<QwenExecutionScope.Value>();
+        when(processor.processBaseline(eq(bookId),eq(1),anyString(),anyString(),anyBoolean(),any()))
+                .thenAnswer(inv -> {
+                    var scope=QwenExecutionScope.current();assertNotNull(scope);
+                    observed.set(scope);assertTrue(scope.budget().reserve(2));
+                    return result("基线可读正文");
+                });
+        when(processor.enrichBaseline(eq(bookId),eq(1),any(),anyString(),anyString(),any()))
+                .thenAnswer(inv -> {
+                    assertSame(observed.get(),QwenExecutionScope.current());
+                    assertEquals(6,QwenExecutionScope.current().budget().remaining());
+                    return new PageProcessor.EnrichResult(result("增强可读正文").page().blocks(),"paddle-aistudio+qwen",List.of());
+                });
+        submit(request("shared-physical-budget",store.readPage(bookId,1).revision(),true,false));
+        await(()->!jobs.readingJobActive(reservation,1));
+        PageAttempt attempt=jobs.attemptSnapshot().get(bookId+":1");
+        assertEquals(attempt.attemptId(),observed.get().executionId());
+        assertEquals(attempt.generation(),observed.get().attemptSeq());
+        assertEquals("SUCCEEDED",progress.latest(bookId,1).lifecycle());
+        assertNull(QwenExecutionScope.current());
+    }
+
     @Test void repeatedStopAndCloseDoNotInterruptDurableFinalization() throws Exception {
         var entered = new CountDownLatch(1);
         var finalizing = new CountDownLatch(1);

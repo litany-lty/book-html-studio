@@ -36,13 +36,14 @@ public class QwenTocRecoveryService {
 
     private final QwenAssistProperties config;private final ObjectMapper json;private final Transport transport;
     private UsageLedger usage;
+    private boolean managedTransport;
 
     // U5：连接复用。不为每个子请求重新创建 HttpClient。
     private static final HttpClient SHARED_HTTP=HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     private static HttpResponse<InputStream> sharedSend(HttpRequest request)throws Exception{return SHARED_HTTP.send(request,HttpResponse.BodyHandlers.ofInputStream());}
 
     @Autowired
-    public QwenTocRecoveryService(QwenAssistProperties config,ObjectMapper json){this(config,json,QwenTocRecoveryService::sharedSend);}
+    public QwenTocRecoveryService(QwenAssistProperties config,ObjectMapper json){this(config,json,QwenTocRecoveryService::sharedSend);this.managedTransport=true;}
     QwenTocRecoveryService(QwenAssistProperties config,ObjectMapper json,Transport transport){this.config=config;this.json=json;this.transport=transport;}
     @Autowired public void setUsageLedger(UsageLedger usage){this.usage=usage;}
     private QwenRequestGate gate;
@@ -55,40 +56,40 @@ public class QwenTocRecoveryService {
         if(NONE.equals(plan.mode())){if(!sourceCandidate)return new RecoveryResult(original,false,false,false,null);return fallback(original,false,"未可靠检测到目录分区或竖向点引线，将继续使用常规 Qwen3.8-Max 结构辅助");}
         if(cancelled.getAsBoolean())throw new CancelledException();
         if(!configured())return new RecoveryResult(original,true,false,false,null);
-        boolean attempted=false,responseSeen=false,parsed=false;String attemptId=null;
-        // U5：物理 permit 覆盖发送到响应流收尾；目录恢复与结构/核对共用同一闸门。
-        QwenRequestGate.Permit permit=null;
-        try{
-            List<Region>regions=regions(image,plan);HttpRequest request=request(regions,plan,image);long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(Math.max(1,config.getTimeoutSeconds()));
-            if(usage!=null)attemptId=usage.start("qwen",config.getModel());
-            attempted=true;permit=acquirePermit();
-            HttpResponse<InputStream> response;
-            try{response=transport.send(request);}catch(CancelledException|OcrException|ApiException propagate){closeQuietly(permit);permit=null;throw propagate;}catch(Exception sendFailed){closeQuietly(permit);permit=null;throw new OcrException("目录恢复发送失败");}
-            responseSeen=true;
-            if(cancelled.getAsBoolean()){close(response.body());throw new CancelledException();}
-            if(response.statusCode()==429){close(response.body());throw new OcrException("目录恢复请求频率受限");}
-            if(response.statusCode()<200||response.statusCode()>=300){int status=response.statusCode();close(response.body());throw new OcrException("目录恢复请求失败（HTTP "+status+"）");}
-            byte[]body=readBody(response.body(),deadline,cancelled);if(body.length>MAX_RESPONSE_BYTES)throw new OcrException("目录恢复响应过大");
-            JsonNode root=json.readTree(body);if(usage!=null)usage.captureUsage(attemptId,root);if(root.has("error"))throw new OcrException("目录恢复返回业务错误");JsonNode choice=root.at("/choices/0");
-            if("length".equalsIgnoreCase(choice.path("finish_reason").asText()))throw new OcrException("目录恢复输出被截断");JsonNode content=choice.at("/message/content");
-            if(!content.isTextual())throw new OcrException("目录恢复返回结构无效");Map<String,RegionAnswer>answers=parse(stripFence(content.asText()),regions.stream().map(Region::id).toList());
-            List<Block>merged;if(SINGLE_VERTICAL.equals(plan.mode())){validateLeaderConsistency(plan,answers);merged=mergeSinglePage(original,regions,answers);}else merged=merge(original,regions,answers);
-            int recoveredLines=directoryLines(answers);String warning=SINGLE_VERTICAL.equals(plan.mode())?"Qwen3.8-Max 已按单页竖向点引线恢复目录（本地检测 "+plan.evidenceColumns()+" 条，返回 "+recoveredLines+" 条）；自动结果仍需核对原图":"Qwen3.8-Max 已按四个页面区域恢复目录；自动结果仍需核对原图";
-            parsed=true;if(usage!=null)usage.succeeded(attemptId);
-            return new RecoveryResult(merged,true,true,true,warning);
-        }catch(CancelledException e){throw e;}catch(OcrException e){return fallback(original,attempted,failureWarning(attempted,e.getMessage()));}catch(Exception e){return fallback(original,attempted,failureWarning(attempted,null));}
-        finally{if(usage!=null&&responseSeen&&!parsed)try{usage.failed(attemptId);}catch(java.io.IOException ignored){}closeQuietly(permit);}
+        boolean attempted=false;
+        try {
+            List<Region> regions=regions(image,plan);
+            HttpRequest request=request(regions,plan,image);
+            try (QwenPhysicalCall call=QwenPhysicalCall.open(gate,usage,config.getModel(),null,
+                    QwenExecutionScope.foregroundOr(false),config.getTimeoutSeconds(),cancelled,managedTransport)) {
+                try {
+                    HttpResponse<InputStream> response=call.send(request,transport::send);
+                    if(response.statusCode()<200 || response.statusCode()>=300)
+                        throw new OcrException("目录恢复请求失败（HTTP "+response.statusCode()+"）");
+                    JsonNode root=json.readTree(call.read(response,MAX_RESPONSE_BYTES));
+                    call.captureUsage(root);
+                    if(root==null || root.has("error")) throw new OcrException("目录恢复返回业务错误");
+                    JsonNode choice=root.at("/choices/0");
+                    if("length".equalsIgnoreCase(choice.path("finish_reason").asText())) throw new OcrException("目录恢复输出被截断");
+                    JsonNode content=choice.at("/message/content");
+                    if(!content.isTextual()) throw new OcrException("目录恢复返回结构无效");
+                    Map<String,RegionAnswer> answers=parse(stripFence(content.asText()),regions.stream().map(Region::id).toList());
+                    List<Block> merged;
+                    if(SINGLE_VERTICAL.equals(plan.mode())) { validateLeaderConsistency(plan,answers); merged=mergeSinglePage(original,regions,answers); }
+                    else merged=merge(original,regions,answers);
+                    int recoveredLines=directoryLines(answers);
+                    String warning=SINGLE_VERTICAL.equals(plan.mode())
+                            ? "Qwen3.8-Max 已按单页竖向点引线恢复目录（本地检测 "+plan.evidenceColumns()+" 条，返回 "+recoveredLines+" 条）；自动结果仍需核对原图"
+                            : "Qwen3.8-Max 已按四个页面区域恢复目录；自动结果仍需核对原图";
+                    if(cancelled.getAsBoolean()) throw new CancelledException();
+                    call.succeeded();
+                    return new RecoveryResult(merged,true,true,true,warning);
+                } finally { attempted=call.sent(); }
+            }
+        } catch(CancelledException propagate) { throw propagate; }
+        catch(OcrException failure) { return fallback(original,attempted,failureWarning(attempted,failure.getMessage())); }
+        catch(Exception failure) { return fallback(original,attempted,failureWarning(attempted,null)); }
     }
-
-    private QwenRequestGate.Permit acquirePermit() throws OcrException{
-        if(gate==null)return null;
-        try{
-            QwenRequestGate.Permit permit=gate.acquire(true,java.time.Duration.ofSeconds(Math.max(1,config.getTimeoutSeconds())));
-            if(permit==null)throw new OcrException("Qwen 并发队列已满，目录恢复保留原文");
-            return permit;
-        }catch(InterruptedException e){Thread.currentThread().interrupt();throw new CancelledException();}
-    }
-    private static void closeQuietly(QwenRequestGate.Permit permit){if(permit!=null)permit.close();}
 
     boolean configured(){return config.isEnabled()&&notBlank(config.getApiKey())&&notBlank(config.getBaseUrl())&&notBlank(config.getModel());}
 
@@ -193,9 +194,6 @@ public class QwenTocRecoveryService {
     private static boolean notBlank(String value){return value!=null&&!value.isBlank();}
     private static String text(JsonNode node,String name){JsonNode value=node==null?null:node.get(name);return value!=null&&value.isTextual()?value.asText():null;}
     private static String stripFence(String value){String result=value==null?"":value.strip();if(result.startsWith("```")){int first=result.indexOf('\n'),last=result.lastIndexOf("```");if(first>=0&&last>first)result=result.substring(first+1,last).strip();}return result;}
-    private static byte[]readBody(InputStream body,long deadline,BooleanSupplier cancelled)throws OcrException{if(body==null)throw new OcrException("目录恢复返回空响应");CompletableFuture<byte[]>future=CompletableFuture.supplyAsync(()->{try(InputStream input=body){return input.readNBytes(MAX_RESPONSE_BYTES+1);}catch(Exception e){throw new CompletionException(e);}});try{while(true){if(cancelled.getAsBoolean()){close(body);future.cancel(true);throw new CancelledException();}long remaining=deadline-System.nanoTime();if(remaining<=0){close(body);future.cancel(true);throw new OcrException("目录恢复响应超时");}try{return future.get(Math.min(remaining,TimeUnit.MILLISECONDS.toNanos(200)),TimeUnit.NANOSECONDS);}catch(TimeoutException ignored){}}}catch(InterruptedException e){Thread.currentThread().interrupt();close(body);future.cancel(true);throw new CancelledException();}catch(ExecutionException e){throw new OcrException("目录恢复响应读取失败");}}
-    private static void close(InputStream body){if(body==null)return;try{body.close();}catch(Exception ignored){}}
-
     public record RecoveryResult(List<Block>blocks,boolean candidate,boolean attempted,boolean recovered,String warning){}
     record PageSplits(double left,double right){}
     record TocPreflight(String mode,int evidenceColumns,List<double[]>boxes){TocPreflight{boxes=boxes==null?List.of():List.copyOf(boxes);}static TocPreflight none(){return new TocPreflight(NONE,0,List.of());}boolean candidate(){return !NONE.equals(mode);}}

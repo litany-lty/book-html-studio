@@ -31,20 +31,45 @@ public class UsageLedger {
     private final BookStore books;
     private final SettingsService settings;
     private final ObjectMapper json;
-    private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
+    private final Object[] locks = java.util.stream.IntStream.range(0,64).mapToObj(i -> new Object()).toArray();
 
     public record Entry(String id, String bookId, Instant createdAt, Instant updatedAt,
                         Integer pageNumber, String operation, String provider, String model,
                         String status, Long inputTokens, Long outputTokens, String feeKind,
-                        String currency, String amount, SettingsService.Rate priceSnapshot) {}
+                        String currency, String amount, SettingsService.Rate priceSnapshot,
+                        String executionId, String taskHash, Long attemptSeq) {
+        public Entry(String id, String bookId, Instant createdAt, Instant updatedAt,
+                     Integer pageNumber, String operation, String provider, String model,
+                     String status, Long inputTokens, Long outputTokens, String feeKind,
+                     String currency, String amount, SettingsService.Rate priceSnapshot,
+                     String executionId, String taskHash) {
+            this(id,bookId,createdAt,updatedAt,pageNumber,operation,provider,model,status,inputTokens,
+                    outputTokens,feeKind,currency,amount,priceSnapshot,executionId,taskHash,null);
+        }
+        public Entry(String id, String bookId, Instant createdAt, Instant updatedAt,
+                     Integer pageNumber, String operation, String provider, String model,
+                     String status, Long inputTokens, Long outputTokens, String feeKind,
+                     String currency, String amount, SettingsService.Rate priceSnapshot) {
+            this(id,bookId,createdAt,updatedAt,pageNumber,operation,provider,model,status,inputTokens,
+                    outputTokens,feeKind,currency,amount,priceSnapshot,null,null);
+        }
+    }
 
     public UsageLedger(BookStore books, SettingsService settings, ObjectMapper json) {
         this.books = books; this.settings = settings; this.json = json;
     }
-    private Object lock(String bookId) { return locks.computeIfAbsent(bookId, ignored -> new Object()); }
+    private Object lock(String bookId) { return locks[Math.floorMod(bookId.hashCode(),locks.length)]; }
 
     /** Durable SEND_UNKNOWN must precede the physical transport call. */
     public String start(String provider, String model) throws IOException {
+        return record(provider,model,"SENT_UNKNOWN");
+    }
+    /** PREPARED records an unsent intent; the send boundary promotes it before transport. */
+    public String prepare(String provider, String model) throws IOException {
+        return record(provider,model,"PREPARED");
+    }
+    public void sending(String id) throws IOException { change(id,"SENT_UNKNOWN",null,null); }
+    private String record(String provider, String model, String status) throws IOException {
         UsageContext.Value context = requireContext();
         String bookId = context.bookId();
         synchronized (lock(bookId)) {
@@ -54,12 +79,15 @@ public class UsageLedger {
                     .filter(r -> r.provider().equals(provider) && r.model().equals(model)).findFirst().orElse(null);
             Instant now = Instant.now();
             Entry entry = new Entry(id, bookId, now, now, context.pageNumber(), context.operation(),
-                    provider, model, "SENT_UNKNOWN", null, null, "UNKNOWN", null, null, rate);
+                    provider, model, status, null, null, "UNKNOWN", null, null, rate,
+                    executionId(context), taskHash(context), attemptSeq());
             save(bookId, entry);
             return id;
         }
     }
 
+    public void notSent(String id) throws IOException { change(id, "NOT_SENT", null, null); }
+    public void unknown(String id) throws IOException { change(id, "OUTCOME_UNKNOWN", null, null); }
     public void pending(String id) throws IOException { change(id, "PENDING", null, null); }
     public void succeeded(String id) throws IOException { change(id, "SUCCEEDED", null, null); }
     public void failed(String id) throws IOException { change(id, "FAILED", null, null); }
@@ -94,7 +122,7 @@ public class UsageLedger {
             String id = UUID.randomUUID().toString();
             save(context.bookId(), new Entry(id, context.bookId(), now, now, context.pageNumber(),
                     context.operation(), provider, model, "CACHE_REUSED", null, null,
-                    "CACHE_REUSE", null, null, null));
+                    "CACHE_REUSE", null, null, null,executionId(context),taskHash(context),attemptSeq()));
         }
     }
 
@@ -103,6 +131,15 @@ public class UsageLedger {
         synchronized (lock(context.bookId())) {
             Entry old = readEntry(context.bookId(), id);
             if (old == null || "CACHE_REUSED".equals(old.status())) throw new IOException("usage attempt absent");
+            if ("SENT_UNKNOWN".equals(status) && !"PREPARED".equals(old.status()))
+                throw new IOException("send intent is not prepared");
+            if ("PREPARED".equals(old.status()) && status != null
+                    && !Set.of("SENT_UNKNOWN","NOT_SENT").contains(status))
+                throw new IOException("prepared request has not been sent");
+            if(status != null && Set.of("SUCCEEDED","FAILED","NOT_SENT").contains(old.status())
+                    && !old.status().equals(status)) throw new IOException("usage terminal outcome already recorded");
+            if("NOT_SENT".equals(old.status()) && (inputTokens != null || outputTokens != null))
+                throw new IOException("unsent request cannot have token usage");
             Long input = inputTokens == null ? old.inputTokens() : inputTokens;
             Long output = outputTokens == null ? old.outputTokens() : outputTokens;
             String nextStatus = status == null ? old.status() : status;
@@ -113,7 +150,7 @@ public class UsageLedger {
                     old.pageNumber(), old.operation(), old.provider(), old.model(), nextStatus,
                     input, output, estimate == null ? "UNKNOWN" : "ESTIMATED",
                     estimate == null ? null : estimate.currency(),
-                    estimate == null ? null : estimate.amount(), old.priceSnapshot()));
+                    estimate == null ? null : estimate.amount(), old.priceSnapshot(),old.executionId(),old.taskHash(),old.attemptSeq()));
         }
     }
 
@@ -215,17 +252,20 @@ public class UsageLedger {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("id", e.id()); out.put("createdAt", e.createdAt()); out.put("updatedAt", e.updatedAt());
         out.put("pageNumber", e.pageNumber()); out.put("operation", e.operation());
+        out.put("executionId", e.executionId()); out.put("taskHash", e.taskHash()); out.put("attemptSeq",e.attemptSeq());
         out.put("provider", e.provider()); out.put("model", e.model()); out.put("status", e.status());
         out.put("inputTokens", e.inputTokens()); out.put("outputTokens", e.outputTokens());
         out.put("feeKind", e.feeKind()); out.put("currency", e.currency()); out.put("amount", e.amount());
         return out;
     }
     private static final class Totals {
-        long requests, success, failed, pending, cacheHits, unpriced, unknownInput, unknownOutput;
+        long requests, success, failed, pending, prepared, cacheHits, notSent, unpriced, unknownInput, unknownOutput;
         BigInteger input = BigInteger.ZERO, output = BigInteger.ZERO;
         final Map<String, BigDecimal> estimates = new LinkedHashMap<>();
         void add(Entry e) {
             if ("CACHE_REUSED".equals(e.status())) { cacheHits++; return; }
+            if ("NOT_SENT".equals(e.status())) { notSent++; return; }
+            if ("PREPARED".equals(e.status())) { prepared++; return; }
             requests++;
             switch (e.status()) { case "SUCCEEDED" -> success++; case "FAILED" -> failed++; default -> pending++; }
             if (e.inputTokens() == null) unknownInput++; else input = input.add(BigInteger.valueOf(e.inputTokens()));
@@ -239,7 +279,7 @@ public class UsageLedger {
                     .forEach(e -> amounts.add(Map.of("currency", e.getKey(), "amount", amount(e.getValue()))));
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("requests", requests); result.put("success", success); result.put("failed", failed);
-            result.put("pending", pending); result.put("cacheHits", cacheHits);
+            result.put("pending", pending); result.put("cacheHits", cacheHits); result.put("notSent", notSent); result.put("prepared", prepared);
             result.put("inputTokens", input); result.put("outputTokens", output);
             result.put("unknownInputTokenRequests", unknownInput); result.put("unknownOutputTokenRequests", unknownOutput);
             result.put("unpricedRequests", unpriced);
@@ -270,26 +310,64 @@ public class UsageLedger {
                 || Files.isSymbolicLink(path) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
                 || Files.size(path) > MAX_ENTRY_BYTES) throw new IOException("usage ledger damaged");
         Entry e;
-        try { e = json.readValue(Files.readAllBytes(path), Entry.class); }
+        try (var parser=json.getFactory().createParser(Files.readAllBytes(path))) {
+            parser.enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
+            JsonNode tree = json.readTree(parser);
+            if (tree==null || !tree.isObject() || parser.nextToken()!=null) throw new IOException("trailing usage record");
+            for (String field:List.of("pageNumber","inputTokens","outputTokens","attemptSeq")) {
+                JsonNode value=tree.get(field);
+                if (value!=null && !value.isNull() && (!value.isIntegralNumber() || !value.canConvertToLong()
+                        || field.equals("pageNumber") && !value.canConvertToInt()))
+                    throw new IOException("invalid usage integer");
+            }
+            e = json.treeToValue(tree,Entry.class);
+        }
         catch (Exception ex) { throw new IOException("usage ledger damaged"); }
-        if (e == null || !bookId.equals(e.bookId()) || !path.getFileName().toString().equals(e.id() + ".json")
+        e = normalizeLegacyOperation(e);
+        validateEntry(bookId, path.getFileName().toString(), e);
+        return e;
+    }
+    /** Earlier coordinators wrote a task suffix into the operation enum. Adapt only
+     * these generated forms; arbitrary corrupt operations still fail closed.
+     */
+    private static Entry normalizeLegacyOperation(Entry e) {
+        if(e==null || e.operation()==null || e.executionId()!=null || e.taskHash()!=null) return e;
+        String operation=e.operation(), task;
+        if(operation.startsWith("QWEN_STRUCTURE:")) {
+            task=operation.substring("QWEN_STRUCTURE:".length());
+            if(e.pageNumber()==null || !task.equals(String.valueOf(e.pageNumber()))) return e;
+            operation="QWEN_STRUCTURE";
+        } else if(operation.startsWith("QWEN_TEXT_REVIEW:")) {
+            task=operation.substring("QWEN_TEXT_REVIEW:".length());
+            if(!task.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,119}")) return e;
+            operation="QWEN_TEXT_REVIEW";
+        } else return e;
+        if(!"qwen".equals(e.provider())) return e;
+        return new Entry(e.id(),e.bookId(),e.createdAt(),e.updatedAt(),e.pageNumber(),operation,
+                e.provider(),e.model(),e.status(),e.inputTokens(),e.outputTokens(),e.feeKind(),
+                e.currency(),e.amount(),e.priceSnapshot(),null,studio.bookhtml.decision.DecisionHash.sha256Hex(task));
+    }
+    private static void validateEntry(String bookId, String filename, Entry e) throws IOException {
+        if (e == null || !bookId.equals(e.bookId()) || !filename.equals(e.id() + ".json")
                 || e.createdAt() == null || e.updatedAt() == null || e.createdAt().isAfter(e.updatedAt())
                 || e.provider() == null || e.model() == null || e.operation() == null
                 || !e.model().matches("[A-Za-z0-9][A-Za-z0-9._-]{0,119}")
                 || !e.operation().matches("[A-Z][A-Z0-9_]{0,39}")
                 || e.pageNumber() != null && e.pageNumber() < 1
                 || !Set.of("paddle-aistudio", "ppocr", "qwen", "jev").contains(e.provider())
-                || !Set.of("SENT_UNKNOWN", "PENDING", "SUCCEEDED", "FAILED", "CACHE_REUSED").contains(e.status())
+                || !Set.of("PREPARED", "SENT_UNKNOWN", "PENDING", "OUTCOME_UNKNOWN", "NOT_SENT", "SUCCEEDED", "FAILED", "CACHE_REUSED").contains(e.status())
                 || !Set.of("UNKNOWN", "ESTIMATED", "CACHE_REUSE").contains(e.feeKind())
                 || e.inputTokens() != null && e.inputTokens() < 0
                 || e.outputTokens() != null && e.outputTokens() < 0
                 || ("ESTIMATED".equals(e.feeKind()) != (e.currency() != null && e.amount() != null))
                 || e.currency() != null && !Set.of("CNY", "USD").contains(e.currency())
                 || e.amount() != null && !validAmount(e.amount())
+                || e.executionId() != null && !canonicalUuid(e.executionId())
+                || e.attemptSeq() != null && (e.attemptSeq()<1 || e.executionId()==null)
+                || e.taskHash() != null && !e.taskHash().matches("[0-9a-f]{64}")
                 || e.priceSnapshot() != null && !validPriceSnapshot(e)
                 || ("CACHE_REUSED".equals(e.status()) != "CACHE_REUSE".equals(e.feeKind())))
             throw new IOException("usage ledger damaged");
-        return e;
     }
     private static boolean validAmount(String value) {
         try { return value.length() <= 48 && value.matches("[0-9]+(?:\\.[0-9]{1,12})?")
@@ -310,25 +388,67 @@ public class UsageLedger {
     }
     private Path usageDir(String bookId) { return books.bookDir(bookId).resolve("usage"); }
     private void save(String bookId, Entry entry) throws IOException {
+        validateEntry(bookId,entry.id() + ".json",entry);
         Path dir = usageDir(bookId), temp = null;
         try {
             if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) Files.createDirectory(dir);
             if (Files.isSymbolicLink(dir) || !Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) throw new IOException("usage ledger unsafe");
-            Files.setPosixFilePermissions(dir, DIR_PERMS);
+            setPermissions(dir, DIR_PERMS);
             Path target = dir.resolve(entry.id() + ".json");
             if (Files.exists(target, LinkOption.NOFOLLOW_LINKS) && Files.isSymbolicLink(target)) throw new IOException("usage ledger unsafe");
             temp = Files.createTempFile(dir, "entry-", ".tmp");
-            Files.setPosixFilePermissions(temp, FILE_PERMS);
+            setPermissions(temp, FILE_PERMS);
             byte[] bytes = json.writeValueAsBytes(entry);
             if (bytes.length > MAX_ENTRY_BYTES) throw new IOException("usage entry too large");
-            Files.write(temp, bytes, StandardOpenOption.TRUNCATE_EXISTING);
+            boolean interrupted = Thread.interrupted();
+            try (var file = java.nio.channels.FileChannel.open(temp,StandardOpenOption.WRITE,
+                    StandardOpenOption.TRUNCATE_EXISTING,LinkOption.NOFOLLOW_LINKS)) {
+                var buffer = java.nio.ByteBuffer.wrap(bytes);
+                while(buffer.hasRemaining()) file.write(buffer);
+                file.force(true);
+            } finally { if(interrupted) Thread.currentThread().interrupt(); }
             Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            Files.setPosixFilePermissions(target, FILE_PERMS);
+            forceDirectory(dir);
         } finally { if (temp != null) Files.deleteIfExists(temp); }
+    }
+    private static final java.util.concurrent.atomic.AtomicBoolean FORCE_WARNING = new java.util.concurrent.atomic.AtomicBoolean();
+    private static void setPermissions(Path path, Set<PosixFilePermission> permissions) throws IOException {
+        if (Files.getFileAttributeView(path,java.nio.file.attribute.PosixFileAttributeView.class,LinkOption.NOFOLLOW_LINKS)!=null)
+            Files.setPosixFilePermissions(path,permissions);
+    }
+    private static void forceDirectory(Path directory) {
+        boolean interrupted=Thread.interrupted();
+        try (var channel=java.nio.channels.FileChannel.open(directory,StandardOpenOption.READ)) { channel.force(true); }
+        catch (IOException | UnsupportedOperationException unavailable) {
+            if(FORCE_WARNING.compareAndSet(false,true)) System.getLogger(UsageLedger.class.getName()).log(
+                    System.Logger.Level.WARNING,"Usage ledger directory fsync unavailable; power-loss durability is filesystem dependent");
+        } finally { if(interrupted) Thread.currentThread().interrupt(); }
+    }
+    private static String executionId(UsageContext.Value context) throws IOException {
+        var scope=QwenExecutionScope.current();
+        if(scope==null) return null;
+        if(!scope.bookId().equals(context.bookId()) || !java.util.Objects.equals(scope.pageNumber(),context.pageNumber()))
+            throw new IOException("mismatched page execution scope");
+        return scope.executionId().toString();
+    }
+    private static boolean canonicalUuid(String value) {
+        try { return UUID.fromString(value).toString().equals(value); }
+        catch (IllegalArgumentException invalid) { return false; }
+    }
+    private static Long attemptSeq() {
+        var scope=QwenExecutionScope.current();
+        return scope==null || scope.attemptSeq()<1 ? null : scope.attemptSeq();
+    }
+    private static String taskHash(UsageContext.Value context) {
+        if(context.taskId()==null) return null;
+        return studio.bookhtml.decision.DecisionHash.sha256Hex(context.taskId());
     }
     private static UsageContext.Value requireContext() throws IOException {
         UsageContext.Value context = UsageContext.current();
-        if (context == null || context.bookId() == null || context.operation() == null)
+        if (context == null || context.bookId() == null || context.operation() == null
+                || !context.operation().matches("[A-Z][A-Z0-9_]{0,39}")
+                || context.pageNumber() != null && context.pageNumber() < 1
+                || context.taskId() != null && context.taskId().length() > 256)
             throw new IOException("usage scope missing");
         return context;
     }

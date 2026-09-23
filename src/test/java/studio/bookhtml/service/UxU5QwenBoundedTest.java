@@ -57,7 +57,11 @@ class UxU5QwenBoundedTest {
 
     @Test void u5_meteringWithoutForgedTokens() throws Exception {
         String review = read("src/main/java/studio/bookhtml/service/QwenTextReviewClient.java");
-        assertTrue(review.contains("usage.start"), "U5：每次物理请求记账");
+        String boundary = read("src/main/java/studio/bookhtml/service/QwenPhysicalCall.java");
+        assertTrue(review.contains("QwenPhysicalCall.open"), "核对使用统一物理发送入口");
+        assertTrue(boundary.contains("ledger.prepare"), "U5：发送前审计意图落盘");
+        assertTrue(boundary.indexOf("ledger.prepare") < boundary.indexOf("transport.send"), "准备先于物理发送");
+        assertTrue(boundary.indexOf("ledger.sending") < boundary.indexOf("transport.send"), "进入可能发送区间先于物理调用");
         assertTrue(review.contains("cacheReused"), "U5：缓存命中只计命中，不伪造 token");
         assertTrue(review.contains("UNKNOWN"), "U5：结果未知不盲目重发");
     }
