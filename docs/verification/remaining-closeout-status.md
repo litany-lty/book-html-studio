@@ -81,8 +81,8 @@
 | **G03** | B05 | PARTIAL_CODE | 全模型统一物理调用、账户并发与预算治理 | 待实现 |
 | **G04** | B05 | TODO_CODE | 异步 OCR 远端 Job 持久占位、轮询恢复与未知债务治理 | 待实现 |
 | **G05** | B06 | PARTIAL_CODE | 跨入口、跨书、多标签分阶段优先级调度（当前页 P0 优先） | 待实现 |
-| **G06** | B04 | TODO_CODE | 服务端持久 CloudConsent / ReadingPolicy，有限授权下自动当前页处理 | 待实现 |
-| **G07** | B04/B05 | PARTIAL_CODE | 统一幂等准入、operationEpoch（30天/4096上限）与批量快照持久化 | 待实现 |
+| **G06** | B04 | DONE | 服务端持久 CloudConsent / ReadingPolicy，有限授权下自动当前页处理 | 715 套件全绿，5 套新增专项实测 PASS |
+| **G07** | B04/B05 | PARTIAL_CODE | 统一幂等准入、operationEpoch（30天/4096上限）与批量快照持久化 | B04 已完成 Epoch 与批量准入，待 B05 异步任务集成 |
 | **G08** | B07 | PARTIAL_CODE | BookContentProfile + 严格 ContextSnapshot + JEV 接受锁内依赖校验 | 待实现 |
 | **G09** | B08 | TODO_CODE | 完整 V3 固定计划（父 planHash/子 reviewPlanHash/contextHash/持久 eventSeq） | 待实现 |
 | **G10** | B01 | DONE | 图像解码图、子图、PNG、Base64、请求体及临时磁盘完整字节租约 | 666 套件全绿，4 套新增专项实测 PASS |
@@ -127,14 +127,21 @@
 | **B03-06** | B03 | DONE | 实现检索与摘要查询跨书隔离、只读事务固定与 5 分钟游标分页快照隔离 | `IndexSearchIsolationTest` (3 tests) | 实测 PASS |
 | **B03-07** | B03 | DONE | 读热路径优化：`ReaderController.progress` 与 `ProcessingProgressService.latest` 避免全页反序列化 | `ReaderHotPathBoundTest` (3 tests) | 实测 PASS |
 | **B03-08** | B03 | DONE | B03 批次及全仓全量回归，广告块疑点/搜索过滤保真，698 项全通过 | `mvn test` 698/698 | 全部实测 PASS |
+| **B04-01** | B04 | DONE | 实现 `CloudConsent`、`ReadingPolicy` 模型与持久化存储（`books/<bookId>/cloud-consent.json` 等原子存储与校验） | `CloudConsentTest` (4 tests) | 实测 PASS |
+| **B04-02** | B04 | DONE | 实现 `CloudConsentService` 与 `ReadingPolicyController`，提供云端鉴权、模式检查、撤销与审计追踪 | `CloudConsentTest` | 实测 PASS |
+| **B04-03** | B04 | DONE | 实现 `OperationEpochStore` 与 `OperationEpochSummary`，管理 30 天/4096 上限治理、归档轮转及过期 410 返回 | `OperationEpochReplayTest` (4 tests) | 实测 PASS |
+| **B04-04** | B04 | DONE | `ReadingWindowService` 接入受控授权，未授权 0 云端请求，有限授权下仅调度当前页与有界预加载，首开即刻派发 | `AuthorizedAutoReadingTest` (3 tests) | 实测 PASS |
+| **B04-05** | B04 | DONE | `JobService` 接入统一幂等与准入检查，重放返回已有 Job 回执，参数冲突返回 409，持久化 `DurableBatchAdmission` | `DurableBatchAdmissionTest` (2 tests) | 实测 PASS |
+| **B04-06** | B04 | DONE | `OcrTextRecovery` 区域重试预算保护（基准 + 4 上限），未解析区域标为 `ocr-region-unresolved`，全空抛出异常 | `RegionalRecoveryBudgetTest` (4 tests) | 实测 PASS |
+| **B04-07** | B04 | DONE | B04 专项测试与全仓回归，17 项新增专项 + 715 项全量通过（715/715 PASS） | `mvn test` 715/715 | 全部实测 PASS |
 
-*(后续批次 B04～B13 子任务随各批次执行实时更新)*
+*(后续批次 B05～B13 子任务随各批次执行实时更新)*
 
 ---
 
 ## 7. 下一步行动
-立即执行 **B04 批次**（持久 CloudConsent / ReadingPolicy 与 operationEpoch 幂等治理 / G06, G07）：
-1. 编写失败测试：验证服务端持久化 `books/<bookId>/cloud-consent.json`，无授权拒绝云端调用，单页云端识别显式带入；
-2. 实现 `CloudConsentStore` 与 `ReadingPolicyStore`，管理持久化授权凭证（含时间戳、操作人、授权模式、有限撤销机制）；
-3. 实现 `operationEpoch`（30天/4096条上限滑动窗口有界持久化淘汰机制）与批量操作快照持久化；
-4. 验证并发重复提交、重放防护与云端外发合规门禁。
+立即执行 **B05 批次**（统一物理调用池、凭据脱敏、异步 OCR 远端 Job 持久占位与轮询恢复 / G03, G04, G15）：
+1. 统一 HttpClient 与 OkHttpClient 物理连接池管理，配置最大空闲与保活上限；
+2. 实现全模型调用请求头、URL 与请求体中敏感凭据（Token / Key）严格脱敏校验；
+3. 实现异步 OCR 远端 Job 持久化占位（`remote-jobs/<jobId>.json`），崩溃重启后主动轮询恢复状态，避免重复提交与计费双重消耗；
+4. 治理未知债务与单飞排队锁。

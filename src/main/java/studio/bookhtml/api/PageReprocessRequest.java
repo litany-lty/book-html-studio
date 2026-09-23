@@ -14,7 +14,16 @@ public record PageReprocessRequest(@NotNull Integer expectedRevision,
                                    @NotBlank String clientOperationId,
                                    boolean explicitOverwriteAuthorization,
                                    String provider,
-                                   Boolean assist) {
+                                   Boolean assist,
+                                   Long operationEpoch) {
+    public PageReprocessRequest(@NotNull Integer expectedRevision,
+                                @NotBlank String clientOperationId,
+                                boolean explicitOverwriteAuthorization,
+                                String provider,
+                                Boolean assist) {
+        this(expectedRevision, clientOperationId, explicitOverwriteAuthorization, provider, assist, null);
+    }
+
     public boolean assistEnabled() {
         return assist == null || assist;
     }

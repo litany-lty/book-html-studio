@@ -42,6 +42,9 @@ public class BookStore {
     private final SourceChangeJournal sourceJournal;
     private final PageHeadStore headStore;
     private BookIndexService indexService;
+    private final CloudConsentStore consentStore;
+    private final ReadingPolicyStore policyStore;
+    private final OperationEpochStore epochStore;
     public record PageChange(String bookId, Page previous, Page committed, long sourceEpoch) {}
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong> pageEpochs = new java.util.concurrent.ConcurrentHashMap<>();
     private final List<java.util.function.Consumer<PageChange>> pageListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
@@ -65,6 +68,10 @@ public class BookStore {
         this.sourceJournal = new SourceChangeJournal(json);
         this.headStore = new PageHeadStore(json);
         this.indexService = new BookIndexService(json);
+        Path realDataDir = lease.realPath();
+        this.consentStore = new CloudConsentStore(realDataDir, json);
+        this.policyStore = new ReadingPolicyStore(realDataDir, json);
+        this.epochStore = new OperationEpochStore(realDataDir, json);
         Files.createDirectories(booksRoot);
     }
 
@@ -72,6 +79,10 @@ public class BookStore {
     public PageHeadStore headStore() { return headStore; }
     public BookIndexService indexService() { return indexService; }
     public void setIndexService(BookIndexService indexService) { this.indexService = indexService; }
+    public CloudConsentStore consentStore() { return consentStore; }
+    public ReadingPolicyStore policyStore() { return policyStore; }
+    public OperationEpochStore epochStore() { return epochStore; }
+    public ObjectMapper json() { return json; }
     public PageCommitJournal pageCommitJournal() { return commits; }
     public String pageContentHash(Page page) throws IOException { return commits.hash(page); }
 

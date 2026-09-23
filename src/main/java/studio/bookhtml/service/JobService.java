@@ -50,6 +50,12 @@ public class JobService {
         this.pageEngine=new PageProcessingService(store,processor);
     }
     @org.springframework.beans.factory.annotation.Autowired public void setSettings(SettingsService settings){this.settings=settings;}
+    private CloudConsentService consentService;
+    private studio.bookhtml.store.OperationEpochStore epochStore;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    public void setCloudConsentService(CloudConsentService consentService) { this.consentService = consentService; }
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    public void setOperationEpochStore(studio.bookhtml.store.OperationEpochStore epochStore) { this.epochStore = epochStore; }
     /** U4：阶段事件聚合（测试可注入；缺省关闭，不影响正式保存）。 */
     @org.springframework.beans.factory.annotation.Autowired(required=false) public void setProgress(ProcessingProgressService progress){this.progress=progress;this.pageEngine.setProgress(progress);}
     @PostConstruct void recover(){store.recoverPagePublications();store.recoverInterruptedJobs();reconcileAttemptIntents();}
@@ -251,6 +257,20 @@ public class JobService {
         String fingerprint = requestFingerprint(bookId, String.valueOf(pageNumber), provider, layout,
                 String.valueOf(splitSpreads), String.valueOf(assist), String.valueOf(request.expectedRevision()),
                 String.valueOf(request.explicitOverwriteAuthorization()), request.provider(), String.valueOf(request.assist()));
+        if (consentService != null) {
+            consentService.validateAuthorization(null, bookId, provider == null ? "paddle-aistudio" : provider,
+                    request.assistEnabled(), false);
+        }
+        if (epochStore != null) {
+            ReprocessOperation epochKnown = epochStore.findOperation(bookId, operationKey, request.operationEpoch(), operationClock.instant());
+            if (epochKnown != null) {
+                if (!epochKnown.fingerprint().equals(fingerprint))
+                    throw new ApiException(HttpStatus.CONFLICT, "相同操作 ID 但参数不一致，已拒绝");
+                if (!operationClock.instant().isBefore(epochKnown.expiresAt()))
+                    throw new ApiException(HttpStatus.GONE, "操作记录已过期，请确认后使用新操作 ID；未重新派发");
+                return epochKnown.response();
+            }
+        }
         PageAttempt.Journal journal = readJournal(bookId);
         ReprocessOperation known = journal.operations().get(operationKey);
         if (known != null) {
@@ -290,6 +310,13 @@ public class JobService {
                     owner->new ReprocessOperation(bookId,operation.fingerprint(),owner.attemptId(),owner.generation(),
                             response,accepted,accepted.plus(OPERATION_RETENTION),"RUNNING"));
             pageAttempts.put(attempt.key(),attempt);
+            if (epochStore != null && operation != null) {
+                try {
+                    epochStore.recordOperation(bookId, operation.key(),
+                            new ReprocessOperation(bookId, operation.fingerprint(), attempt.attemptId(), attempt.generation(),
+                                    response, accepted, accepted.plus(OPERATION_RETENTION), "RUNNING"), null);
+                } catch (Exception ignored) {}
+            }
             return attempt;
         } catch (IOException failure) {
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE,"任务身份记录保存失败，未派发云请求");
@@ -419,13 +446,23 @@ public class JobService {
         Job current = null;
         try { current = store.readJob(bookId); } catch (Exception ignored) { }
         if(current!=null&&List.of("QUEUED","RUNNING","CANCELLING").contains(current.status()))throw new ApiException(HttpStatus.CONFLICT,"已有识别任务正在运行或正在取消，请稍后再试");
+        if (consentService != null) {
+            consentService.validateAuthorization(null, bookId, provider, request.assistEnabled(), false);
+        }
         Job queued=new Job(UUID.randomUUID().toString(),"QUEUED",0,pages.size(),null,null,List.of(),Instant.now(),
             List.copyOf(pages),provider,layout,request.splitSpreads(),request.force(),request.assistEnabled(),fingerprint);
         Map<Integer,Integer> authorizedRevisions=new HashMap<>();
-        if(request.force()) for(int page:pages) {
+        for(int page:pages) {
             Page authorized=store.readPage(bookId,page);
             if(authorized!=null) authorizedRevisions.put(page,BookStore.revisionOrZero(authorized));
         }
+        try {
+            var batch = studio.bookhtml.domain.DurableBatchAdmission.create(bookId, queued.id(), pages,
+                    authorizedRevisions, fingerprint, 1L, null);
+            java.nio.file.Path bdir = store.bookDir(bookId).resolve("batches");
+            java.nio.file.Files.createDirectories(bdir);
+            studio.bookhtml.store.DurableJson.write(bdir.resolve(queued.id() + ".json"), batch, store.json(), 512 * 1024);
+        } catch (Exception ignored) {}
         write(bookId,queued);Running running=new Running(bookId,fingerprint,lease);
         running.overwriteRevisions=Map.copyOf(authorizedRevisions);active=running;
         try{running.future=worker.submit(()->run(running,queued,pages,provider,layout,request.splitSpreads(),request.force(),request.assistEnabled()));}

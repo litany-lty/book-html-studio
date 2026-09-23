@@ -68,11 +68,17 @@ public class ReadingWindowService {
     }
 
     private ProcessingProgressService progress;
+    private CloudConsentService consentService;
 
     /** U4：阶段事件聚合（测试可注入；缺省关闭，正式保存不受影响）。 */
     @Autowired(required = false)
     public void setProgress(ProcessingProgressService progress) {
         this.progress = progress;
+    }
+
+    @Autowired(required = false)
+    public void setConsentService(CloudConsentService consentService) {
+        this.consentService = consentService;
     }
 
     public synchronized ReadingWindowResponse update(String bookId, ReadingWindowRequest request) {
@@ -429,6 +435,50 @@ public class ReadingWindowService {
 
     private void replaceWindow(Session s, int total, Instant now) {
         if (priority != null) priority.focus(s.bookId, s.centerPage);
+        if (consentService != null) {
+            var consent = consentService.findActiveConsent(null, s.bookId);
+            if (consent == null || !consent.permitsProvider(s.provider)) {
+                // Key present but without consent sends 0 (B04-02)
+                s.fromPage = s.centerPage;
+                s.toPage = s.centerPage;
+                s.queued.clear();
+                s.status = "SETTLING";
+                return;
+            }
+            int before = consent.preloadBefore();
+            int after = consent.preloadAfter();
+            s.fromPage = Math.max(1, s.centerPage - before);
+            s.toPage = Math.min(total, s.centerPage + after);
+            s.queued.clear();
+            int center = s.centerPage;
+            if (center <= total && eligible(store.readPage(s.bookId, center))
+                    && !s.processingPages.contains(center) && !s.dispatched.contains(center)) {
+                s.queued.addLast(center);
+            }
+            for (int i = 1; i <= after; i++) {
+                int plus = center + i;
+                if (plus <= s.toPage && eligible(store.readPage(s.bookId, plus))
+                        && !s.processingPages.contains(plus) && !s.dispatched.contains(plus)) {
+                    s.queued.addLast(plus);
+                }
+            }
+            for (int j = 1; j <= before; j++) {
+                int minus = center - j;
+                if (minus >= s.fromPage && eligible(store.readPage(s.bookId, minus))
+                        && !s.processingPages.contains(minus) && !s.dispatched.contains(minus)) {
+                    s.queued.addLast(minus);
+                }
+            }
+            // First open with valid consent: current page dispatches immediately without 1-sec settle wait
+            if (s.sequence == 1 && s.queued.contains(center)) {
+                s.notBefore = now;
+            } else {
+                s.notBefore = now.plus(settle);
+            }
+            s.status = "SETTLING";
+            return;
+        }
+
         s.fromPage = Math.max(1, s.centerPage - 3);
         s.toPage = Math.min(total, s.centerPage + 5);
         s.queued.clear();

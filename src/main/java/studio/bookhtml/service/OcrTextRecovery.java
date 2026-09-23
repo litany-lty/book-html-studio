@@ -27,6 +27,11 @@ public final class OcrTextRecovery {
     }
     public static Result recover(BufferedImage image,List<Block> source,String layout,
                                  BooleanSupplier cancelled,Recognizer recognizer) throws Exception {
+        return recover(image, source, layout, cancelled, 4, recognizer);
+    }
+
+    public static Result recover(BufferedImage image,List<Block> source,String layout,
+                                 BooleanSupplier cancelled,int maxPhysicalStarts,Recognizer recognizer) throws Exception {
         List<Block> initial=source==null?List.of():List.copyOf(source);
         if(bodyChars(initial)>0)return new Result(initial,
                 initial.stream().anyMatch(b->"ocr-region-unresolved".equals(b.source()))
@@ -39,6 +44,7 @@ public final class OcrTextRecovery {
         // Preserve every original region/folio as evidence, not as inferred text.
         for(Block b:initial)recovered.add(copy(b,b.id(),recovered.size(),b.bbox(),b.sourceRect(),b.source(),b.sourceIds()));
         int unresolved=0, found=0;
+        int startsRemaining = Math.max(0, maxPhysicalStarts);
         long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(90);
         BooleanSupplier stopped=()->cancelled.getAsBoolean()||System.nanoTime()>=deadline;
         List<Region> regions=regions(image,layout);
@@ -49,10 +55,16 @@ public final class OcrTextRecovery {
                 unresolved += retainMissing(recovered, regions, index);
                 break;
             }
+            if(startsRemaining<=0) {
+                if(found==0)throw new OcrException("[OCR_EMPTY_UNRESOLVED] 局部分区重识别预算不足，保留原稿供核对");
+                unresolved += retainMissing(recovered, regions, index);
+                break;
+            }
             Region r=regions.get(index);
             BufferedImage crop=image.getSubimage(r.x,r.y,r.w,r.h);
             try {
                 if(ScanTextEvidence.inspect(crop).nearBlank())continue;
+                startsRemaining--;
                 List<Block> result;
                 try { result=recognizer.recognize(crop,layout,stopped); }
                 catch(OcrNoTextException empty) { result=List.of(); }
