@@ -75,3 +75,13 @@ python3 scripts/security/scan_secrets.py --history --out test-results/secret-sca
 实际 Chrome 前端专注模式 42/42、扫描回退 13/13，通过；真实 Spring HTTP／队列／存储／设置冒烟通过，页面异常为 0。OCR 为测试替身，未发起真实收费识别。
 
 首次专注检查在 Esc 后立即判断焦点时失败：DOM 已切回原稿，但实现约定在下一 animation frame 恢复焦点。测试现按 3 秒上限等待实际焦点条件后继续原有断言，没有移除焦点／页码／退出恢复检查，也没有改动阅读器行为。首次失败与修复后的完整结果均保留在隔离测试日志中。
+
+## 追加：重复取消中断与最终收尾
+
+PR 初次 CI 的完整构建通过，但重复生命周期检查暴露 `closeWaitsForPhysicalWorkerFinalizerAndRejectsNewAdmission` 偶发从 CANCELLED 变成 UNKNOWN。根因是同一关闭路径先取消 Future、再次中断线程、随后 shutdownNow，新的中断可能打断正在 force/写入的终结记录。
+
+修复为每个 Running 所有者至多请求一次线程中断；所有已登记 future 取消后使用 shutdown 并继续等待真实线程退出，不再次中断它们的持久化收尾。重复停止和关闭仍保留存储层撤销栅栏，不允许新结果发布。
+
+新增屏障测试明确把线程停在 CANCELLED 持久化 finalizer 内，再重复停止和关闭，断言没有第二次中断、close 必须等待、正文逐字节不变、最终为 CANCELLED。未删除旧断言或把 UNKNOWN 当作成功。
+
+追加后的 Mac Java17 完整离线 verify 为585项，583通过、2原有跳过、0失败/错误；相关生命周期/恢复测试连续5轮通过。最终合并仍以更新提交的远程 CI 为准。

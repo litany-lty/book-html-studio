@@ -54,8 +54,7 @@ public class JobService {
             if (active != null) {
                 Running running = active;
                 markCancelled(running);
-                if (running.future != null) running.future.cancel(true);
-                if (running.thread != null) running.thread.interrupt();
+                interruptOnce(running);
                 if (!running.started) {
                     try {
                         Job queued = store.readJob(running.bookId);
@@ -70,7 +69,7 @@ public class JobService {
                 }
             }
             cancelAllReserved();
-            worker.shutdownNow();
+            worker.shutdown(); // Every owned future was cancelled above; do not interrupt durable finalizers again.
         }
         // Never hold the admission monitor while joining: worker finalizers need it to
         // settle journals and release their real ownership before BookStore is closed.
@@ -128,16 +127,14 @@ public class JobService {
             // U2：只标记取消并中断，不提前从登记表删除。物理槽与登记在 worker
             // 收尾（finally）时释放；取消后仍可恢复旧可读版本（mayRestore）。
             markCancelled(running);
-            if (running.future != null) running.future.cancel(true);
-            if (running.thread != null) running.thread.interrupt();
+            interruptOnce(running);
             if (!running.started) releaseReserved(running, "CANCELLED");
         }
     }
     private synchronized void cancelAllReserved() {
         for (Running running : new HashSet<>(activeReserved.values())) {
             markCancelled(running);
-            if (running.future != null) running.future.cancel(true);
-            if (running.thread != null) running.thread.interrupt();
+            interruptOnce(running);
         }
         for (Running running : new HashSet<>(activeReserved.values())) {
             if (!running.started) releaseReserved(running, "CANCELLED");
@@ -312,6 +309,15 @@ public class JobService {
         }
     }
 
+    // Called under the admission monitor. Repeated stop/close is idempotent at
+    // the interruption boundary as well as at the durable cancellation fence.
+    private void interruptOnce(Running running) {
+        if (running.interruptionRequested) return;
+        running.interruptionRequested = true;
+        if (running.future != null) running.future.cancel(true);
+        else if (running.thread != null) running.thread.interrupt();
+    }
+
     private void markCancelled(Running running) {
         running.cancelled=true;
         for (PageAttempt attempt:running.attempts.values()) {
@@ -429,7 +435,7 @@ public class JobService {
         if("CANCELLING".equals(job.status()))return job;
         Running running=active;markCancelled(running);
         if(!running.started){running.future.cancel(false);Job cancelled=statusJob(job,"CANCELLED",job.completed(),job.total(),job.currentPage(),null,job.errors());write(bookId,cancelled);active=null;if(running.lease!=null)running.lease.close();return cancelled;}
-        Job cancelling=statusJob(job,"CANCELLING",job.completed(),job.total(),job.currentPage(),null,job.errors());write(bookId,cancelling);running.thread.interrupt();return cancelling;}
+        Job cancelling=statusJob(job,"CANCELLING",job.completed(),job.total(),job.currentPage(),null,job.errors());write(bookId,cancelling);interruptOnce(running);return cancelling;}
     private void run(Running running,Job initial,List<Integer> pages,String provider,String layout,boolean split,boolean force,boolean assist){synchronized(this){if(active!=running||running.cancelled)return;running.started=true;running.thread=Thread.currentThread();}int completed=0;List<String>errors=new ArrayList<>();try{
         writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",0,pages.size(),null,null,List.of()));
         for(int pageNumber:pages){
@@ -775,5 +781,5 @@ public class JobService {
     /** U4：增强门比较正文块文本量（增强不改写来源记录）。 */
     static int textChars(List<Block> blocks){if(blocks==null)return 0;return blocks.stream().map(Block::original).filter(Objects::nonNull).mapToInt(s->(int)s.codePoints().filter(cp->!Character.isWhitespace(cp)).count()).sum();}
     private static int blockChars(Page page){if(page==null||page.blocks()==null)return 0;return page.blocks().stream().map(Block::original).filter(Objects::nonNull).mapToInt(s->(int)s.codePoints().filter(cp->!Character.isWhitespace(cp)).count()).sum();}
-    private static final class Running{final Map<Integer, PageAttempt> attempts = new ConcurrentHashMap<>(); Job job;final String bookId,fingerprint;final SettingsService.Lease lease;volatile boolean cancelled;boolean started;Thread thread;Future<?> future;Running(String bookId,String fingerprint,SettingsService.Lease lease){this.bookId=bookId;this.fingerprint=fingerprint;this.lease=lease;}}
+    private static final class Running{final Map<Integer, PageAttempt> attempts = new ConcurrentHashMap<>(); Job job;final String bookId,fingerprint;final SettingsService.Lease lease;volatile boolean cancelled;boolean started;boolean interruptionRequested;Thread thread;Future<?> future;Running(String bookId,String fingerprint,SettingsService.Lease lease){this.bookId=bookId;this.fingerprint=fingerprint;this.lease=lease;}}
 }
