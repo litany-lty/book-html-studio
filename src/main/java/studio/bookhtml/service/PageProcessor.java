@@ -231,22 +231,24 @@ public class PageProcessor {
                 parentTexts.putIfAbsent(block.id(), block.original());
             }
         }
-        Map<String, byte[]> regionImages = new HashMap<>();
-        for (QwenTaskPlanner.ChunkTask chunk : plan.chunks()) {
-            byte[] crop = cropChunkRegion(image, blocks, chunk);
-            if (crop == null) return null;
-            regionImages.put(chunk.chunkId(), crop);
-        }
+        // Queue references only source image plus crop descriptors, never all encoded regions.
+        Map<String,QwenTaskPlanner.ChunkTask> descriptors=new HashMap<>();
+        for (QwenTaskPlanner.ChunkTask chunk:plan.chunks()) descriptors.put(chunk.chunkId(),chunk);
         byte[] overview;
         try {
             overview = qwenOcr.encodeWithin(image).bytes();
         } catch (Exception e) {
             return null;
         }
-        regionImages.put("__overview__", overview);
+        java.util.function.Function<String,byte[]> regionImages = key -> {
+            if(cancelled.getAsBoolean()) throw new CancelledException();
+            if("__overview__".equals(key)) return overview;
+            QwenTaskPlanner.ChunkTask chunk=descriptors.get(key);
+            return chunk==null?null:cropChunkRegion(image,blocks,chunk);
+        };
         QwenAssistCoordinator.CoordinateResult result;
         try {
-            result = coordinator.coordinate(bookId, pageNumber,
+            result = coordinator.coordinateLazy(bookId, pageNumber,
                     blocks, parentTexts, plan, regionImages, null, layout, priority == null || priority.foreground(bookId, pageNumber), cancelled);
         } catch (CancelledException e) {
             throw e;
@@ -305,7 +307,17 @@ public class PageProcessor {
             int ph = Math.min(height - py, (int) Math.ceil((y1 - y0) * height));
             if (pw < 8 || ph < 8) return null;
             BufferedImage crop = image.getSubimage(px, py, pw, ph);
-            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            ByteArrayOutputStream output = new ByteArrayOutputStream() {
+                private static final int LIMIT=10*1024*1024;
+                @Override public synchronized void write(int value) {
+                    if(count>=LIMIT) throw new IllegalStateException("encoded region exceeds limit");
+                    super.write(value);
+                }
+                @Override public synchronized void write(byte[] value,int offset,int length) {
+                    if(length>LIMIT-count) throw new IllegalStateException("encoded region exceeds limit");
+                    super.write(value,offset,length);
+                }
+            };
             if (!javax.imageio.ImageIO.write(crop, "png", output)) return null;
             byte[] bytes = output.toByteArray();
             if (bytes.length == 0 || bytes.length > 10 * 1024 * 1024) return null;

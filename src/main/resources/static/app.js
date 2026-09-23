@@ -25,6 +25,9 @@ let pageFetchController = null;
 let editVersion = 0;
 let outlineRequest = 0;
 let pendingPageTarget = null;
+let searchGeneration = 0;
+let searchController = null;
+let structureGeneration = 0;
 let pageInputIntent = 0;
 let assistPreference;
 let splitSpreadsPreference = true;
@@ -981,19 +984,27 @@ function renderPageStructure() {
 
 async function applyStructureOverride(view, action) {
   if (!state.book || !state.page) return;
+  const scope = { id: state.book.id, n: state.currentPage, epoch: state.editorEpoch,
+    revision: state.page.revision, bookGeneration: bookRequest, editVersion };
+  const generation = ++structureGeneration;
+  const sameBook = () => state.book?.id === scope.id && bookRequest === scope.bookGeneration;
+  const samePage = () => sameBook() && state.currentPage === scope.n && state.editorEpoch === scope.epoch;
   try {
-    await api.applyPresentationOverride(state.book.id, state.currentPage, {
-      expectedRevision: state.page.revision,
-      blockId: view.blockId,
-      sourceHash: view.sourceHash,
-      action,
-      scope: 'BLOCK'
+    await api.applyPresentationOverride(scope.id, scope.n, {
+      expectedRevision: scope.revision, blockId: view.blockId,
+      sourceHash: view.sourceHash, action, scope: 'BLOCK'
     });
-    state.pageCache.delete(state.currentPage);
-    await goToPage(state.currentPage, { force: true });
-    await refreshOutline(state.book.id);
+    if (!sameBook()) return;
+    state.pageCache.delete(scope.n);
+    if (samePage() && generation === structureGeneration) {
+      if (currentPageProtected() || editVersion !== scope.editVersion || window.getSelection()?.toString()) {
+        deferredReady = { bookId: scope.id, page: scope.n, revision: null };
+        renderReadingWindowStatus();
+      } else await goToPage(scope.n, { force: true, preserveScroll: true });
+    }
+    if (sameBook()) await refreshOutline(scope.id);
   } catch (error) {
-    showError(error);
+    if (samePage() && generation === structureGeneration) showError(error);
   }
 }
 
@@ -1322,6 +1333,9 @@ async function goToPage(n, options = {}) {
 
 async function selectBook(id) {
   if (hasDirtyChanges()) { $('#book-select').value = state.book?.id || ''; return; }
+  ++searchGeneration; searchController?.abort(); searchController = null;
+  ++structureGeneration;
+  $('#search-status').textContent = ''; $('#search-results').replaceChildren();
   const previousWindowStopped = readingWindow.stop({ silent: true });
   pageProgress.clear();
   readingMetadataSignatures.clear(); readingMetadataVersions.clear(); readingMetadataProfiles.clear();
@@ -1399,6 +1413,7 @@ function validateRange(value, total) {
 
 function renderJob(job) {
   state.job = job;
+  if (activeJobs.has(job?.status)) pageProgress.wake();
   const active = activeJobs.has(job.status);
   $('#job-progress').hidden = job.status === 'IDLE';
   $('#cancel-job').hidden = !active;
@@ -1873,10 +1888,40 @@ $('#bookmark-button').addEventListener('click', () => { if (!state.book) return;
 
 $$('[data-left-tab]').forEach(button => button.addEventListener('click', () => { $$('[data-left-tab]').forEach(tab => { const active = tab === button; tab.classList.toggle('active', active); tab.setAttribute('aria-selected', String(active)); }); $$('[data-left-panel]').forEach(panel => { panel.hidden = panel.dataset.leftPanel !== button.dataset.leftTab; }); }));
 $('#search-form').addEventListener('submit', async event => {
-  event.preventDefault(); if (!state.book) return; const query = $('#search-input').value.trim(); if (!query) return;
-  $('#search-status').textContent = '正在搜索…'; $('#search-results').replaceChildren();
-  try { const results = await api.search(state.book.id, query); $('#search-status').textContent = results.length ? `${results.length} 处命中` : '没有找到。可切换繁简字词再试。'; results.forEach(result => { const li = document.createElement('li'); const button = document.createElement('button'); button.type = 'button'; button.className = 'search-result'; const page = document.createElement('strong'); page.textContent = `第 ${result.pageNumber} 页`; const text = document.createElement('span'); text.textContent = result.text; button.append(page, text); button.addEventListener('click', async () => { const navigated = await goToPage(result.pageNumber); if (!navigated || state.currentPage !== result.pageNumber || !state.page) return; state.selectedBlockId = result.blockId; renderReview(); syncOverlays(); }); li.append(button); $('#search-results').append(li); }); }
-  catch (error) { $('#search-status').textContent = ''; showError(error); }
+  event.preventDefault(); if (!state.book) return;
+  const query = $('#search-input').value.trim();
+  const generation = ++searchGeneration, bookId = state.book.id, bookGeneration = bookRequest;
+  searchController?.abort(); searchController = new AbortController();
+  const own = searchController;
+  const current = () => !own.signal.aborted && generation === searchGeneration
+    && state.book?.id === bookId && bookGeneration === bookRequest;
+  $('#search-results').replaceChildren();
+  $('#search-status').textContent = query ? '正在搜索…' : '';
+  if (!query) return;
+  try {
+    const results = await api.search(bookId, query, own.signal);
+    if (!current()) return;
+    $('#search-status').textContent = results.length ? `${results.length} 处命中` : '没有找到。可切换繁简字词再试。';
+    results.forEach(result => {
+      const li = document.createElement('li'), button = document.createElement('button');
+      button.type = 'button'; button.className = 'search-result';
+      const page = document.createElement('strong'), text = document.createElement('span');
+      page.textContent = `第 ${result.pageNumber} 页`; text.textContent = result.text;
+      button.append(page, text);
+      button.addEventListener('click', async () => {
+        if (!current()) return;
+        const pending = goToPage(result.pageNumber), epoch = state.editorEpoch;
+        const navigated = await pending;
+        if (!current() || !navigated || state.editorEpoch !== epoch
+            || state.currentPage !== result.pageNumber || !state.page) return;
+        if (!(state.blocks || []).some(block => block.id === result.blockId)) return;
+        state.selectedBlockId = result.blockId; renderReview(); syncOverlays();
+      });
+      li.append(button); $('#search-results').append(li);
+    });
+  } catch (error) {
+    if (current()) { $('#search-status').textContent = ''; showError(error); }
+  }
 });
 
 $('#uncertain-only').addEventListener('change', renderReview); $('#add-text').addEventListener('click', () => startDrawing('text')); $('#add-figure').addEventListener('click', () => startDrawing('figure'));

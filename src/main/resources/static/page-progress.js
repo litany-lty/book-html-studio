@@ -7,15 +7,18 @@ export function progressView(snapshot, page) {
   const value = Number(snapshot.percent);
   const percent = Number.isFinite(value) ? Math.max(0, Math.min(100, Math.floor(value))) : 0;
   const phase = { PREPARING: '准备', OCR: '识别', BASELINE_PUBLISHING: '保存正文', STRUCTURE: '整理', REVIEW: '核对', VALIDATING: '校验', PUBLISHING: '保存' };
-  const terminal = { SUCCEEDED: '已处理', PARTIAL: '部分完成', FAILED: '处理失败', CANCELLED: '已停止', INTERRUPTED: '已中断' };
+  const terminal = { SUCCEEDED: '已处理', PARTIAL: '部分完成', FAILED: '处理失败', CANCELLED: '已停止', INTERRUPTED: '已中断', UNKNOWN: '结果待确认' };
   const name = terminal[snapshot.lifecycle] || phase[snapshot.stage] || '处理中';
+  if (snapshot.stage === 'RECOVERED') return { hidden: snapshot.lifecycle === 'SUCCEEDED', percent: null, label: `${name} · 状态已恢复`, state: terminal[snapshot.lifecycle] ? 'settled' : 'processing' };
   return { hidden: snapshot.lifecycle === 'SUCCEEDED', percent, label: `${name} · ${percent}%`, state: terminal[snapshot.lifecycle] ? 'settled' : 'processing' };
 }
 
 export function createPageProgress({ api, onPublished }) {
   const element = document.querySelector('#page-processing-progress');
   let current = null, snapshot = null, timer = null, controller = null, epoch = 0;
-  let lastAttempt = null, lastVersion = -1;
+  let lastAttempt = null, lastVersion = -1, lastResponse = {}, inFlightEpoch = null;
+  let serverInstanceId = null;
+  const retiredServers = new Set();
   function render() {
     if (!element) return;
     const view = progressView(snapshot, current?.page);
@@ -23,16 +26,31 @@ export function createPageProgress({ api, onPublished }) {
     if (view.hidden) return;
     element.textContent = view.label;
     element.dataset.state = view.state;
-    element.setAttribute('aria-valuenow', String(view.percent));
+    if (view.percent == null) element.removeAttribute('aria-valuenow');
+    else element.setAttribute('aria-valuenow', String(view.percent));
     element.setAttribute('aria-valuetext', view.label);
-    element.style.setProperty('--page-progress', `${view.percent}%`);
+    element.style.setProperty('--page-progress', `${view.percent ?? 0}%`);
     element.title = '当前页处理阶段完成比例，不是文字准确率或剩余时间。疑点仍须对照原稿核对。';
   }
   function update(next) {
     if (!current || !next || next.bookId !== current.id || Number(next.pageNumber) !== current.n) return;
+    if (typeof next.serverInstanceId === 'string' && next.serverInstanceId.length > 0 && next.serverInstanceId.length <= 80) {
+      if (retiredServers.has(next.serverInstanceId)) return;
+      if (serverInstanceId && serverInstanceId !== next.serverInstanceId) {
+        retiredServers.add(serverInstanceId);
+        if (retiredServers.size > 16) retiredServers.delete(retiredServers.values().next().value);
+        snapshot = null; lastVersion = -1; lastAttempt = null; lastResponse = {};
+      }
+      serverInstanceId = next.serverInstanceId;
+    }
     if (snapshot?.attemptId) {
       if (next.attemptId === snapshot.attemptId) {
-        if (next.snapshotVersion < lastVersion) return;
+        // A compatibility response may fill the persistent identity without changing the event.
+        if (next.snapshotVersion === lastVersion && !(Number(snapshot.attemptSeq) > 0)
+            && Number.isSafeInteger(Number(next.attemptSeq)) && Number(next.attemptSeq) > 0) {
+          snapshot = { ...snapshot, attemptSeq: Number(next.attemptSeq) }; return;
+        }
+        if (next.snapshotVersion <= lastVersion) return;
         if (['SUCCEEDED','PARTIAL','FAILED','CANCELLED','INTERRUPTED','UNKNOWN'].includes(snapshot.lifecycle)
             && next.lifecycle !== snapshot.lifecycle) return;
       } else {
@@ -49,31 +67,40 @@ export function createPageProgress({ api, onPublished }) {
     snapshot = next; render();
   }
   async function poll(token) {
-    if (!current || token !== epoch) return;
-    if (!document.hidden) {
-      controller = new AbortController();
-      const { id, n } = current;
-      try {
-        const status = await api.pageProgress(id, n, controller.signal);
+    if (!current || token !== epoch || inFlightEpoch === token || document.hidden) return;
+    clearTimeout(timer); inFlightEpoch = token;
+    const own = new AbortController(); controller = own;
+    const { id, n } = current;
+    try {
+      const status = await api.pageProgress(id, n, own.signal, lastResponse);
+      if (token !== epoch) return;
+      lastResponse = status; update(status.processing);
+      if (status.status === 'READY' && (status.revision !== current.page?.revision || current.page?.status !== 'READY')) {
+        const page = await api.page(id, n, own.signal);
         if (token !== epoch) return;
-        update(status.processing);
-        if (status.status === 'READY' && (status.revision !== current.page?.revision || current.page?.status !== 'READY')) {
-          const page = await api.page(id, n, controller.signal);
-          if (token !== epoch) return;
-          current.page = page; render(); onPublished(n, page);
-        }
-      } catch (_) { /* Read-only refresh retries; never resubmit a paid request. */ }
+        current.page = page; render(); onPublished(n, page);
+      }
+    } catch (_) { /* Status failures never retry a model request. */ }
+    finally {
+      if (controller === own) controller = null;
+      if (inFlightEpoch === token) inFlightEpoch = null;
+      if (token === epoch && !document.hidden) timer = setTimeout(() => poll(token),
+        ['QUEUED','RUNNING','DRAINING','BASELINE_PUBLISHED'].includes(snapshot?.lifecycle) ? 1000 : 30000);
     }
-    if (token === epoch) timer = setTimeout(() => poll(token), snapshot?.lifecycle === 'RUNNING' ? 1000 : 5000);
+  }
+  function wake() {
+    clearTimeout(timer);
+    if (current && !document.hidden) void poll(epoch);
   }
   function clear() {
     ++epoch; clearTimeout(timer); controller?.abort(); current = snapshot = null;
-    lastAttempt = null; lastVersion = -1;
+    lastAttempt = null; lastVersion = -1; lastResponse = {}; inFlightEpoch = null;
     if (element) element.hidden = true;
   }
   function setPage(id, n, page) {
     if (current?.id === id && current.n === n) { current.page = page; render(); return; }
     clear(); current = { id, n, page }; render(); void poll(epoch);
   }
-  return { setPage, update, clear };
+  document.addEventListener?.('visibilitychange', () => { if (document.hidden) clearTimeout(timer); else wake(); });
+  return { setPage, update, clear, wake };
 }

@@ -230,7 +230,11 @@ def main():
             page.mouse.click(x,y)
             page.locator('#reader').evaluate('el=>el.scrollTop=120')
             check('scroll_cancels_pending_turn', no_turn_after_wait() == '3')
-            page.locator('#reader').evaluate('el=>el.scrollTop=0')
+            page.locator('#reader').evaluate('''async el => {
+                el.scrollTop=0;
+                await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+                if(el.scrollTop!==0) throw new Error('scroll reset did not settle');
+            }''')
             edge_click(1)
             page.wait_for_function("document.querySelector('#paper').textContent.includes('第4页')")
             page.evaluate('''() => {

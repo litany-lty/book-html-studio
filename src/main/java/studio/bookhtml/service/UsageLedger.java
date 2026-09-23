@@ -295,10 +295,31 @@ public class UsageLedger {
         if (Files.isSymbolicLink(dir) || !Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) throw new IOException("usage ledger unsafe");
         try (var paths = Files.list(dir)) {
             for (Iterator<Path> it = paths.iterator(); it.hasNext();) {
-                consumer.accept(readPath(bookId, it.next()));
+                Path path=it.next();
+                if(recoverLegacyTemporary(bookId,path)) continue;
+                consumer.accept(readPath(bookId,path));
             }
         } catch (IOException e) { throw e; }
         catch (Exception e) { throw new IOException("usage ledger damaged"); }
+    }
+    /** Old writers staged in the committed directory. Preserve, never promote or refund, these orphans. */
+    private boolean recoverLegacyTemporary(String bookId,Path path) throws IOException {
+        if(!path.getFileName().toString().matches("entry-[0-9]{1,20}\\.tmp")) return false;
+        if(Files.isSymbolicLink(path) || !Files.isRegularFile(path,LinkOption.NOFOLLOW_LINKS)
+                || Files.size(path)>MAX_ENTRY_BYTES) throw new IOException("unsafe legacy usage temporary");
+        Path quarantine=privateDirectory(books.bookDir(bookId).resolve("usage-recovery"));
+        Files.move(path,quarantine.resolve(path.getFileName()+"-"+UUID.randomUUID()),StandardCopyOption.ATOMIC_MOVE);
+        forceDirectory(quarantine); forceDirectory(usageDir(bookId));
+        System.getLogger(UsageLedger.class.getName()).log(System.Logger.Level.WARNING,
+                "USAGE_ORPHAN_PRESERVED: committed records remain authoritative; no automatic resend");
+        return true;
+    }
+    private static Path privateDirectory(Path directory) throws IOException {
+        if(!Files.exists(directory,LinkOption.NOFOLLOW_LINKS)) Files.createDirectory(directory);
+        if(Files.isSymbolicLink(directory) || !Files.isDirectory(directory,LinkOption.NOFOLLOW_LINKS))
+            throw new IOException("usage directory unsafe");
+        setPermissions(directory,DIR_PERMS);
+        return directory;
     }
     private Entry readEntry(String bookId, String id) throws IOException {
         if (id == null || !id.matches("[0-9a-f-]{36}")) throw new IOException("invalid attempt id");
@@ -396,7 +417,9 @@ public class UsageLedger {
             setPermissions(dir, DIR_PERMS);
             Path target = dir.resolve(entry.id() + ".json");
             if (Files.exists(target, LinkOption.NOFOLLOW_LINKS) && Files.isSymbolicLink(target)) throw new IOException("usage ledger unsafe");
-            temp = Files.createTempFile(dir, "entry-", ".tmp");
+            // The staging directory is on the same filesystem but is never enumerated as committed usage.
+            Path staging=privateDirectory(books.bookDir(bookId).resolve("usage-staging"));
+            temp = Files.createTempFile(staging, "entry-", ".tmp");
             setPermissions(temp, FILE_PERMS);
             byte[] bytes = json.writeValueAsBytes(entry);
             if (bytes.length > MAX_ENTRY_BYTES) throw new IOException("usage entry too large");

@@ -28,8 +28,12 @@ public class BookContextService {
     }
     public String current() {
         UsageContext.Value caller = UsageContext.current();
-        return caller == null || caller.bookId() == null || caller.pageNumber() == null
-                ? "{}" : snapshot(caller.bookId(), caller.pageNumber());
+        if (caller==null || caller.bookId()==null || caller.pageNumber()==null) return "{}";
+        var execution=QwenExecutionScope.current();
+        if(execution==null) return snapshot(caller.bookId(),caller.pageNumber());
+        if(!execution.bookId().equals(caller.bookId()) || execution.pageNumber()!=caller.pageNumber())
+            throw new IllegalStateException("context belongs to another page execution");
+        return execution.context().get(()->snapshot(caller.bookId(),caller.pageNumber()));
     }
     public String snapshot(String bookId, int pageNumber) {
         long version = generation.get();
@@ -59,6 +63,10 @@ public class BookContextService {
             Map<String, Object> context = new LinkedHashMap<>();
             context.put("version", "book-context-v1");
             context.put("bookId", bookId);
+            context.put("targetPage",pageNumber);
+            Page target=observed.get(pageNumber);
+            context.put("targetSourceRevision",target==null?0:BookStore.revisionOrZero(target));
+            context.put("coverage","LIMITED");
             context.put("subjectHint", clip(book.title(), 160));
             context.put("chapterHint", chapter);
             context.put("chapterHintVerified", false);

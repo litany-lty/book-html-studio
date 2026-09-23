@@ -10,6 +10,9 @@ import java.util.*;
 /** Event-only, consistent reduction. Storage owns attempt identity; this is a bounded projection. */
 @Service
 public class ProcessingProgressService {
+    private studio.bookhtml.store.BookStore store;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    public void setStore(studio.bookhtml.store.BookStore store) { this.store=store; }
     private static final int MAX_TRACKED = 512;
     private static final Set<String> TERMINAL = Set.of("SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "INTERRUPTED", "UNKNOWN");
     private final Map<String, Entry> entries = new LinkedHashMap<>();
@@ -168,8 +171,27 @@ public class ProcessingProgressService {
                 e.canRead, e.canStop, e.canRetry, e.messageCode, e.attemptSeq);
     }
 
-    public synchronized ProcessingSnapshot latest(String bookId, int pageNumber) {
-        Entry entry = latestByPage.get(pageKey(bookId, pageNumber));
-        return entry == null ? null : snapshot(entry);
+    public ProcessingSnapshot latest(String bookId, int pageNumber) {
+        synchronized(this) {
+            Entry entry=latestByPage.get(pageKey(bookId,pageNumber));
+            if(entry!=null) return snapshot(entry);
+        }
+        if(store==null) return null;
+        // Never hold the progress monitor while acquiring the storage authority monitor.
+        PageAttempt attempt=store.pageAttempt(bookId,pageNumber);
+        if(attempt==null) return null;
+        var page=store.readPage(bookId,pageNumber);
+        boolean readable=page!=null && "READY".equals(page.status());
+        String lifecycle=attempt.lifecycle();
+        boolean terminal=TERMINAL.contains(lifecycle);
+        ProcessingSnapshot recovered=new ProcessingSnapshot(2,bookId,pageNumber,attempt.attemptId(),0,
+                lifecycle,"RECOVERED",readable?"OCR_READABLE":"ORIGINAL_ONLY",
+                attempt.expectedRevision(),attempt.startedAt(),attempt.updatedAt(),attempt.updatedAt(),
+                new ProcessingSnapshot.UnitCounts("RECOVERED",0,0,0,0,0,0),readable,!terminal,
+                terminal && !Set.of("UNKNOWN","SUCCEEDED").contains(lifecycle),"PERSISTED_ATTEMPT_STATE",attempt.generation());
+        synchronized(this) {
+            Entry latest=latestByPage.get(pageKey(bookId,pageNumber));
+            return latest!=null && latest.attemptSeq>=attempt.generation()?snapshot(latest):recovered;
+        }
     }
 }

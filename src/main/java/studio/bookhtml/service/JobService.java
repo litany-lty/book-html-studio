@@ -421,7 +421,13 @@ public class JobService {
         if(current!=null&&List.of("QUEUED","RUNNING","CANCELLING").contains(current.status()))throw new ApiException(HttpStatus.CONFLICT,"已有识别任务正在运行或正在取消，请稍后再试");
         Job queued=new Job(UUID.randomUUID().toString(),"QUEUED",0,pages.size(),null,null,List.of(),Instant.now(),
             List.copyOf(pages),provider,layout,request.splitSpreads(),request.force(),request.assistEnabled(),fingerprint);
-        write(bookId,queued);Running running=new Running(bookId,fingerprint,lease);active=running;
+        Map<Integer,Integer> authorizedRevisions=new HashMap<>();
+        if(request.force()) for(int page:pages) {
+            Page authorized=store.readPage(bookId,page);
+            if(authorized!=null) authorizedRevisions.put(page,BookStore.revisionOrZero(authorized));
+        }
+        write(bookId,queued);Running running=new Running(bookId,fingerprint,lease);
+        running.overwriteRevisions=Map.copyOf(authorizedRevisions);active=running;
         try{running.future=worker.submit(()->run(running,queued,pages,provider,layout,request.splitSpreads(),request.force(),request.assistEnabled()));}
         catch(RuntimeException e){active=null;
             try{write(bookId,statusJob(queued,"FAILED",0,pages.size(),null,"任务无法启动",List.of("任务无法启动")));}
@@ -451,12 +457,14 @@ public class JobService {
                 writeIfCurrent(running,initial.id(),statusJob(initial,"RUNNING",completed,pages.size(),page,null,List.copyOf(errors)));
                 Page old=store.readPage(running.bookId,page);
                 if(old==null)errors.add("第 "+page+" 页数据缺失，已跳过");
+                else if(force && !Objects.equals(running.overwriteRevisions.get(page),BookStore.revisionOrZero(old)))
+                    errors.add("第 "+page+" 页在批量确认后已更新，未覆盖；请重新确认该页");
                 else if(!"READY".equals(old.status()) || force) {
                     try {
                         PageAttempt attempt;
                         synchronized(this) {
                             if(running.cancelled)throw new CancelledException();
-                            attempt=registerAttempt(running.bookId,page,BookStore.revisionOrZero(old),
+                            attempt=registerAttempt(running.bookId,page,force?running.overwriteRevisions.get(page):BookStore.revisionOrZero(old),
                                     List.of("JOB_BASELINE","JOB_ENHANCEMENT","JOB_RESTORE"),initial.id(),force,null,null);
                             running.attempts.put(page,attempt);
                         }
@@ -550,5 +558,5 @@ public class JobService {
     /** U4：增强门比较正文块文本量（增强不改写来源记录）。 */
     static int textChars(List<Block> blocks){if(blocks==null)return 0;return blocks.stream().map(Block::original).filter(Objects::nonNull).mapToInt(s->(int)s.codePoints().filter(cp->!Character.isWhitespace(cp)).count()).sum();}
     private static int blockChars(Page page){if(page==null||page.blocks()==null)return 0;return page.blocks().stream().map(Block::original).filter(Objects::nonNull).mapToInt(s->(int)s.codePoints().filter(cp->!Character.isWhitespace(cp)).count()).sum();}
-    private static final class Running{final Set<Integer> settledPages=ConcurrentHashMap.newKeySet(); final Map<Integer, PageAttempt> attempts = new ConcurrentHashMap<>(); Job job;final String bookId,fingerprint;final SettingsService.Lease lease;volatile boolean cancelled;boolean started;boolean interruptionRequested;Thread thread;Future<?> future;Running(String bookId,String fingerprint,SettingsService.Lease lease){this.bookId=bookId;this.fingerprint=fingerprint;this.lease=lease;}}
+    private static final class Running{Map<Integer,Integer> overwriteRevisions=Map.of();final Set<Integer> settledPages=ConcurrentHashMap.newKeySet(); final Map<Integer, PageAttempt> attempts = new ConcurrentHashMap<>(); Job job;final String bookId,fingerprint;final SettingsService.Lease lease;volatile boolean cancelled;boolean started;boolean interruptionRequested;Thread thread;Future<?> future;Running(String bookId,String fingerprint,SettingsService.Lease lease){this.bookId=bookId;this.fingerprint=fingerprint;this.lease=lease;}}
 }

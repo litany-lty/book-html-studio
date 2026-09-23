@@ -1,7 +1,7 @@
 const API_ROOT = '/api';
 
 async function request(path, options = {}, timeout = 30000) {
-  const { signal: externalSignal, ...fetchOptions } = options || {};
+  const { signal: externalSignal, conditional, ...fetchOptions } = options || {};
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeout);
   const onExternalAbort = () => controller.abort();
@@ -11,6 +11,7 @@ async function request(path, options = {}, timeout = 30000) {
   }
   try {
     const response = await fetch(`${API_ROOT}${path}`, { ...fetchOptions, signal: controller.signal });
+    if (response.status === 304 && conditional?._etag) return conditional;
     if (!response.ok) {
       let message = `请求失败（${response.status}）`;
       let body = null;
@@ -21,7 +22,8 @@ async function request(path, options = {}, timeout = 30000) {
       failure.body = body;
       throw failure;
     }
-    return response.status === 204 ? null : await response.json();
+    const body = response.status === 204 ? null : await response.json();
+    return conditional && body ? { ...body, _etag: response.headers.get('ETag') } : body;
   } catch (error) {
     // 阶段2：快速翻页丢弃过时请求——外部取消不提示超时，后端仍以自身预算为准
     if (error.name === 'AbortError' && externalSignal?.aborted) {
@@ -49,7 +51,8 @@ export const api = {
   books: () => request('/books'),
   book: id => request(`/books/${encodeURIComponent(id)}`),
   readerBook: id => request(`/books/${encodeURIComponent(id)}/reader`),
-  pageProgress: (id, n, signal) => request(`/books/${encodeURIComponent(id)}/reader/pages/${n}/progress`, { signal }),
+  pageProgress: (id, n, signal, previous = {}) => request(`/books/${encodeURIComponent(id)}/reader/pages/${n}/progress`,
+    { signal, conditional: previous, ...(previous._etag ? { headers: { 'If-None-Match': previous._etag } } : {}) }),
   updateLibraryBook: (id, body) => request(`/books/${encodeURIComponent(id)}/library`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   bookUsage: (id, cursor = null, limit = 50, asOf = null, signal, offset = null) => request(`/books/${encodeURIComponent(id)}/usage?${new URLSearchParams({ limit: String(limit), ...(cursor ? { cursor } : offset != null ? { offset: String(offset) } : {}), ...(asOf ? { asOf } : {}) })}`, signal ? { signal } : {}),
   upload(file) {
@@ -82,6 +85,6 @@ export const api = {
   presentationOverrides: (id, n) => request(`/books/${encodeURIComponent(id)}/pages/${n}/presentation-overrides`),
   applyPresentationOverride: (id, n, body) => request(`/books/${encodeURIComponent(id)}/pages/${n}/presentation-overrides`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   previewOverrideScope: (id, n, blockId) => request(`/books/${encodeURIComponent(id)}/pages/${n}/presentation-overrides/preview?blockId=${encodeURIComponent(blockId)}`),
-  search: (id, query) => request(`/books/${encodeURIComponent(id)}/search?q=${encodeURIComponent(query)}`),
+  search: (id, query, signal) => request(`/books/${encodeURIComponent(id)}/search?q=${encodeURIComponent(query)}`, { signal }),
   exportUrl: id => `${API_ROOT}/books/${encodeURIComponent(id)}/export`
 };

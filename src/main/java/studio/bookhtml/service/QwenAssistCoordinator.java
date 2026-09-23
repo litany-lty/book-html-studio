@@ -33,7 +33,8 @@ public class QwenAssistCoordinator {
     @Autowired(required = false)
     public void setProgress(ProcessingProgressService progress) { this.progress = progress; }
 
-    private volatile ExecutorService pool;
+    private PriorityTaskScheduler pool;
+    private volatile boolean closed;
 
     @Autowired(required = false)
     public void setRequestGate(QwenRequestGate gate) {
@@ -55,26 +56,34 @@ public class QwenAssistCoordinator {
         this.converter = converter;
     }
 
-    private synchronized ExecutorService pool() {
-        if (pool == null || pool.isShutdown()) {
-            // U5：独立有界出站池；禁止把付费模型请求投到无界 common pool。
-            // 页级编排等待结果，但不等出站池自身的任务（无同池 join 死锁）。
-            int size = gate == null ? 3 : Math.max(1, gate.maxConcurrent());
-            pool = new java.util.concurrent.ThreadPoolExecutor(size, size, 0L,
-                    java.util.concurrent.TimeUnit.MILLISECONDS,
-                    new java.util.concurrent.ArrayBlockingQueue<>(24), runnable -> {
-                Thread thread = new Thread(runnable, "qwen-assist-chunk");
-                thread.setDaemon(true);
-                return thread;
-            }, new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
-        }
+    private synchronized PriorityTaskScheduler pool() {
+        if (closed) throw new java.util.concurrent.RejectedExecutionException("coordinator closed");
+        if (pool == null) pool = new PriorityTaskScheduler(gate == null ? 3 : Math.max(1,gate.maxConcurrent()),24);
         return pool;
     }
 
     @PreDestroy
-    public synchronized void close() {
-        if (pool != null) pool.shutdownNow();
-        pool = null;
+    public void close() {
+        PriorityTaskScheduler existing;
+        synchronized(this) { if(closed) return; closed=true; existing=pool; }
+        if(existing!=null) existing.close();
+    }
+
+    private <T> T await(CompletableFuture<T> future,
+            List<? extends CompletableFuture<?>> siblings, PriorityTaskScheduler scheduler,
+            BooleanSupplier cancelled, long deadline) throws Exception {
+        boolean interrupted=false, stopping=false;
+        try {
+            while(true) {
+                if (!stopping && (cancelled.getAsBoolean() || Thread.currentThread().isInterrupted()
+                        || System.nanoTime()-deadline>=0)) {
+                    stopping=true; siblings.forEach(scheduler::cancel);
+                }
+                try { return future.get(200,java.util.concurrent.TimeUnit.MILLISECONDS); }
+                catch(InterruptedException stop) { interrupted=true; siblings.forEach(scheduler::cancel); stopping=true; }
+                catch(java.util.concurrent.TimeoutException waiting) { }
+            }
+        } finally { if(interrupted) Thread.currentThread().interrupt(); }
     }
 
     public record CoordinateResult(List<Block> blocks,
@@ -98,6 +107,15 @@ public class QwenAssistCoordinator {
                                        String layout,
                                        boolean foreground,
                                        BooleanSupplier cancelled) throws Exception {
+        return coordinateLazy(bookId,pageNumber,baselineBlocks,parentTexts,plan,regionImages::get,
+                overviewImage,layout,foreground,cancelled);
+    }
+
+    public CoordinateResult coordinateLazy(String bookId,int pageNumber,List<Block> baselineBlocks,
+            Map<String,String> parentTexts,QwenTaskPlanner.PlannedReview plan,
+            java.util.function.Function<String,byte[]> regionImages,byte[] overviewImage,String layout,
+            boolean foreground,BooleanSupplier cancelled) throws Exception {
+        pool(); // Closing rejects new coordinate calls before any external work.
         try (QwenExecutionScope execution=QwenExecutionScope.open(bookId,pageNumber,gate,foreground)) {
             return coordinateWithinScope(bookId,pageNumber,baselineBlocks,parentTexts,plan,
                     regionImages,overviewImage,layout,foreground,cancelled);
@@ -106,7 +124,7 @@ public class QwenAssistCoordinator {
 
     private CoordinateResult coordinateWithinScope(String bookId, int pageNumber,
                                        List<Block> baselineBlocks, Map<String,String> parentTexts,
-                                       QwenTaskPlanner.PlannedReview plan, Map<String,byte[]> regionImages,
+                                       QwenTaskPlanner.PlannedReview plan, java.util.function.Function<String,byte[]> regionImages,
                                        byte[] overviewImage, String layout, boolean foreground,
                                        BooleanSupplier cancelled) throws Exception {
         if (reviewClient == null || structureClient == null)
@@ -124,8 +142,16 @@ public class QwenAssistCoordinator {
             if (budget.remaining() > 0) {
                 try (UsageContext.Scope ignored =
                              UsageContext.open(bookId, pageNumber, "QWEN_STRUCTURE", String.valueOf(pageNumber))) {
-                    List<String> proposed = structureClient.structurePlan(
-                            regionImages.get("__overview__"), baselineBlocks, layout, cancelled, foreground);
+                    PriorityTaskScheduler scheduler=pool();
+                    var structureFuture=scheduler.submit(()-> {
+                        try (QwenExecutionScope child=QwenExecutionScope.attach(execution);
+                             UsageContext.Scope usage=UsageContext.open(bookId,pageNumber,"QWEN_STRUCTURE",String.valueOf(pageNumber))) {
+                            return structureClient.structurePlan(regionImages.apply("__overview__"),baselineBlocks,layout,
+                                    ()->closed || cancelled.getAsBoolean(),foreground);
+                        } catch(Exception failure) { throw new java.util.concurrent.CompletionException(failure); }
+                    },foreground);
+                    List<String> proposed=await(structureFuture,List.of(structureFuture),scheduler,
+                            ()->closed || cancelled.getAsBoolean(),budget.deadline(600));
                     if (isPermutation(baselineOrder, proposed)) {
                         confirmedOrder = proposed;
                     } else {
@@ -134,6 +160,7 @@ public class QwenAssistCoordinator {
                 } catch (CancelledException e) {
                     throw e;
                 } catch (Exception e) {
+                    if(closed || cancelled.getAsBoolean() || Thread.currentThread().isInterrupted()) throw new CancelledException();
                     warnings.add("全局结构请求失败，已回退到已验证几何顺序，不阻塞局部核对");
                 }
             } else {
@@ -148,28 +175,36 @@ public class QwenAssistCoordinator {
         }
         List<IndexedOutcome> outcomes = new ArrayList<>();
         if (!plan.chunks().isEmpty()) {
-            var snapshot = progress == null ? null : progress.latest(bookId, pageNumber);
+            var snapshot = progress == null ? null : execution.attemptSeq()>0
+                    ? progress.snapshot(bookId,pageNumber,execution.executionId()) : progress.latest(bookId,pageNumber);
             java.util.UUID attemptId = snapshot == null ? null : snapshot.attemptId();
             if (attemptId != null) {
                 progress.stage(bookId, pageNumber, attemptId, "REVIEW");
                 progress.plan(bookId, pageNumber, attemptId, "TEXT_GROUPS", plan.chunks().size());
             }
+            PriorityTaskScheduler scheduler=pool();
+            long deadline=budget.deadline(600);
             List<CompletableFuture<IndexedOutcome>> futures = new ArrayList<>();
+            List<CompletableFuture<IndexedOutcome>> submitted = new ArrayList<>();
             for (QwenTaskPlanner.ChunkTask chunk : plan.chunks()) {
                 CompletableFuture<IndexedOutcome> future;
                 try {
-                    future = CompletableFuture.supplyAsync(() -> {
+                    future = scheduler.submit(() -> {
                         if (attemptId != null) progress.inFlight(bookId, pageNumber, attemptId, 1);
                         try (QwenExecutionScope childScope=QwenExecutionScope.attach(execution)) {
-                            return runChunk(bookId, pageNumber, chunk, parentTexts, regionImages.get(chunk.chunkId()),
+                            byte[] region=regionImages.apply(chunk.chunkId());
+                            if(region==null || region.length==0 || region.length>10*1024*1024)
+                                return new IndexedOutcome(chunk.plannedOrder(),chunk,null,"区域图不可用，保留原文");
+                            return runChunk(bookId, pageNumber, chunk, parentTexts, region,
                                     overviewImage, foreground, budget, cancelled);
                         }
                         finally { /* Completion accounting happens for success, failure and cancellation alike. */ }
-                    }, pool());
+                    }, foreground);
                 } catch (java.util.concurrent.RejectedExecutionException full) {
                     future = CompletableFuture.completedFuture(new IndexedOutcome(chunk.plannedOrder(), chunk,
                             null, "局部核对队列已满，保留原文"));
                 }
+                submitted.add(future);
                 futures.add(future.whenComplete((outcome, error) -> {
                     if (attemptId != null) progress.unitDone(bookId, pageNumber, attemptId, chunk.chunkId(),
                             error == null && outcome != null && outcome.result() != null ? "SUCCEEDED" : "FAILED");
@@ -177,13 +212,14 @@ public class QwenAssistCoordinator {
             }
             for (int i = 0; i < futures.size(); i++) {
                 try {
-                    outcomes.add(futures.get(i).join());
+                    outcomes.add(await(futures.get(i),submitted,scheduler,cancelled,deadline));
                 } catch (Exception e) {
                     QwenTaskPlanner.ChunkTask chunk = plan.chunks().get(i);
                     outcomes.add(new IndexedOutcome(chunk.plannedOrder(), chunk, null,
                             "本组执行异常，已保留原文"));
                 }
             }
+            if(cancelled.getAsBoolean() || Thread.currentThread().isInterrupted()) throw new CancelledException();
             outcomes.sort(Comparator.comparingInt(IndexedOutcome::order));
         }
 
