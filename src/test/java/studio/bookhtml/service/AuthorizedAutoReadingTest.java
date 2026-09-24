@@ -141,7 +141,37 @@ class AuthorizedAutoReadingTest {
 
         ReadingWindowResponse res = windows.update(bookId, req);
         assertEquals(List.of(1), res.queuedPages());
-        // In ReadingWindowService, for sequence=1 with consent, notBefore == now, allowing immediate dispatch
+        // In ReadingWindowService, with consent, notBefore == now, allowing immediate dispatch
+    }
+
+    @Test
+    void jumpWithConsentDispatchesCurrentPageImmediatelyWithoutOneSecondDelay() throws Exception {
+        var policy = consentService.getReadingPolicy("local-owner");
+        CreateConsentRequest consentReq = new CreateConsentRequest(
+                "op-consent-jump",
+                policy.policyRevision(),
+                CloudConsent.Scope.book(bookId),
+                List.of("paddle-aistudio"),
+                "AUTO_CURRENT",
+                1, 2,
+                false, false, false, false,
+                1, 8,
+                CloudConsent.MonetaryLimits.cny(500),
+                null
+        );
+        consentService.createConsent("local-owner", consentReq);
+
+        UUID sessionId = UUID.randomUUID();
+        ReadingWindowRequest req1 = new ReadingWindowRequest(sessionId, 1L, 1,
+                "paddle-aistudio", "auto", false, false, true, true);
+        windows.update(bookId, req1);
+
+        // Navigation jump to page 15 (sequence = 2)
+        ReadingWindowRequest req2 = new ReadingWindowRequest(sessionId, 2L, 15,
+                "paddle-aistudio", "auto", false, false, true, true);
+        ReadingWindowResponse res2 = windows.update(bookId, req2);
+        assertEquals(15, res2.centerPage());
+        assertEquals(15, res2.queuedPages().get(0), "jumped page must be first in queue for immediate dispatch");
     }
 
     private static final class MutableClock extends Clock {

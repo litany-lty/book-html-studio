@@ -499,8 +499,8 @@ public class ReadingWindowService {
                     s.queued.addLast(minus);
                 }
             }
-            // First open with valid consent: current page dispatches immediately without 1-sec settle wait
-            if (s.sequence == 1 && s.queued.contains(center)) {
+            // With valid consent: current page dispatches immediately without 1-sec settle wait
+            if (s.queued.contains(center)) {
                 s.notBefore = now;
             } else {
                 s.notBefore = now.plus(settle);

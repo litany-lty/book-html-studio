@@ -178,7 +178,11 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
   function schedulePoll(snapshot) {
     clearTimeout(pollTimer);
     if (!active()) return;
-    const isBusy = Boolean(snapshot?.processingPages?.length) || Boolean(snapshot?.processingPage);
+    const centerNum = Number(snapshot?.centerPage ?? state.currentPage);
+    const centerPage = snapshot?.pages?.find(p => Number(p.pageNumber) === centerNum);
+    const centerPending = centerPage && centerPage.status !== 'READY';
+    const isBusy = Boolean(snapshot?.processingPages?.length) || Boolean(snapshot?.processingPage)
+      || snapshot?.status === 'SETTLING' || snapshot?.status === 'PROCESSING' || centerPending;
     const delay = isBusy ? 400 : 1500;
     pollTimer = setTimeout(async () => {
       if (!active()) return;

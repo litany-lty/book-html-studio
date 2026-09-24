@@ -88,9 +88,10 @@ export function createPageProgress({ api, onPublished }) {
     } catch (_) { /* Status failures never retry a model request. */ }
     finally {
       if (controller === own) controller = null;
-      if (inFlightEpoch === token) inFlightEpoch = null;
+      const isActive = ['QUEUED','RUNNING','DRAINING','BASELINE_PUBLISHED'].includes(snapshot?.lifecycle)
+        || (current?.page && current.page.status !== 'READY');
       if (token === epoch && !document.hidden) timer = setTimeout(() => poll(token),
-        ['QUEUED','RUNNING','DRAINING','BASELINE_PUBLISHED'].includes(snapshot?.lifecycle) ? 1000 : 30000);
+        isActive ? 1000 : 30000);
     }
   }
   function wake() {
