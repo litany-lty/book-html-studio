@@ -664,6 +664,40 @@ async function reloadCurrentPage() {
   }
 }
 
+async function runComprehensibilityCheck() {
+  if (!state.book || !state.currentPage) return;
+  const btn = $('#comprehensibility-check-btn');
+  const prevText = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '自检中...';
+  }
+  try {
+    const pageNum = state.currentPage;
+    const response = await api.checkComprehensibility(state.book.id, pageNum);
+    if (response && state.currentPage === pageNum) {
+      state.page = response;
+      state.blocks = cloneBlocks(response.blocks);
+      state.pageCache.set(pageNum, response);
+      renderCurrent();
+      const newIssuesCount = (response.blocks || []).flatMap(b => b.issues || []).filter(i => !i.resolved).length;
+      if (newIssuesCount > 0) {
+        toast(`自检完成：发现 ${newIssuesCount} 处语句不通顺，已生成推断候选`, 'info');
+        openDrawer('review');
+      } else {
+        toast('自检完成：本页各段落语句通顺，未发现明显语义疑点', 'success');
+      }
+    }
+  } catch (err) {
+    showError(err);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = prevText || '可理解性自检';
+    }
+  }
+}
+
 function renderBookMeta() {
   if (!state.book) {
     renderJobHeading();
@@ -1894,6 +1928,7 @@ $('#reading-window-refresh').addEventListener('click', () => { void readingWindo
 $('#retry-page-header')?.addEventListener('click', retryCurrentPage);
 $('#reload-page-header')?.addEventListener('click', reloadCurrentPage);
 $('#reader-reload-page')?.addEventListener('click', reloadCurrentPage);
+$('#comprehensibility-check-btn')?.addEventListener('click', runComprehensibilityCheck);
 const autoReadCheckbox = $('#reading-window-auto-start');
 if (autoReadCheckbox) {
   autoReadCheckbox.checked = isAutoReadEnabled();

@@ -86,5 +86,6 @@ export const api = {
   applyPresentationOverride: (id, n, body) => request(`/books/${encodeURIComponent(id)}/pages/${n}/presentation-overrides`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   previewOverrideScope: (id, n, blockId) => request(`/books/${encodeURIComponent(id)}/pages/${n}/presentation-overrides/preview?blockId=${encodeURIComponent(blockId)}`),
   search: (id, query, signal) => request(`/books/${encodeURIComponent(id)}/search?q=${encodeURIComponent(query)}`, { signal }),
+  checkComprehensibility: (id, n) => request(`/books/${encodeURIComponent(id)}/pages/${n}/comprehensibility-check`, { method: 'POST' }, 60000),
   exportUrl: id => `${API_ROOT}/books/${encodeURIComponent(id)}/export`
 };

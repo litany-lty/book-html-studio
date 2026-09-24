@@ -105,7 +105,7 @@
         </div>
         <div class="page-head">
           <div><span id="quality-badge" class="quality-badge">等待处理</span><span id="quality-detail"></span><button id="quality-diagnostics-toggle" class="button quiet" type="button" aria-expanded="false" hidden>详情</button><span id="quality-diagnostics" class="quality-diagnostics" hidden></span><span class="page-status-pair"><span id="page-save-status" class="page-save-status" role="status" aria-live="polite" hidden></span><span id="page-processing-progress" class="page-processing-progress" role="progressbar" aria-label="当前页处理进度" aria-valuemin="0" aria-valuemax="100" hidden></span><button id="page-retry-button" class="button quiet page-retry-btn" type="button" hidden title="重新处理本页">重试</button></span></div>
-          <button id="bookmark-button" class="button quiet" type="button" aria-pressed="false">加入书签</button>
+          <div style="display:flex;align-items:center;gap:8px;"><button id="comprehensibility-check-btn" class="button quiet" type="button" title="自检本页段落通顺度，并根据上下文推断最可能的内容">可理解性自检</button><button id="bookmark-button" class="button quiet" type="button" aria-pressed="false">加入书签</button></div>
         </div>
         <div id="page-message" class="page-message" role="status" hidden></div>
         <article id="paper" class="paper"></article>

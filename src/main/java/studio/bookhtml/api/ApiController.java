@@ -86,6 +86,10 @@ public class ApiController {
     @PutMapping("/books/{id}/pages/{n}") public Map<String,Object> update(@PathVariable String id,@PathVariable int n,@Valid@RequestBody PageUpdateRequest request){return pagePayload(id,books.update(id,n,request));}
     @GetMapping("/books/{id}/pages/{n}/revisions") public Map<String,Object> revisions(@PathVariable String id,@PathVariable int n){return Map.of("revisions",books.revisions(id,n));}
     @PostMapping("/books/{id}/pages/{n}/revert") public Map<String,Object> revert(@PathVariable String id,@PathVariable int n,@RequestBody Map<String,Object> body){int target=requiredRevision(body==null?null:body.get("revision"),"缺少 revision");int expected=requiredRevision(body==null?null:body.get("expectedRevision"),"缺少 expectedRevision，请刷新后重试");return pagePayload(id,books.revert(id,n,target,expected));}
+    @PostMapping("/books/{id}/pages/{n}/comprehensibility-check")
+    public Map<String,Object> comprehensibilityCheck(@PathVariable String id,@PathVariable int n) throws Exception {
+        return pagePayload(id, books.checkComprehensibility(id, n));
+    }
     // A1-C09：只接受整数范围内的版本号；小数、溢出、负数一律可预测 400，不经 intValue 截断
     private static int requiredRevision(Object value,String missingMessage){
         if(value==null)throw new ApiException(HttpStatus.BAD_REQUEST,missingMessage);

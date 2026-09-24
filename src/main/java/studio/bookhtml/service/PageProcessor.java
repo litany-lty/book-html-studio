@@ -31,12 +31,14 @@ public class PageProcessor {
     private QwenTaskPlanner planner;
     private QwenTextReviewClient reviewClient;
     private QwenAssistCoordinator coordinator;
+    private ParagraphComprehensibilityService comprehensibilityService;
     /** U5：分组增强装配（缺省关闭，旧整页路径为可控回滚）。 */
     @Autowired(required=false) public void setAssistConfig(studio.bookhtml.config.QwenAssistProperties assistConfig){this.assistConfig=assistConfig;}
     @Autowired(required=false) public void setRequestGate(QwenRequestGate gate){this.gate=gate;}
     @Autowired(required=false) public void setTaskPlanner(QwenTaskPlanner planner){this.planner=planner;}
     @Autowired(required=false) public void setTextReviewClient(QwenTextReviewClient reviewClient){this.reviewClient=reviewClient;}
     @Autowired(required=false) public void setAssistCoordinator(QwenAssistCoordinator coordinator){this.coordinator=coordinator;}
+    @Autowired(required=false) public void setComprehensibilityService(ParagraphComprehensibilityService comprehensibilityService){this.comprehensibilityService=comprehensibilityService;}
     /**
      * U4：可读基线。与完整 process() 同一管线、关闭可选增强：提取/OCR → 原始证据校验 →
      * 发布安全可读版。Qwen 未完成不阻止读取。
@@ -422,6 +424,15 @@ public class PageProcessor {
             blocks=new ArrayList<>(advertisements.blocks());
             if(advertisements.marked()>0)warnings.add("已标记 "+advertisements.marked()+" 个独立页边广告块；原稿和原始识别记录保留可查看");
             if(advertisements.heldForReview()>0)warnings.add("有 "+advertisements.heldForReview()+" 个疑似广告块含已确认疑点，未自动隐藏，请人工复核");
+            if (comprehensibilityService != null && comprehensibilityService.configured()) {
+                try {
+                    blocks = new ArrayList<>(comprehensibilityService.checkPage(bookId, pageNumber, blocks, cancelled));
+                } catch (CancelledException e) {
+                    throw e;
+                } catch (Exception e) {
+                    warnings.add("段落可理解性自检跳过：" + e.getMessage());
+                }
+            }
             return new EnrichResult(List.copyOf(blocks),actualProvider,List.copyOf(warnings),complete);
         }finally{image.flush();}}
         }
