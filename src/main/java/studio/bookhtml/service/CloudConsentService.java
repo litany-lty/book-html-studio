@@ -37,9 +37,9 @@ public class CloudConsentService {
     public synchronized void ensureDefaultConsent() {
         try {
             String sub = resolveSubject(null);
-            CloudConsent existing = consentStore.findActiveConsent(sub, null);
-            if (existing == null || !existing.isValid()) {
+            if (consentStore.claimDefaultInitialization(sub)) {
                 ReadingPolicy policy = policyStore.getPolicy(sub);
+                if (!"AUTO_CURRENT".equals(policy.defaultWindow().mode())) return;
                 CreateConsentRequest req = new CreateConsentRequest(
                         "system-default-global-consent",
                         policy.policyRevision(),
@@ -54,7 +54,10 @@ public class CloudConsentService {
                 );
                 createConsent(sub, req);
             }
-        } catch (Exception ignored) {}
+        } catch (Exception unavailable) {
+            System.getLogger(CloudConsentService.class.getName()).log(System.Logger.Level.WARNING,
+                    "默认云端策略初始化未完成；保留原记录，未绕过授权校验");
+        }
     }
 
     public ReadingPolicy getReadingPolicy(String subjectId) {

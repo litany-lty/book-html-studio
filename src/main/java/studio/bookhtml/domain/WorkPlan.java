@@ -60,8 +60,11 @@ public record WorkPlan(
     ) {
         public StagePlan {
             completedUnitIds = completedUnitIds == null ? Set.of() : Set.copyOf(completedUnitIds);
-            if (totalUnits < 0 || totalUnits > 4096)
-                throw new IllegalArgumentException("invalid stage plan size: " + totalUnits);
+            if (totalUnits < 0 || totalUnits > 4096 || weight<0 || weight>100
+                    || succeeded<0 || failed<0 || skipped<0 || cancelled<0
+                    || (long)succeeded+failed+skipped+cancelled!=completedUnitIds.size()
+                    || completedUnitIds.size()>totalUnits)
+                throw new IllegalArgumentException("invalid stage plan counts");
         }
 
         public int completedUnits() {
@@ -121,8 +124,10 @@ public record WorkPlan(
     ) {
         public ReviewSubPlan {
             unitIds = unitIds == null ? List.of() : List.copyOf(unitIds);
-            if (totalUnits < 0 || totalUnits > 4096)
-                throw new IllegalArgumentException("invalid review sub-plan size: " + totalUnits);
+            if (totalUnits < 0 || totalUnits > 4096 || (!unitIds.isEmpty() && unitIds.size()!=totalUnits)
+                    || unitIds.stream().anyMatch(id->id==null||id.isBlank()||id.length()>200)
+                    || new HashSet<>(unitIds).size()!=unitIds.size())
+                throw new IllegalArgumentException("invalid review sub-plan units");
         }
     }
 
@@ -169,7 +174,9 @@ public record WorkPlan(
             nextStages.put("REVIEW", reviewStage.withUnits(totalUnits, "CHUNK"));
         }
 
-        String nextParentHash = computeParentPlanHash(bookId, pageNumber, pageRevision, eventSeq, contextHash, nextStages);
+        // The parent freezes the phase weights; review units belong to the separately
+        // frozen child plan. Never calculate the child against a discarded parent hash.
+        String nextParentHash = parentPlanHash;
 
         return new WorkPlan(
                 planId, bookId, pageNumber, pageRevision, eventSeq, contextHash,
@@ -322,7 +329,7 @@ public record WorkPlan(
                 Map<String, Object> sm = new LinkedHashMap<>();
                 sm.put("name", sp.name());
                 sm.put("weight", sp.weight());
-                sm.put("totalUnits", sp.totalUnits());
+                sm.put("totalUnits", "REVIEW".equals(sp.name()) ? 0 : sp.totalUnits());
                 sm.put("unitKind", sp.unitKind());
                 stageList.add(sm);
             }

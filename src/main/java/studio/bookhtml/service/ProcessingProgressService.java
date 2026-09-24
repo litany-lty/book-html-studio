@@ -4,6 +4,7 @@ import org.springframework.stereotype.Service;
 import studio.bookhtml.domain.PageAttempt;
 import studio.bookhtml.domain.ProcessingSnapshot;
 import studio.bookhtml.domain.WorkPlan;
+import studio.bookhtml.store.BookStore;
 
 import java.time.Instant;
 import java.util.*;
@@ -135,13 +136,13 @@ public class ProcessingProgressService {
         if (!e.endedUnits.isEmpty() && (e.total != total || !Objects.equals(e.unitKind, unitKind)))
             throw new IllegalStateException("completed plan denominator is frozen");
         if (e.total == total && Objects.equals(e.unitKind, unitKind)) return;
-        e.unitKind = Objects.requireNonNull(unitKind); e.total = total;
-        e.inFlight = Math.min(e.inFlight, Math.max(0, total - e.endedUnits.size())); e.changed();
-        if (e.workPlan != null) {
-            try {
-                e.workPlan = e.workPlan.freezeReviewSubPlan(total, null);
-            } catch (Exception ignore) {}
-        }
+        Objects.requireNonNull(unitKind);
+        if(!"PAGE".equals(unitKind) && unitKind.isBlank())throw new IllegalArgumentException("invalid unit kind");
+        // Validate the derived plan before updating the live counters. PAGE is not a review plan.
+        WorkPlan next=e.workPlan;
+        if(next!=null && !"PAGE".equals(unitKind))next=next.freezeReviewSubPlan(total,null);
+        e.workPlan=next;e.unitKind=unitKind;e.total=total;
+        e.inFlight=Math.min(e.inFlight,Math.max(0,total-e.endedUnits.size()));e.changed();
         if (journal != null) {
             journal.recordEvent(e.bookId, e.pageNumber, e.attemptId, e.attemptSeq,
                     new ProgressJournal.JournalEvent(
@@ -158,11 +159,24 @@ public class ProcessingProgressService {
         Entry e = entries.get(key(bookId, pageNumber, attemptId));
         if (e == null || e.terminal()) return;
         Objects.requireNonNull(workPlan);
-        e.workPlan = workPlan;
-        if (workPlan.reviewSubPlan() != null) {
-            e.total = workPlan.reviewSubPlan().totalUnits();
-            e.unitKind = "CHUNK";
+        if(!e.bookId.equals(workPlan.bookId())||e.pageNumber!=workPlan.pageNumber()
+                ||e.attemptSeq!=workPlan.eventSeq()||e.workPlan.pageRevision()!=workPlan.pageRevision()
+                ||!"RUNNING".equals(workPlan.lifecycle())||!e.stage.equals(workPlan.currentStage()))
+            throw new IllegalArgumentException("work plan belongs to another execution or stage");
+        String parent=WorkPlan.computeParentPlanHash(workPlan.bookId(),workPlan.pageNumber(),workPlan.pageRevision(),
+                workPlan.eventSeq(),workPlan.contextHash(),workPlan.stages());
+        if(!parent.equals(workPlan.parentPlanHash()))throw new IllegalArgumentException("invalid parent plan hash");
+        if(workPlan.reviewSubPlan()!=null) {
+            var child=workPlan.reviewSubPlan();
+            String hash=WorkPlan.computeReviewPlanHash(e.bookId,e.pageNumber,e.attemptSeq,workPlan.contextHash(),parent,child.totalUnits(),child.unitIds());
+            if(!hash.equals(child.reviewPlanHash())||!hash.equals(workPlan.reviewPlanHash()))throw new IllegalArgumentException("invalid child plan hash");
         }
+        if(!e.endedUnits.isEmpty() || e.workPlan.frozen()) {
+            if(!e.workPlan.equals(workPlan))throw new IllegalStateException("cannot replace a frozen or progressed plan");
+            return;
+        }
+        e.workPlan=workPlan;
+        if(workPlan.reviewSubPlan()!=null){e.total=workPlan.reviewSubPlan().totalUnits();e.unitKind="CHUNK";}
         e.changed();
         if (journal != null) {
             journal.recordEvent(e.bookId, e.pageNumber, e.attemptId, e.attemptSeq,
@@ -188,19 +202,14 @@ public class ProcessingProgressService {
         if (!Set.of("SUCCEEDED", "FAILED", "DEFERRED", "SKIPPED", "CANCELLED").contains(outcome))
             throw new IllegalArgumentException("invalid unit outcome");
         if (e.endedUnits.size() >= e.total) throw new IllegalStateException("unit exceeds frozen plan");
-        e.endedUnits.add(unitId);
-        switch (outcome) {
-            case "SUCCEEDED" -> e.succeeded++;
-            case "FAILED" -> e.failed++;
-            case "CANCELLED" -> e.cancelled++;
-            default -> e.skipped++;
+        WorkPlan next=e.workPlan;
+        if(next!=null) {
+            String planStage="PAGE".equals(e.unitKind)?e.stage:"REVIEW";
+            next=next.recordUnitDone(planStage,unitId,outcome);
         }
-        e.inFlight = Math.min(Math.max(0, e.inFlight - 1), e.total - e.endedUnits.size()); e.changed();
-        if (e.workPlan != null) {
-            try {
-                e.workPlan = e.workPlan.recordUnitDone(e.stage, unitId, outcome);
-            } catch (Exception ignore) {}
-        }
+        e.workPlan=next;e.endedUnits.add(unitId);
+        switch(outcome){case "SUCCEEDED"->e.succeeded++;case "FAILED"->e.failed++;case "CANCELLED"->e.cancelled++;default->e.skipped++;}
+        e.inFlight=Math.min(Math.max(0,e.inFlight-1),e.total-e.endedUnits.size());e.changed();
         if (journal != null) {
             journal.recordEvent(e.bookId, e.pageNumber, e.attemptId, e.attemptSeq,
                     new ProgressJournal.JournalEvent(
@@ -277,80 +286,56 @@ public class ProcessingProgressService {
                 parentPlanHash, reviewPlanHash, contextHash, weightedPercent, accuracyRatio);
     }
 
-    public ProcessingSnapshot latest(String bookId, int pageNumber) {
-        synchronized(this) {
-            Entry entry=latestByPage.get(pageKey(bookId,pageNumber));
-            if(entry!=null) return snapshot(entry);
+    private ProcessingSnapshot memory(String book,int page) {
+        synchronized(this){Entry e=latestByPage.get(pageKey(book,page));return e==null?null:snapshot(e);}
+    }
+    private boolean same(PageAttempt authority,ProcessingSnapshot candidate) {
+        return candidate!=null && authority.generation()==candidate.attemptSeq()
+                && authority.attemptId().equals(candidate.attemptId());
+    }
+    /** Authority wins over telemetry. Do not acquire the storage monitor inside the progress monitor. */
+    public ProcessingSnapshot latest(String bookId,int pageNumber) {
+        ProcessingSnapshot live=memory(bookId,pageNumber);
+        if(store==null)return live;
+        PageAttempt authority=store.pageAttempt(bookId,pageNumber);
+        // An admission may have completed between the authority read and this snapshot.
+        ProcessingSnapshot newer=memory(bookId,pageNumber);
+        if(newer!=null&&(live==null||newer.attemptSeq()>=live.attemptSeq()))live=newer;
+        if(authority!=null&&live!=null&&live.attemptSeq()>authority.generation())return live;
+        if(authority!=null&&same(authority,live)
+                && (authority.lifecycle().equals(live.lifecycle())
+                || !TERMINAL.contains(authority.lifecycle())&&!"DRAINING".equals(authority.lifecycle())&&!TERMINAL.contains(live.lifecycle())))return live;
+        var head=store.headStore()==null?null:store.headStore().readHead(store.bookDir(bookId),pageNumber);
+        var page=head==null?store.readPage(bookId,pageNumber):null;
+        boolean readable=head!=null?head.processed():page!=null&&"READY".equals(page.status());
+        int revision=head!=null?head.revision():BookStore.revisionOrZero(page);
+        ProcessingSnapshot logged=null;
+        if(journal!=null&&journal.hasJournal(bookId,pageNumber)) {
+            var recovery=journal.replay(bookId,pageNumber);
+            if(recovery!=null)logged=recovery.toSnapshot(revision,readable);
         }
-        if(store==null) return null;
-
-        if (journal != null && journal.hasJournal(bookId, pageNumber)) {
-            var recovered = journal.replay(bookId, pageNumber);
-            if (recovered != null) {
-                boolean readable = false;
-                studio.bookhtml.domain.PageHead head = store.headStore() != null ? store.headStore().readHead(store.bookDir(bookId), pageNumber) : null;
-                if (head != null) {
-                    readable = head.processed();
-                } else {
-                    var page = store.readPage(bookId, pageNumber);
-                    readable = page != null && "READY".equals(page.status());
-                }
-                var page = store.readPage(bookId, pageNumber);
-                int revision = store.revisionOrZero(page);
-                ProcessingSnapshot snap = recovered.toSnapshot(revision, readable);
-                synchronized(this) {
-                    Entry latest = latestByPage.get(pageKey(bookId, pageNumber));
-                    if (latest == null || latest.attemptSeq < recovered.attemptSeq()) {
-                        return snap;
-                    }
-                }
+        if(authority!=null) {
+            if(same(authority,logged)&&authority.lifecycle().equals(logged.lifecycle()))return logged;
+            String lifecycle=authority.lifecycle();boolean terminal=TERMINAL.contains(lifecycle);
+            long version=Math.max(same(authority,live)?live.snapshotVersion():-1,same(authority,logged)?logged.snapshotVersion():-1)+1;
+            if((live!=null&&live.attemptSeq()==authority.generation()&&!same(authority,live))
+                    ||(logged!=null&&logged.attemptSeq()==authority.generation()&&!same(authority,logged))) {
+                lifecycle="UNKNOWN";terminal=true;
             }
-        }
-
-        // Never hold the progress monitor while acquiring the storage authority monitor.
-        PageAttempt attempt=store.pageAttempt(bookId,pageNumber);
-        if(attempt!=null) {
-            boolean readable;
-            studio.bookhtml.domain.PageHead head = store.headStore() != null ? store.headStore().readHead(store.bookDir(bookId), pageNumber) : null;
-            if (head != null) {
-                readable = head.processed();
-            } else {
-                var page = store.readPage(bookId, pageNumber);
-                readable = page != null && "READY".equals(page.status());
-            }
-
-            String lifecycle=attempt.lifecycle();
-            boolean terminal=TERMINAL.contains(lifecycle);
-            ProcessingSnapshot recovered=new ProcessingSnapshot(2,bookId,pageNumber,attempt.attemptId(),0,
-                    lifecycle,"RECOVERED",readable?"OCR_READABLE":"ORIGINAL_ONLY",
-                    attempt.expectedRevision(),attempt.startedAt(),attempt.updatedAt(),attempt.updatedAt(),
+            return new ProcessingSnapshot(2,bookId,pageNumber,authority.attemptId(),version,lifecycle,"RECOVERED",
+                    readable?"OCR_READABLE":"ORIGINAL_ONLY",revision,authority.startedAt(),authority.updatedAt(),authority.updatedAt(),
                     new ProcessingSnapshot.UnitCounts("RECOVERED",0,0,0,0,0,0),readable,!terminal,
-                    terminal && !Set.of("UNKNOWN","SUCCEEDED").contains(lifecycle),"PERSISTED_ATTEMPT_STATE",attempt.generation());
-            synchronized(this) {
-                Entry latest=latestByPage.get(pageKey(bookId,pageNumber));
-                return latest!=null && latest.attemptSeq>=attempt.generation()?snapshot(latest):recovered;
-            }
+                    terminal&&!Set.of("UNKNOWN","SUCCEEDED").contains(lifecycle),"PERSISTED_ATTEMPT_STATE",authority.generation());
         }
-
-        studio.bookhtml.domain.PageHead head = store.headStore() != null ? store.headStore().readHead(store.bookDir(bookId), pageNumber) : null;
-        if (head != null && head.attemptId() != null) {
-            String lifecycle = head.attemptLifecycle() != null ? head.attemptLifecycle() : "RUNNING";
-            boolean terminal = TERMINAL.contains(lifecycle);
-            boolean readable = head.processed();
-            ProcessingSnapshot fromHead = new ProcessingSnapshot(2, bookId, pageNumber, head.attemptId(), 0,
-                    lifecycle, head.attemptStage() != null ? head.attemptStage() : "RECOVERED",
-                    readable ? "OCR_READABLE" : "ORIGINAL_ONLY",
-                    head.revision(), head.updatedAt(), head.updatedAt(), head.updatedAt(),
-                    new ProcessingSnapshot.UnitCounts("RECOVERED", 0, 0, 0, 0, 0, 0),
-                    readable, !terminal,
-                    terminal && !Set.of("UNKNOWN", "SUCCEEDED").contains(lifecycle),
-                    "PERSISTED_ATTEMPT_HEAD", head.attemptSeq() != null ? head.attemptSeq() : 1);
-            synchronized(this) {
-                Entry latest = latestByPage.get(pageKey(bookId, pageNumber));
-                return latest != null && latest.attemptSeq >= fromHead.attemptSeq() ? snapshot(latest) : fromHead;
-            }
+        if(live!=null)return live;
+        if(logged!=null)return logged; // Legacy books without attempt authority retain their historical projection.
+        if(head!=null&&head.attemptId()!=null) {
+            String lifecycle=head.attemptLifecycle()==null?"UNKNOWN":head.attemptLifecycle();boolean terminal=TERMINAL.contains(lifecycle);
+            return new ProcessingSnapshot(2,bookId,pageNumber,head.attemptId(),0,lifecycle,head.attemptStage()==null?"RECOVERED":head.attemptStage(),
+                    readable?"OCR_READABLE":"ORIGINAL_ONLY",revision,head.updatedAt(),head.updatedAt(),head.updatedAt(),
+                    new ProcessingSnapshot.UnitCounts("RECOVERED",0,0,0,0,0,0),readable,!terminal,
+                    terminal&&!Set.of("UNKNOWN","SUCCEEDED").contains(lifecycle),"PERSISTED_ATTEMPT_HEAD",head.attemptSeq()==null?1:head.attemptSeq());
         }
-
         return null;
     }
 }

@@ -79,6 +79,48 @@ public class RemoteJobRegistry {
     private final ObjectMapper json;
     private final Object lock = new Object();
     private final Map<String, RemoteJobRecord> activeRecords = new ConcurrentHashMap<>();
+    private boolean recoveryBlocked;
+    private final Set<String> quarantine=new TreeSet<>();
+    private static final int MAX_RECORD_BYTES=128*1024,MAX_RECOVERY_RECORDS=10000;
+    private Path recoveryFence(){return jobsDir.resolve("recovery-quarantine.json");}
+    public boolean recoveryBlocked(){synchronized(lock){return recoveryBlocked;}}
+    public int quarantinedRecordCount(){synchronized(lock){return quarantine.size();}}
+    private static boolean canonicalUuid(String id) {
+        try{return id!=null&&UUID.fromString(id).toString().equals(id);}catch(IllegalArgumentException e){return false;}
+    }
+    private static boolean text(String value,int max){return value!=null&&!value.isBlank()&&value.length()<=max;}
+    private com.fasterxml.jackson.databind.JsonNode boundedJson(Path path,int max)throws IOException {
+        DurableJson.rejectLinks(path);
+        if(!Files.isRegularFile(path,LinkOption.NOFOLLOW_LINKS))throw new IOException("remote record unavailable");
+        byte[] data;try(var input=Files.newInputStream(path,LinkOption.NOFOLLOW_LINKS)){data=input.readNBytes(max+1);}
+        if(data.length>max)throw new IOException("remote record size exceeded");
+        try(var parser=json.getFactory().createParser(data)) {
+            parser.enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
+            com.fasterxml.jackson.databind.JsonNode value=json.readTree(parser);
+            if(value==null||!value.isObject()||parser.nextToken()!=null)throw new IOException("invalid remote record JSON");
+            return value;
+        }
+    }
+    private RemoteJobRecord readRecord(Path path)throws IOException {
+        var tree=boundedJson(path,MAX_RECORD_BYTES);
+        for(String field:List.of("page","pollCount","maxPolls")) {
+            var value=tree.get(field);
+            if(value==null||!value.isIntegralNumber()||!value.canConvertToInt())throw new IOException("invalid remote counter");
+        }
+        RemoteJobRecord r=json.treeToValue(tree,RemoteJobRecord.class);
+        if(r==null||!canonicalUuid(r.handleId())||!path.getFileName().toString().equals(r.handleId()+".json")
+                ||!text(r.bookId(),200)||r.page()<1||!text(r.provider(),100)||!text(r.accountScope(),256)
+                ||r.state()==null||!Set.of(STATE_RESERVED,STATE_SUBMITTING,STATE_RUNNING,STATE_TERMINAL_PROVEN,STATE_SUBMIT_UNKNOWN,STATE_REMOTE_UNKNOWN).contains(r.state())
+                ||r.pollCount()<0||r.maxPolls()<1||r.maxPolls()>10000||r.createdAt()==null||r.updatedAt()==null
+                ||STATE_RESERVED.equals(r.state())&&(r.physicalCallId()!=null||r.remoteJobId()!=null)
+                ||STATE_SUBMITTING.equals(r.state())&&!text(r.physicalCallId(),512)
+                ||STATE_RUNNING.equals(r.state())&&!text(r.remoteJobId(),2048))throw new IOException("remote job identity invalid");
+        return r;
+    }
+    private void checkNewAdmission() {
+        if(recoveryBlocked)throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE,
+                "远端任务回执无法验证，已暂停新提交；已知任务可续查。请恢复损坏回执后重新核验，不能删除记录以释放名额");
+    }
 
     @Autowired
     public RemoteJobRegistry(AppProperties properties, ObjectMapper json) {
@@ -97,32 +139,64 @@ public class RemoteJobRegistry {
     }
 
     private Path jobPath(String handleId) {
+        if(!canonicalUuid(handleId))throw new IllegalArgumentException("invalid remote handle");
         return jobsDir.resolve(handleId + ".json");
     }
 
     public void recover() {
-        synchronized (lock) {
-            activeRecords.clear();
-            if (!Files.exists(jobsDir, LinkOption.NOFOLLOW_LINKS)) return;
-            try (var stream = Files.list(jobsDir)) {
-                for (Path file : stream.toList()) {
-                    String name = file.getFileName().toString();
-                    if (!name.endsWith(".json")) continue;
-                    try {
-                        RemoteJobRecord record = json.readValue(file.toFile(), RemoteJobRecord.class);
-                        if (record != null && record.isActive()) {
-                            activeRecords.put(record.handleId(), record);
-                        }
-                    } catch (Exception e) {
-                        System.getLogger(RemoteJobRegistry.class.getName()).log(System.Logger.Level.WARNING,
-                                "Failed to recover remote job from " + file + ": " + e.getMessage());
+        synchronized(lock) {
+            Map<String,RemoteJobRecord> restored=new HashMap<>();
+            Set<String> suspect=new TreeSet<>(quarantine);
+            boolean directoryFailure=false;
+            Set<String> seen=new HashSet<>();
+            try {
+                DurableJson.rejectLinks(jobsDir);
+                if(Files.exists(recoveryFence(),LinkOption.NOFOLLOW_LINKS)) {
+                    var fence=boundedJson(recoveryFence(),512*1024);
+                    if(!fence.path("schemaVersion").isIntegralNumber()||fence.path("schemaVersion").asInt()!=1
+                            ||!fence.path("files").isArray()||fence.path("files").size()>MAX_RECOVERY_RECORDS)
+                        throw new IOException("quarantine marker invalid");
+                    for(var f:fence.path("files")) {
+                        if(!f.isTextual()||f.asText().length()>255||f.asText().contains("/")||f.asText().contains("\\"))
+                            throw new IOException("quarantine filename invalid");
+                        suspect.add(f.asText());
                     }
                 }
-            } catch (IOException e) {
-                System.getLogger(RemoteJobRegistry.class.getName()).log(System.Logger.Level.WARNING,
-                        "Failed to list remote jobs directory: " + e.getMessage());
+                if(Files.exists(jobsDir,LinkOption.NOFOLLOW_LINKS)) {
+                    List<Path> files;
+                    try(var stream=Files.list(jobsDir)){files=stream.filter(p->p.getFileName().toString().endsWith(".json")&&!p.equals(recoveryFence()))
+                            .sorted().limit(MAX_RECOVERY_RECORDS+1L).toList();}
+                    if(files.size()>MAX_RECOVERY_RECORDS)throw new IOException("remote recovery capacity exceeded");
+                    long bytes=0;
+                    for(Path file:files) {
+                        String name=file.getFileName().toString();
+                        seen.add(name);
+                        try {
+                            bytes=Math.addExact(bytes,Files.size(file));if(bytes>32L*1024*1024)throw new IOException("remote recovery byte budget");
+                            RemoteJobRecord record=readRecord(file);
+                            if(record.isActive())restored.put(record.handleId(),record);
+                            suspect.remove(name); // Only a validated record clears its own quarantine, never deletion.
+                        }catch(Exception damaged){suspect.add(name);}
+                    }
+                }
+            }catch(Exception inaccessible){directoryFailure=true;}
+            // During same-process reconciliation retain unresolved in-memory debt as well.
+            for(var prior:activeRecords.values()) {
+                String name=prior.handleId()+".json";
+                if(!seen.contains(name))suspect.add(name);
+                if(suspect.contains(name)||directoryFailure)restored.putIfAbsent(prior.handleId(),prior);
             }
-            // B-01：重启时先回收陈旧活动记录，避免崩溃残留永久占满并发名额。
+            quarantine.clear();quarantine.addAll(suspect);
+            recoveryBlocked=directoryFailure||!quarantine.isEmpty();
+            if(!directoryFailure) {
+                try {
+                    if(recoveryBlocked)DurableJson.write(recoveryFence(),Map.of("schemaVersion",1,"files",List.copyOf(quarantine)),json,512*1024);
+                    else Files.deleteIfExists(recoveryFence());
+                }catch(IOException failedFence){recoveryBlocked=true;}
+            }
+            activeRecords.clear();activeRecords.putAll(restored);
+            if(recoveryBlocked)System.getLogger(RemoteJobRegistry.class.getName()).log(System.Logger.Level.WARNING,
+                    "远端任务恢复未完成；保留未知债务，暂停新提交（未输出回执内容）");
             purgeStale(Instant.now());
         }
     }
@@ -134,6 +208,7 @@ public class RemoteJobRegistry {
      */
     int purgeStale(Instant now) {
         synchronized(lock) {
+            if(recoveryBlocked)return 0; // Corruption cannot be overwritten by reclaiming a stale in-memory reservation.
             int reclaimed=0;
             for(RemoteJobRecord record:new ArrayList<>(activeRecords.values())) {
                 if(record==null||!record.isActive()||!isStale(record,now))continue;
@@ -204,6 +279,7 @@ public class RemoteJobRegistry {
                             &&Objects.equals(existing.provider(),provider)&&Objects.equals(existing.accountScope(),accountScope))return existing;
                 }
             }
+            checkNewAdmission();
             long activeCount=activeRecords.values().stream().filter(RemoteJobRecord::isActive).count();
             if(activeCount>=MAX_ACTIVE_REMOTE_JOBS)throw new ApiException(HttpStatus.TOO_MANY_REQUESTS,
                     "活跃远端 OCR 任务已达上限（"+MAX_ACTIVE_REMOTE_JOBS+"）；已知任务可续查，未知结果不能当作已结束");
@@ -223,6 +299,8 @@ public class RemoteJobRegistry {
 
     public RemoteJobRecord markSubmitting(String handleId, String physicalCallId) throws IOException {
         synchronized (lock) {
+            checkNewAdmission();
+            if(!text(physicalCallId,512))throw new IOException("missing physical call identity");
             RemoteJobRecord current = getRequired(handleId);
             if (!STATE_RESERVED.equals(current.state()) || current.remoteJobId()!=null || current.physicalCallId()!=null)
                 throw new IOException("已有提交可能已送达，不能重新发送；请先核对远端任务状态");

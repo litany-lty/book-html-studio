@@ -674,7 +674,13 @@ public class JobService {
                     write(running.bookId,statusJob(cur,"CANCELLED",cur.completed(),cur.total(),cur.currentPage(),null,cur.errors()));
                 return;
             }
-            if(running.cancelled&&!"CANCELLED".equals(job.status()))return;
+            if(running.cancelled) {
+                // close() may cancel after the worker's final check but before this write.
+                // Do not silently drop its terminal event and strand job.json in RUNNING.
+                if(List.of("CANCELLED","COMPLETED","COMPLETED_WITH_ERRORS","FAILED").contains(job.status()))
+                    write(running.bookId,statusJob(job,"CANCELLED",job.completed(),job.total(),job.currentPage(),null,job.errors()));
+                return;
+            }
             write(running.bookId,job);
         }catch(Exception ignored){}}}
     private static Job statusJob(Job initial,String status,int completed,int total,Integer currentPage,String error,List<String>errors){

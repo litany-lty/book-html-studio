@@ -58,10 +58,10 @@ public class BookContextService {
                 if (p == null || n == pageNumber) continue;
                 String text = sourceText(p);
                 if (!text.isBlank()) evidence.add(Map.of("page", n, "revision", BookStore.revisionOrZero(p),
-                        "text", text, "basis", p.reviewed() ? "MANUAL_REVIEWED" : "OCR_UNVERIFIED", "readOnly", true));
+                        "text", text, "basis", evidenceBasis(p), "readOnly", true));
             }
             Map<String, Object> context = new LinkedHashMap<>();
-            context.put("version", "book-context-v1");
+            context.put("version", "book-context-v2-confirmed-evidence");
             context.put("bookId", bookId);
             context.put("targetPage",pageNumber);
             Page target=observed.get(pageNumber);
@@ -88,16 +88,38 @@ public class BookContextService {
     private static List<Block> sources(Page p) {
         if (p == null) return List.of();
         // Unreviewed display blocks can contain model suggestions: never feed them back as evidence.
-        List<Block> blocks = p.reviewed() ? p.blocks() : p.sourceRecords();
-        return blocks == null ? List.of() : p.reviewed() ? blocks : blocks.stream()
-                .filter(b->b!=null && !HandwritingTranscribeService.SOURCE.equals(b.source())
-                        && (b.source()==null || !b.source().startsWith("qwen-toc-recovery")))
-                .toList();
+        if (p.reviewed()) return p.blocks()==null ? List.of() : p.blocks();
+        Map<String,Block> current=new HashMap<>();
+        if(p.blocks()!=null)for(Block b:p.blocks())if(b!=null&&b.id()!=null)current.putIfAbsent(b.id(),b);
+        List<Block> sources=p.sourceRecords()==null ? List.of() : p.sourceRecords();
+        List<Block> result=new ArrayList<>();
+        for(Block b:sources) {
+            if(b==null||HandwritingTranscribeService.SOURCE.equals(b.source())
+                    ||b.source()!=null&&b.source().startsWith("qwen-toc-recovery"))continue;
+            Block confirmed=current.get(b.id());
+            if(confirmed!=null&&Objects.equals(confirmed.original(),b.original())&&!confirmed.issues().isEmpty())
+                result.add(new Block(b.id(),b.type(),b.order(),b.bbox(),b.writingMode(),b.original(),b.simplified(),b.confidence(),
+                        b.uncertain(),confirmed.reviewed(),b.headingLevel(),b.source(),b.sourceIds(),null,b.sourceRect(),confirmed.issues()));
+            else result.add(b);
+        }
+        return List.copyOf(result);
+    }
+    private static String evidenceBasis(Page p) {
+        boolean edited=false,unresolved=false;
+        for(Block b:sources(p)) {
+            var text=EvidenceTextResolver.resolve(b);
+            if(text.isEmpty()){unresolved=true;continue;}
+            edited|=text.get().hasCorrections();unresolved|=text.get().hasUnresolved();
+        }
+        if(p.reviewed())return unresolved?"MANUAL_REVIEWED_WITH_UNRESOLVED":"MANUAL_REVIEWED";
+        return edited?"MANUAL_CORRECTIONS_WITH_OCR_UNVERIFIED":"OCR_UNVERIFIED";
     }
     private static String chapter(Page p) {
         for (Block block : sources(p)) {
             if (block == null || block.original() == null) continue;
-            String text = block.original().strip();
+            var evidence = EvidenceTextResolver.resolve(block);
+            if (evidence.isEmpty() || evidence.get().hasUnresolved()) continue;
+            String text = evidence.get().value().strip();
             if (text.length() <= 100 && CHAPTER.matcher(text).matches()) return text;
         }
         return "";
@@ -106,8 +128,10 @@ public class BookContextService {
         StringBuilder text = new StringBuilder();
         for (Block block : sources(p)) {
             if (block == null || block.original() == null || "advertisement".equals(block.type())) continue;
+            var evidence = EvidenceTextResolver.resolve(block);
+            if (evidence.isEmpty() || evidence.get().value().isBlank()) continue;
             if (text.length() > 0) text.append('\n');
-            text.append(clip(block.original(), 1200 - text.length()));
+            text.append(clip(evidence.get().value(), 1200 - text.length()));
             if (text.length() >= 1200) break;
         }
         return text.toString();

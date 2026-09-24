@@ -126,13 +126,8 @@ public class ParagraphComprehensibilityService {
                             var response=call.send(request,transport::send);
                             if(response.statusCode()<200||response.statusCode()>=300)throw new OcrException("自检服务暂未完成（HTTP "+response.statusCode()+"），保留原文");
                             JsonNode envelope=strict(call.read(response,MAX_RESPONSE_BYTES));call.captureUsage(envelope);
-                            JsonNode choices=envelope.get("choices");
-                            if(choices==null || !choices.isArray() || choices.size()!=1
-                                    || !"stop".equals(envelope.at("/choices/0/finish_reason").asText()))
-                                throw new OcrException("自检输出未正常完整结束，未当作无疑点结果");
-                            JsonNode content=envelope.at("/choices/0/message/content");
-                            if(!content.isTextual())throw new OcrException("自检返回结构无效");
-                            ParsedFindings parsed=parse(strict(stripFence(content.asText()).getBytes(StandardCharsets.UTF_8)),group);
+                            String content=ModelCompletion.singleText(envelope);
+                            ParsedFindings parsed=parse(strict(stripFence(content).getBytes(StandardCharsets.UTF_8)),group);
                             result=parsed.findings();groupComplete=parsed.complete();
                             // A malformed annotation is not evidence of a problem-free paragraph.
                             // Keep accepted findings but do not finalize the review as successful.

@@ -288,13 +288,11 @@ public class HandwritingTranscribeService {
                 HttpResponse<java.io.InputStream> response=call.send(request,transport::send);
                 if(response.statusCode()<200||response.statusCode()>=300)throw new OcrException("手写转写服务返回HTTP "+response.statusCode());
                 JsonNode envelope=strictJson(new String(call.read(response,256*1024),java.nio.charset.StandardCharsets.UTF_8));call.captureUsage(envelope);
-                if("length".equals(envelope.at("/choices/0/finish_reason").asText()))throw new OcrException("手写转录输出截断");
-                JsonNode content=envelope.at("/choices/0/message/content");
-                if(!content.isTextual())throw new OcrException("手写转写响应结构无效");
-                JsonNode parsed=strictJson(clean(content.asText()));
+                String content=ModelCompletion.singleText(envelope);
+                JsonNode parsed=strictJson(clean(content));
                 if(!parsed.path("text").isTextual()||parsed.path("text").textValue().length()>8000||!parsed.path("findings").isArray())throw new OcrException("转录格式无效");
                 parsedIssues("validate",parsed.path("text").asText(),parsed.path("findings"));
-                checkCancelled(cancelled);call.succeeded();return content.asText();
+                checkCancelled(cancelled);call.succeeded();return content;
             }
         }
     }
