@@ -65,4 +65,14 @@ class SelfcheckResultIntegrityTest {
         var result=review("{\"findings\":[]}","古文专名不可随意改写");
         assertTrue(result.complete());assertEquals(1,result.completed());assertTrue(result.blocks().get(0).issues().isEmpty());
     }
+    @Test void missingTerminationOrMultipleChoicesCannotClaimCoverage() throws Exception {
+        var message=Map.of("content","{\"findings\":[]}");
+        var stopped=Map.of("finish_reason","stop","message",message);
+        for(Object choices:List.of(List.of(Map.of("message",message)),List.of(stopped,stopped),List.of(),Map.of("0",stopped))) {
+            String envelope=fixture.json.writeValueAsString(Map.of("choices",choices));
+            var result=fixture.service(r->fixture.response(envelope)).check("book",1,List.of(fixture.block("甲丙")),()->false);
+            assertFalse(result.complete());assertEquals(0,result.completed());
+        }
+    }
+
 }

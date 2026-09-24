@@ -103,3 +103,6 @@ python3 scripts/security/scan_secrets.py --history --out test-results/secret-sca
 空findings在完整有效响应中仍表示本轮没有报告疑点，不人为制造问题；它不代表整页100%正确。缺失凭据或授权时的本地自检行为、默认启用策略、同attempt预算、费用记录及UI均不改变，没有增加用户配置。
 
 追加后专项50项通过。该追加的最终完整回归和合并提交，以后续PR及main push实际产物为准；上文907项是明确绑定36b19ce的基线证据，不冒充追加后的测试计数。
+
+
+完整回归还发现旧自检测试的成功响应省略finish_reason，不能满足新增正常结束契约；补齐三个成功fixture的stop，同时增加complete=true断言，让原先“未真正执行核对也能通过”的重叠疑点测试确实走完解析。新增第8项测试明确验证缺失终止原因、多choice和错误choice类型不宣告完成；没有放宽生产校验或删除原文/偏移/人工保护断言。
