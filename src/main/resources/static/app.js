@@ -13,8 +13,11 @@ import { createPageProgress } from './page-progress.js';
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
-const pageProgress = createPageProgress({ api, onPublished: (n, page) => acceptReadyPage(n, page) });
-const activeJobs = new Set(['QUEUED', 'RUNNING', 'CANCELLING']);
+const pageProgress = createPageProgress({
+  api,
+  onPublished: (n, page) => acceptReadyPage(n, page),
+  onRetry: () => retryCurrentPage()
+});
 const readerNavigation = globalThis.BookReaderNavigation;
 let cancelDrawing = null;
 let scrollTimer = null;

@@ -13,8 +13,15 @@ export function progressView(snapshot, page) {
   return { hidden: snapshot.lifecycle === 'SUCCEEDED', percent, label: `${name} · ${percent}%`, state: terminal[snapshot.lifecycle] ? 'settled' : 'processing' };
 }
 
-export function createPageProgress({ api, onPublished }) {
+export function createPageProgress({ api, onPublished, onRetry }) {
   const element = document.querySelector('#page-processing-progress');
+  const retryBtn = document.querySelector('#page-retry-button');
+  if (retryBtn && typeof retryBtn.addEventListener === 'function') {
+    retryBtn.addEventListener('click', () => {
+      retryBtn.hidden = true;
+      if (typeof onRetry === 'function') onRetry();
+    });
+  }
   let current = null, snapshot = null, timer = null, controller = null, epoch = 0;
   let lastAttempt = null, lastVersion = -1, lastResponse = {}, inFlightEpoch = null;
   let serverInstanceId = null;
@@ -23,6 +30,10 @@ export function createPageProgress({ api, onPublished }) {
     if (!element) return;
     const view = progressView(snapshot, current?.page);
     element.hidden = view.hidden;
+    const isFailed = snapshot?.lifecycle === 'FAILED' || current?.page?.status === 'FAILED';
+    if (retryBtn) {
+      retryBtn.hidden = !isFailed;
+    }
     if (view.hidden) return;
     element.textContent = view.label;
     element.dataset.state = view.state;
@@ -88,6 +99,7 @@ export function createPageProgress({ api, onPublished }) {
     } catch (_) { /* Status failures never retry a model request. */ }
     finally {
       if (controller === own) controller = null;
+      if (inFlightEpoch === token) inFlightEpoch = null;
       const isActive = ['QUEUED','RUNNING','DRAINING','BASELINE_PUBLISHED'].includes(snapshot?.lifecycle)
         || (current?.page && current.page.status !== 'READY');
       if (token === epoch && !document.hidden) timer = setTimeout(() => poll(token),
@@ -102,6 +114,7 @@ export function createPageProgress({ api, onPublished }) {
     ++epoch; clearTimeout(timer); controller?.abort(); current = snapshot = null;
     lastAttempt = null; lastVersion = -1; lastResponse = {}; inFlightEpoch = null;
     if (element) element.hidden = true;
+    if (retryBtn) retryBtn.hidden = true;
   }
   function setPage(id, n, page) {
     if (current?.id === id && current.n === n) { current.page = page; render(); return; }

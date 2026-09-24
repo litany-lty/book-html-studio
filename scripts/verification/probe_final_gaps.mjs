@@ -134,3 +134,32 @@ test('restarted server can recover an attempt even after old event version 100; 
     assert.match(element.textContent,/结果待确认/);assert.equal(element.dataset.state,'settled');
   } finally {progress.clear();globalThis.document=previous;}
 });
+
+test('failed processing shows retry button and clicking invokes onRetry', () => {
+  const previous = globalThis.document;
+  const progressEl = { hidden: true, dataset: {}, style: { setProperty() {} }, setAttribute(k, v) { this[k] = v; }, removeAttribute(k) { delete this[k]; } };
+  const retryBtn = {
+    hidden: true,
+    handlers: {},
+    addEventListener(type, handler) { this.handlers[type] = handler; },
+    click() { if (this.handlers.click) this.handlers.click(); }
+  };
+  globalThis.document = {
+    hidden: false,
+    querySelector: sel => sel === '#page-retry-button' ? retryBtn : progressEl,
+    addEventListener() {}
+  };
+  let retried = 0;
+  const progress = createPageProgress({ api: {}, onPublished() {}, onRetry: () => { retried++; } });
+  try {
+    progress.setPage('A', 1, { status: 'FAILED', revision: 1 });
+    assert.equal(retryBtn.hidden, false);
+    retryBtn.click();
+    assert.equal(retried, 1);
+    assert.equal(retryBtn.hidden, true);
+  } finally {
+    progress.clear();
+    globalThis.document = previous;
+  }
+});
+
