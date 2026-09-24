@@ -131,4 +131,14 @@ class ScanRecoveryTest {
             BlockValidator.validate(result.blocks());
         }
     }
+
+    @Test void sparseSmallOcrRegionDoesNotHideTheRestOfAnOverprintedManuscript()throws Exception {
+        var image=manuscript(true,true);Block tiny=new Block("found","text",0,new double[]{.01,.01,.05,.04},"vertical-rl",
+                "零星字","零星字",.8,false,false,null,"ocr",List.of("found"),null,null);
+        var calls=new AtomicInteger();var result=OcrTextRecovery.recover(image,List.of(tiny),"auto",()->false,(i,l,c)->{
+            calls.incrementAndGet();return List.of(text("region","恢复正文片段"));});
+        assertEquals(2,calls.get(),"sparse nonempty recovery uses at most two extra region starts");
+        assertEquals("零星字",result.blocks().get(0).original());assertTrue(result.warning().startsWith(OcrTextRecovery.PARTIAL));
+        assertTrue(result.blocks().stream().anyMatch(b->"恢复正文片段".equals(b.original())));
+    }
 }

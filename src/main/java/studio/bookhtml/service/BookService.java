@@ -29,6 +29,8 @@ public class BookService {
     @Autowired(required=false) public void setPresentation(BookPresentationService presentation){this.presentation=presentation;}
     private CloudConsentService consentService;
     @Autowired(required=false) public void setConsentService(CloudConsentService consentService){this.consentService=consentService;}
+    private ParagraphComprehensibilityService comprehensibilityService;
+    @Autowired(required=false) public void setComprehensibilityService(ParagraphComprehensibilityService comprehensibilityService){this.comprehensibilityService=comprehensibilityService;}
     public Book upload(MultipartFile file) {
         if(file==null||file.isEmpty())throw new ApiException(HttpStatus.BAD_REQUEST,"请选择 PDF 文件");
         String original=Optional.ofNullable(file.getOriginalFilename()).orElse("book.pdf");
@@ -104,6 +106,7 @@ public class BookService {
                 result.add(pageSummary(id,p));
             }
         }
+        if(store.indexService()!=null) store.indexService().warm(store,b);
         return result;
     }
     /** U3：同一投影结果选择页面代表标题；无标题回到“第 N 页”，不冒用书眉。 */
@@ -122,6 +125,14 @@ public class BookService {
         // A1-C09：版本号必须为非负整数，不经截断解释
         if(targetRevision<0||expectedRevision<0)throw new ApiException(HttpStatus.BAD_REQUEST,"revision 非法");
         try{Page next=store.revertPage(id,n,targetRevision,expectedRevision);touchAfterCommit(id);return next;}catch(ApiException e){throw e;}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"回退版本失败");}}
+    /** Legacy endpoint is a local preview only; automatic cloud review runs under the page engine's authority. */
+    public Page checkComprehensibility(String id,int n) {
+        Page old=page(id,n);
+        if(comprehensibilityService==null)return old;
+        List<Block> checked=comprehensibilityService.checkLocal(old.blocks());
+        return new Page(old.pageNumber(),old.width(),old.height(),old.status(),old.provider(),checked,old.warnings(),
+                old.reviewed(),old.error(),old.sourceRecords(),old.revision(),old.lastCommitId());
+    }
     public List<Map<String,Object>> search(String id,String query){
         Book b=store.readBook(id);
         String q=query==null?"":query.strip();
@@ -129,7 +140,7 @@ public class BookService {
         if(q.length()>200)throw new ApiException(HttpStatus.BAD_REQUEST,"搜索词过长");
         if(store.indexService()!=null) {
             List<Map<String,Object>> indexed = store.indexService().search(store.bookDir(id), id, q, null, 500);
-            if(indexed != null && !indexed.isEmpty()) return indexed;
+            if(indexed != null) return indexed;
         }
         List<Map<String,Object>> result=new ArrayList<>();
         for(int n=1;n<=b.totalPages()&&result.size()<500;n++){
@@ -140,6 +151,7 @@ public class BookService {
                     result.add(Map.of("pageNumber",n,"blockId",block.id(),"text",Optional.ofNullable(block.simplified()).orElse(block.original())));
             }
         }
+        if(store.indexService()!=null) store.indexService().warm(store,b);
         return result;
     }
     public byte[] image(String id,int n,int width){page(id,n);try(ImageArtifact artifact=pdf.renderArtifact(store.pdf(id),n,width)){return pdf.pngArtifact(artifact);}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"页面图片生成失败");}}

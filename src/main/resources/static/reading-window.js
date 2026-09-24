@@ -73,6 +73,7 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
     Number(oldPage.revision) > Number(newPage.revision);
 
   function schedulePrefetch(reset = true) {
+    if (globalThis.navigator?.connection?.saveData) return;
     if (reset) cancelReads();
     else abortPrefetch();
     const bookId = state.book?.id;
@@ -100,7 +101,7 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
           finally { prefetchControllers = prefetchControllers.filter(item => item !== controller); }
         }
       }
-      await Promise.all([worker(), worker(), worker()]);
+      await Promise.all([worker(), worker()]);
     }, 1000);
   }
 
@@ -178,7 +179,11 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
   function schedulePoll(snapshot) {
     clearTimeout(pollTimer);
     if (!active()) return;
-    const isBusy = Boolean(snapshot?.processingPages?.length) || Boolean(snapshot?.processingPage);
+    const centerNum = Number(snapshot?.centerPage ?? state.currentPage);
+    const centerPage = snapshot?.pages?.find(p => Number(p.pageNumber) === centerNum);
+    const centerPending = centerPage && centerPage.status !== 'READY';
+    const isBusy = Boolean(snapshot?.processingPages?.length) || Boolean(snapshot?.processingPage)
+      || snapshot?.status === 'SETTLING' || snapshot?.status === 'PROCESSING' || centerPending;
     const delay = isBusy ? 400 : 1500;
     pollTimer = setTimeout(async () => {
       if (!active()) return;
@@ -245,6 +250,7 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
   async function enable(options) {
     if (!state.book || active()) return;
     session = { id: generateUuid(), bookId: state.book.id, confirmed: false };
+    persistSession();
     sequence = 0;
     fixedOptions = { ...options };
     seenReady.clear();
@@ -259,6 +265,7 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
     const previous = session;
     const stopSequence = ++sequence;
     session = null;
+    clearStoredSession();
     fixedOptions = null;
     seenReady.clear();
     readyInFlight.clear();
@@ -276,16 +283,18 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
     try {
       await api.stopReadingWindow(previous.bookId, body);
       if (currentStop()) onStatus({ enabled: false, status: 'STOPPED', message: '已停止后续排队；已发出的当前页仍可能完成。', pages: [] });
+      return true;
     } catch (error) {
       if (currentStop()) {
         onStatus({ enabled: false, status: 'STOP_UNKNOWN', message: '停止尚未确认；最后一次心跳后 60 秒租期到期会停止新派发。请勿重复开启，已发出请求仍可能完成。', pages: [] });
         onError(error);
       }
+      return false;
     }
   }
 
   async function retryCurrentPage() {
-    if (!active()) return;
+    if (!active()) return false;
     seenReady.delete(state.currentPage);
     readyInFlight.delete(state.currentPage);
     const bookId = session.bookId, seq = ++sequence, requestEpoch = epoch;
@@ -293,10 +302,57 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
       fromPage: Math.max(1, state.currentPage - 3), toPage: Math.min(state.book.totalPages, state.currentPage + 5), pages: [] });
     try {
       accept(await api.readingWindow(bookId, { ...payload(seq, false), retryCurrentPage: true }), seq, requestEpoch);
+      return valid(bookId, seq, requestEpoch);
     } catch (error) {
       if (valid(bookId, seq, requestEpoch)) onError(error);
+      return false;
     }
   }
 
-  return { enable, stop, navigated, active, refreshStatus, retryCurrentPage, prefetch: schedulePrefetch };
+  // A-03：会话编号只存在于标签页内存中，刷新即丢失，导致服务端预留无人能停。
+  // 仅把"会话编号 + 书籍"放进 sessionStorage（关闭标签页即消失，不延长授权的持久性），
+  // 刷新后仍可停止原窗口。
+  const SESSION_STORAGE_KEY = 'book-html:reading-window:v1';
+  function persistSession() {
+    try {
+      if (session) sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ id: session.id, bookId: session.bookId }));
+      else sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch (_) { /* 禁止本地存储时按原行为运行 */ }
+  }
+  function clearStoredSession() {
+    try { sessionStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) { /* ignore */ }
+  }
+  function storedSession(bookId) {
+    try {
+      const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed && parsed.bookId === bookId && parsed.id ? parsed : null;
+    } catch (_) { return null; }
+  }
+
+  /**
+   * A-03：刷新后恢复"可停止"能力。不续租、不自动派发——只在服务端确认会话仍启用时
+   * 认领该会话，使用户能点"停止"；若服务端已停止/过期则清理本地记录。
+   */
+  async function restore(bookId) {
+    if (!bookId || session) return false;
+    const saved = storedSession(bookId);
+    if (!saved) return false;
+    try {
+      const snapshot = await api.readingWindowStatus(bookId, saved.id);
+      if (snapshot && snapshot.enabled === true && state.book?.id === bookId) {
+        session = { id: saved.id, bookId, confirmed: true };
+        sequence = Math.max(sequence, Number(snapshot.sequence) || 0);
+        onStatus(snapshot);
+        return true;
+      }
+      clearStoredSession();
+    } catch (_) {
+      clearStoredSession();
+    }
+    return false;
+  }
+
+  return { enable, stop, navigated, active, refreshStatus, retryCurrentPage, prefetch: schedulePrefetch, restore };
 }

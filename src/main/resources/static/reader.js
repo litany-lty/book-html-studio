@@ -142,17 +142,23 @@ export function qualityOf(page) {
   const reviewed = page.reviewed;
   const provider = page.provider ? ` · ${page.provider}` : '';
   const warnings = page.warnings?.length ? ` · ${page.warnings.length} 条版面提示` : '';
-  const detail = `${blocks.length} 个块${unresolvedIssues ? `，${unresolvedIssues} 处内容疑点未解决` : uncertain ? `，${uncertain} 个块需留意` : ''}${average == null ? '' : `，识别参考值 ${Math.round(average * 100)}%`}${provider}${warnings}`;
+  const transcribed = /handwriting/i.test(String(page.provider || ''));
+  const origin = transcribed ? '整页为手写/影印稿模型转写（推断），必须对照原稿核对 · ' : '';
+  const detail = `${origin}${blocks.length} 个块${unresolvedIssues ? `，${unresolvedIssues} 处内容疑点未解决` : uncertain ? `，${uncertain} 个块需留意` : ''}${average == null ? '' : `，识别参考值 ${Math.round(average * 100)}%`}${provider}${warnings}`;
   // U1：默认阅读只显示轻量标签（有待核对文字）；块数/provider/参考值/提示数进入诊断详情。
-  const label = reviewed ? '已人工校对' : uncertain || unresolvedIssues ? '有待核对文字' : '自动处理完成';
-  const tone = reviewed ? 'reviewed' : uncertain || unresolvedIssues ? 'warning' : 'ready';
+  // C：整页模型转写必须自报来源，不能与印刷体 OCR 的"待核对"混同（诚实性要求）。
+  const label = reviewed ? '已人工校对'
+    : transcribed ? '模型转写 · 待核对'
+    : uncertain || unresolvedIssues ? '有待核对文字' : '自动处理完成';
+  const tone = reviewed ? 'reviewed' : transcribed || uncertain || unresolvedIssues ? 'warning' : 'ready';
   return { label, tone, detail };
 }
 
 // U1：诊断详情保留完整技术信息（块数、参考置信度、provider、提示数），按需查看。
 export function qualityDiagnostics(page) {
   const trace = (page?.warnings || []).filter(warning => /处理追溯/u.test(warning)).join('；');
-  return [qualityOf(page).detail || '', trace].filter(Boolean).join(' · ');
+  const selfCheck = (page?.warnings || []).filter(w => /^\[COMPREHENSIBILITY_(CHECKED|DEFERRED)\]/.test(w)).join('；');
+  return [qualityOf(page).detail || '', selfCheck, trace].filter(Boolean).join(' · ');
 }
 
 function renderFacsimile(container, ctx) {
@@ -324,16 +330,9 @@ export function renderPaper(container, ctx) {
     const title = document.createElement('h3');
     title.textContent = `第 ${ctx.page.pageNumber} 页转换失败`;
     const desc = document.createElement('p');
-    desc.textContent = ctx.page.error || '该页面在识别或结构整理过程中遇到问题。下方已取消大面积内容占位，您可直接重试。';
+    desc.textContent = ctx.page.error || '该页暂未完成。可在页头重试；原稿始终保留。';
     const actions = document.createElement('div');
     actions.className = 'reader-failed-actions';
-    const retryBtn = document.createElement('button');
-    retryBtn.type = 'button';
-    retryBtn.className = 'button primary';
-    retryBtn.textContent = '重新转换本页';
-    retryBtn.addEventListener('click', () => ctx.onRetry?.());
-    actions.append(retryBtn);
-
     const rawContainer = document.createElement('div');
     rawContainer.className = 'reader-failed-raw';
     rawContainer.hidden = true;

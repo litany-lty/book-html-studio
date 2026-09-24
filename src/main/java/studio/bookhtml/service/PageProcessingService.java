@@ -24,6 +24,10 @@ public final class PageProcessingService {
     PageProcessingService(BookStore store, PageProcessor processor) { this.store=store; this.processor=processor; }
     void setProgress(ProcessingProgressService value) { progress=value; }
     void setResources(QwenRequestGate value, ReadingPriority readingPriority) { gate=value; priority=readingPriority; }
+    QwenExecutionScope.Value executionScope(Request request) {
+        try(var scope=QwenExecutionScope.open(request.attempt(),gate,
+                priority!=null && priority.foreground(request.book(),request.page()))) { return QwenExecutionScope.current(); }
+    }
     private static final Set<String> TERMINAL=Set.of("SUCCEEDED","PARTIAL","FAILED","CANCELLED","INTERRUPTED","UNKNOWN");
     public PageExecutionRecord executeBaseline(Request request, PageExecutionRecord record) {
         Execution e = new Execution(request);
@@ -81,6 +85,10 @@ public final class PageProcessingService {
             closeScope = true;
         }
         try {
+            if(e.published==null || !Objects.equals(record.publishedRevision(),e.published.revision())) {
+                e.published=null; // Do not attribute a concurrent manual revision to this attempt.
+                throw new PageConflictException(record.publishedRevision()==null?0:record.publishedRevision(),"基线版本已改变，未发起旧版本增强");
+            }
             e.runEnhancement();
             return record.withSettled(e.lifecycle, e.message, e.published == null ? null : e.published.revision());
         } catch (CancelledException | java.util.concurrent.CancellationException cancelled) {
@@ -205,15 +213,21 @@ public final class PageProcessingService {
                 lifecycle="FAILED"; message="BASELINE_REJECTED"; decided=true; return;
             }
             boolean partial=extracted.category()==ProcessingResult.Category.TEXT_PARTIAL;
-            boolean enhance=r.assist() && !partial && !noText;
+            boolean enhance=!noText && ((r.assist()&&!partial) || processor.automaticCheckAvailable(r.book(),r.page()));
+            if(partial && (candidate.warnings()==null || candidate.warnings().stream().noneMatch(w->w.startsWith(OcrTextRecovery.PARTIAL)))) {
+                var notes=new ArrayList<>(candidate.warnings()==null?List.of():candidate.warnings());
+                notes.add(OcrTextRecovery.PARTIAL+" 页面仍有未确认区域，自动自检不改变恢复完整性");
+                candidate=new Page(candidate.pageNumber(),candidate.width(),candidate.height(),candidate.status(),candidate.provider(),candidate.blocks(),
+                        List.copyOf(notes),candidate.reviewed(),candidate.error(),candidate.sourceRecords());
+            }
             stage(r,"BASELINE_PUBLISHING");
             publishing=true;
             published=store.commitPage(r.book(),candidate,BookStore.revisionOrZero(old),CommitActor.JOB,
-                    r.attempt().commitIdentity(partial?"PARTIAL":enhance?"BASELINE_PUBLISHED":"SUCCEEDED"),CommitOp.JOB_BASELINE);
+                    r.attempt().commitIdentity(enhance?"BASELINE_PUBLISHED":partial?"PARTIAL":"SUCCEEDED"),CommitOp.JOB_BASELINE);
             publishing=false; baselineCommitted=true;
             try { store.preserveOriginal(r.book(),published); } catch(IOException auxiliary) { warn("ORIGINAL_SNAPSHOT_PENDING"); }
             onPublished(r,published,false);
-            if(partial) { lifecycle="PARTIAL"; message="OCR_RECOVERY_PARTIAL"; decided=true; return; }
+            if(partial && !enhance) { lifecycle="PARTIAL"; message="OCR_RECOVERY_PARTIAL"; decided=true; return; }
             if(!enhance) { lifecycle="SUCCEEDED"; message=noText?"NO_TEXT_EVIDENCE_COMPLETE":"BASELINE_ONLY"; decided=true; return; }
             // Persist phase ownership before optional calls; never lose an already-readable baseline.
             store.finishPageAttempt(r.attempt(),"BASELINE_PUBLISHED");
@@ -225,9 +239,29 @@ public final class PageProcessingService {
             }
             check(r); stage(r,"STRUCTURE");
             store.verifyAttemptForDispatch(r.attempt(),CommitOp.JOB_ENHANCEMENT);
-            PageProcessor.EnrichResult enhanced=processor.enrichBaseline(r.book(),r.page(),published,r.provider(),r.layout(),r.cancelled());
-            check(r); stage(r,"VALIDATING");
+            boolean partial=published.warnings()!=null && published.warnings().stream().anyMatch(w->w.startsWith(OcrTextRecovery.PARTIAL));
+            PageProcessor.EnrichResult enhanced;
+            if(r.assist()&&!partial) enhanced=processor.enrichBaseline(r.book(),r.page(),published,r.provider(),r.layout(),r.cancelled());
+            else enhanced=new PageProcessor.EnrichResult(published.blocks(),published.provider(),List.of(),!partial);
+            check(r);
             if(enhanced==null || enhanced.blocks()==null) throw new OcrException("增强返回缺少结果");
+            if(processor.automaticCheckAvailable(r.book(),r.page())) {
+                stage(r,"REVIEW");
+                Page checkedInput=new Page(published.pageNumber(),published.width(),published.height(),published.status(),enhanced.actualProvider(),
+                        enhanced.blocks(),published.warnings(),published.reviewed(),published.error(),published.sourceRecords(),published.revision());
+                try {
+                    PageProcessor.EnrichResult checked=processor.checkReadableBaseline(r.book(),r.page(),checkedInput,r.cancelled());
+                    if(checked==null||checked.blocks()==null)throw new OcrException("自动自检未返回结果");
+                    var notes=new ArrayList<>(enhanced.warnings());notes.addAll(checked.warnings());
+                    enhanced=new PageProcessor.EnrichResult(checked.blocks(),enhanced.actualProvider(),List.copyOf(notes),enhanced.complete()&&checked.complete()&&!partial);
+                } catch(CancelledException cancelled) { throw cancelled; }
+                catch(Exception deferred) {
+                    var notes=new ArrayList<>(enhanced.warnings());
+                    notes.add(ParagraphComprehensibilityService.DEFERRED+" 自动语义自检未完成，原文保留，未重复调用");
+                    enhanced=new PageProcessor.EnrichResult(enhanced.blocks(),enhanced.actualProvider(),List.copyOf(notes),false);
+                }
+            }
+            check(r); stage(r,"VALIDATING");
             List<String> warnings=new ArrayList<>(published.warnings()==null?List.of():published.warnings());
             if(enhanced.warnings()!=null) warnings.addAll(enhanced.warnings());
             candidate=JobService.mergeUnresolvedIssues(published,new Page(published.pageNumber(),published.width(),published.height(),

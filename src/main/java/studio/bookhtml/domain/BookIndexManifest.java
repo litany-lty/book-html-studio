@@ -16,7 +16,15 @@ public record BookIndexManifest(
         int totalPages,
         int processedPages,
         int reviewedPages,
-        Instant updatedAt
+        Instant updatedAt,
+        String integrityHash
 ) {
-    public static final int CURRENT_SCHEMA_VERSION = 1;
+    public static final int CURRENT_SCHEMA_VERSION = 2;
+    public BookIndexManifest(int schemaVersion,String bookId,String pdfSourceHash,String generationId,long sourceSeq,
+                             String status,int totalPages,int processedPages,int reviewedPages,Instant updatedAt) {
+        this(schemaVersion,bookId,pdfSourceHash,generationId,sourceSeq,status,totalPages,processedPages,reviewedPages,updatedAt,null);
+    }
+    public BookIndexManifest withIntegrityHash(String hash) {
+        return new BookIndexManifest(schemaVersion,bookId,pdfSourceHash,generationId,sourceSeq,status,totalPages,processedPages,reviewedPages,updatedAt,hash);
+    }
 }

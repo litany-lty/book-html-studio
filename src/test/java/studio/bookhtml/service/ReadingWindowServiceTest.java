@@ -604,4 +604,21 @@ class ReadingWindowServiceTest {
         @Override public synchronized Instant instant() { return instant; }
         synchronized void advance(Duration duration) { instant = instant.plus(duration); }
     }
+
+    /**
+     * A-01：随读会话编号只存在于标签页内存里，刷新后前端已丢失；旧行为对不认识的编号
+     * 只回一个"已停止"墓碑，真正的活动会话仍在运行并占住整本书（此后批量任务被 409 拒绝）。
+     */
+    @Test
+    void stopWithUnknownSessionIdStopsTheActiveWindow() throws Exception {
+        setup(20);
+        UUID original = UUID.randomUUID();
+        assertTrue(windows.update(book.id(), request(original, 1, 8)).enabled());
+
+        UUID refreshedTab = UUID.randomUUID();
+        windows.stop(book.id(), new ReadingWindowCommand(refreshedTab, 2L));
+
+        ReadingWindowResponse after = windows.get(book.id(), original);
+        assertFalse(after.enabled(), "未知会话编号的停止请求必须真正停掉原窗口，而不是只回一个墓碑");
+    }
 }

@@ -24,6 +24,8 @@ public record PageIndexRecord(
         List<TextSegment> textSegments,
         List<EdgeEvidence> edgeEvidences
 ) {
-    public record TextSegment(String blockId, String text, String type, double[] bbox) {}
+    public record TextSegment(String blockId,String text,String type,double[] bbox,String original) {
+        public TextSegment(String blockId,String text,String type,double[] bbox) { this(blockId,text,type,bbox,text); }
+    }
     public record EdgeEvidence(String layoutGroup, String edgeZone, String positionBucket, String normalizedText) {}
 }

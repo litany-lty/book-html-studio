@@ -89,7 +89,10 @@ public class BookContextService {
         if (p == null) return List.of();
         // Unreviewed display blocks can contain model suggestions: never feed them back as evidence.
         List<Block> blocks = p.reviewed() ? p.blocks() : p.sourceRecords();
-        return blocks == null ? List.of() : blocks;
+        return blocks == null ? List.of() : p.reviewed() ? blocks : blocks.stream()
+                .filter(b->b!=null && !HandwritingTranscribeService.SOURCE.equals(b.source())
+                        && (b.source()==null || !b.source().startsWith("qwen-toc-recovery")))
+                .toList();
     }
     private static String chapter(Page p) {
         for (Block block : sources(p)) {

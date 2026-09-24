@@ -45,6 +45,7 @@ async function request(path, options = {}, timeout = 30000) {
 }
 
 export const api = {
+  readingPolicy: () => request('/reading-policy'),
   config: () => request('/config'),
   settings: () => request('/settings'),
   saveSettings: (body, csrfToken) => request('/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Settings-Token': csrfToken }, body: JSON.stringify(body) }),
@@ -86,5 +87,6 @@ export const api = {
   applyPresentationOverride: (id, n, body) => request(`/books/${encodeURIComponent(id)}/pages/${n}/presentation-overrides`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   previewOverrideScope: (id, n, blockId) => request(`/books/${encodeURIComponent(id)}/pages/${n}/presentation-overrides/preview?blockId=${encodeURIComponent(blockId)}`),
   search: (id, query, signal) => request(`/books/${encodeURIComponent(id)}/search?q=${encodeURIComponent(query)}`, { signal }),
+  checkComprehensibility: (id, n) => request(`/books/${encodeURIComponent(id)}/pages/${n}/comprehensibility-check`, { method: 'POST' }, 60000),
   exportUrl: id => `${API_ROOT}/books/${encodeURIComponent(id)}/export`
 };

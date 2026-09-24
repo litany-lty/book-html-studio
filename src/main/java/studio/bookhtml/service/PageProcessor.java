@@ -21,6 +21,9 @@ public class PageProcessor {
     private SettingsService settings;
     private ReadingPriority priority;
     @Autowired(required=false) public void setPriority(ReadingPriority priority) { this.priority = priority; }
+    /** C：手写/影印稿转写通道（可选注入）。 */
+    private HandwritingTranscribeService handwriting;
+    @Autowired(required=false) public void setHandwriting(HandwritingTranscribeService handwriting) { this.handwriting = handwriting; }
     @org.springframework.beans.factory.annotation.Value("${app.ocr-region-recovery:true}")
     private boolean regionRecoveryEnabled = true;
     @Autowired public PageProcessor(BookStore store,PdfService pdf,NativeTextExtractor nativeText,TesseractService tesseract,CloudOcrPipeline qwenOcr,PaddleOcrPipeline paddle,MiniMaxVisionClient miniMax,QwenLayoutClient qwenLayout,QwenTocRecoveryService tocRecovery,SparsePageGuard sparsePageGuard,VerticalLayoutNormalizer verticalNormalizer,AssistedReviewService review,TraditionalConverter converter){this.store=store;this.pdf=pdf;this.nativeText=nativeText;this.tesseract=tesseract;this.qwenOcr=qwenOcr;this.paddle=paddle;this.miniMax=miniMax;this.qwenLayout=qwenLayout;this.tocRecovery=tocRecovery;this.sparsePageGuard=sparsePageGuard;this.verticalNormalizer=verticalNormalizer;this.review=review;this.converter=converter;}
@@ -31,12 +34,14 @@ public class PageProcessor {
     private QwenTaskPlanner planner;
     private QwenTextReviewClient reviewClient;
     private QwenAssistCoordinator coordinator;
+    private ParagraphComprehensibilityService comprehensibilityService;
     /** U5：分组增强装配（缺省关闭，旧整页路径为可控回滚）。 */
     @Autowired(required=false) public void setAssistConfig(studio.bookhtml.config.QwenAssistProperties assistConfig){this.assistConfig=assistConfig;}
     @Autowired(required=false) public void setRequestGate(QwenRequestGate gate){this.gate=gate;}
     @Autowired(required=false) public void setTaskPlanner(QwenTaskPlanner planner){this.planner=planner;}
     @Autowired(required=false) public void setTextReviewClient(QwenTextReviewClient reviewClient){this.reviewClient=reviewClient;}
     @Autowired(required=false) public void setAssistCoordinator(QwenAssistCoordinator coordinator){this.coordinator=coordinator;}
+    @Autowired(required=false) public void setComprehensibilityService(ParagraphComprehensibilityService comprehensibilityService){this.comprehensibilityService=comprehensibilityService;}
     /**
      * U4：可读基线。与完整 process() 同一管线、关闭可选增强：提取/OCR → 原始证据校验 →
      * 发布安全可读版。Qwen 未完成不阻止读取。
@@ -64,7 +69,7 @@ public class PageProcessor {
         try(UsageContext.Scope ignored=UsageContext.open(bookId,pageNumber,"OCR_PAGE");
             QwenExecutionScope execution=QwenExecutionScope.open(bookId,pageNumber,gate,
                     priority != null && priority.foreground(bookId,pageNumber))){
-        if(cancelled.getAsBoolean())throw new CancelledException();Page previous=store.readPage(bookId,pageNumber);String nativeLayout="vertical".equals(layout)?"vertical":"horizontal".equals(layout)?"horizontal":"auto";
+        if(cancelled.getAsBoolean())throw new CancelledException();Page previous=store.readPage(bookId,pageNumber);if(HandwritingTranscribeService.PROVIDER_ID.equals(provider))return processHandwriting(bookId,pageNumber,layout,cancelled,previous);String nativeLayout="vertical".equals(layout)?"vertical":"horizontal".equals(layout)?"horizontal":"auto";
         Optional<List<Block>>nativeBlocks=nativeText.extract(store.pdf(bookId),pageNumber,nativeLayout);List<Block>blocks;List<Block>sourceRecords;String actualProvider;List<String>warnings=new ArrayList<>();
         if(nativeBlocks.isPresent()&&!nativeBlocks.get().isEmpty()&&!preferOcrOverNative(store.pdf(bookId),pageNumber,nativeBlocks.get(),warnings,cancelled)){
             blocks=nativeBlocks.get();sourceRecords=List.copyOf(blocks);actualProvider="native";
@@ -155,6 +160,8 @@ public class PageProcessor {
         if(advertisements.heldForReview()>0)warnings.add("有 "+advertisements.heldForReview()+" 个疑似广告块含已确认疑点，未自动隐藏，请人工复核");
         int bodyChars=blocks.stream().filter(b->!"advertisement".equals(b.type())).mapToInt(b->QualityGate.nonSpace(b.original())).sum();
         if(advertisements.marked()>0&&bodyChars==0)warnings.add("本页仅识别到页边广告，未确认为正文；请对照原图复核");
+        // Always-on deterministic checks must not delay the first readable publication with cloud calls.
+        if (comprehensibilityService != null) blocks=comprehensibilityService.checkLocal(blocks);
         BlockValidator.validate(blocks);warnings.add(traceWarning(store.pdf(bookId),pageNumber,actualProvider,layout));
         ProcessingResult.Category category=warnings.stream().anyMatch(w->w.startsWith(OcrTextRecovery.PARTIAL))?ProcessingResult.Category.TEXT_PARTIAL:bodyChars>0?ProcessingResult.Category.TEXT
             :(advertisements.marked()>0||QualityGate.isFigureOnly(blocks))?ProcessingResult.Category.VISUAL_ONLY:ProcessingResult.Category.TEXT;
@@ -162,6 +169,30 @@ public class PageProcessor {
         }
     }
     /** 阶段3：混合页检查——原生字符少但图像墨多时改走图像识别；预览图失败也保守改走图像识别。 */
+    /**
+     * C：手写/影印稿转写。分栏裁切放大后交视觉模型按提示词转写，产出块一律标"模型推断·待核对"，
+     * 不并入印刷体 OCR 的质量结论，也不自动标记已人工校对。
+     */
+    private ProcessingResult processHandwriting(String bookId,int pageNumber,String layout,BooleanSupplier cancelled,Page previous)throws Exception{
+        if(handwriting==null||!handwriting.configured())throw new OcrException("手写/影印稿转写未配置 Qwen 视觉凭据，请先在工具配置中填写 Qwen API Key");
+        if(cancelled.getAsBoolean())throw new CancelledException();
+        try(ImageArtifact artifact=renderForOcrArtifact(store.pdf(bookId),pageNumber)){
+            if(artifact==null||artifact.image()==null)throw new OcrException("渲染页面图像为空");
+            BufferedImage image=artifact.image();
+            List<Block> transcribed=handwriting.transcribe(image,layout,cancelled);
+            List<Block> blocks=simplify(transcribed);
+            if(comprehensibilityService!=null)blocks=comprehensibilityService.checkLocal(blocks);
+            List<String> warnings=new ArrayList<>();
+            warnings.add(HandwritingTranscribeService.WARNING);
+            warnings.add(traceWarning(store.pdf(bookId),pageNumber,HandwritingTranscribeService.SOURCE,layout));
+            double width=previous==null||previous.width()<=0?image.getWidth():previous.width();
+            double height=previous==null||previous.height()<=0?image.getHeight():previous.height();
+            return new ProcessingResult(new Page(pageNumber,width,height,"READY",HandwritingTranscribeService.SOURCE,
+                    blocks,List.copyOf(warnings),false,null,List.copyOf(transcribed)),
+                    ProcessingResult.Category.TEXT_PARTIAL);
+        }
+    }
+
     private boolean preferOcrOverNative(Path pdfPath,int pageNumber,List<Block> nativeBlocks,List<String> warnings,BooleanSupplier cancelled){
         int chars=QualityGate.totalChars(nativeBlocks);
         double area=nativeBlocks.stream().filter(Objects::nonNull).map(Block::bbox).filter(b->b!=null&&b.length==4).mapToDouble(b->Math.max(0,b[2])*Math.max(0,b[3])).sum();
@@ -422,10 +453,25 @@ public class PageProcessor {
             blocks=new ArrayList<>(advertisements.blocks());
             if(advertisements.marked()>0)warnings.add("已标记 "+advertisements.marked()+" 个独立页边广告块；原稿和原始识别记录保留可查看");
             if(advertisements.heldForReview()>0)warnings.add("有 "+advertisements.heldForReview()+" 个疑似广告块含已确认疑点，未自动隐藏，请人工复核");
+
             return new EnrichResult(List.copyOf(blocks),actualProvider,List.copyOf(warnings),complete);
         }finally{image.flush();}}
         }
     }
+    /** Automatic review is policy-driven, not another reader-facing checkbox. */
+    public boolean automaticCheckAvailable(String bookId,int pageNumber) {
+        return comprehensibilityService!=null && comprehensibilityService.automaticAvailable(bookId);
+    }
+    public EnrichResult checkReadableBaseline(String bookId,int pageNumber,Page page,BooleanSupplier cancelled) throws Exception {
+        if(comprehensibilityService==null) return new EnrichResult(page.blocks(),page.provider(),List.of(),true);
+        if(cancelled.getAsBoolean())throw new CancelledException();
+        ParagraphComprehensibilityService.Result checked=comprehensibilityService.check(bookId,pageNumber,page.blocks(),cancelled);
+        String status=checked.complete()?ParagraphComprehensibilityService.COMPLETE:ParagraphComprehensibilityService.DEFERRED;
+        String detail=checked.complete()?" 自动语义自检已结束，疑点仅为未确认建议；未发现疑点不代表文字完全正确"
+                :" 自动语义自检部分未完成，保留原文；已结束 "+checked.completed()+"/"+checked.planned()+" 组";
+        return new EnrichResult(checked.blocks(),page.provider(),List.of(status+detail),checked.complete());
+    }
+
     private List<Block>simplify(List<Block>blocks)throws OcrException{List<Block>result=new ArrayList<>();for(Block b:blocks){String original=b.original()==null?"":b.original();String simplified=converter.toSimplified(original);List<ContentIssue>issues=mapIssues(original,b.issues(),converter);result.add(new Block(b.id(),b.type(),b.order(),b.bbox(),b.writingMode(),b.original(),simplified,b.confidence(),true,false,b.headingLevel(),b.source(),b.sourceIds(),b.suggestion(),b.sourceRect(),issues));}BlockValidator.validate(result);return List.copyOf(result);}
     /** J09/T58：问题区间映射（simplified 偏移）；确认元数据原样保留，不重建丢失。 */
     public static List<ContentIssue>mapIssues(String original,List<ContentIssue>input,TraditionalConverter converter)throws OcrException{List<ContentIssue>issues=new ArrayList<>();for(ContentIssue issue:input==null?List.<ContentIssue>of():input){if(issue.start()<0||issue.end()<=issue.start()||issue.end()>original.length())throw new OcrException("内容问题区间超出 OCR 原文范围");int simpleStart=converter.toSimplified(original.substring(0,issue.start())).length();int simpleEnd=converter.toSimplified(original.substring(0,issue.end())).length();String inferred=issue.inferredText()==null?null:converter.toSimplified(issue.inferredText());issues.add(new ContentIssue(issue.id(),issue.kind(),issue.start(),issue.end(),simpleStart,simpleEnd,issue.reason(),issue.resolved(),issue.replacement(),inferred,issue.resolution()));}return List.copyOf(issues);}

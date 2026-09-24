@@ -32,8 +32,11 @@ public class ApiController {
     public ApiController(BookService books,JobService jobs,ExportService export,AppProperties config,QwenOcrClient qwen,MiniMaxVisionClient miniMax,PaddleOcrClient paddle,QwenLayoutClient qwenAssist,QwenAssistProperties qwenAssistConfig,IssueImageService issueImages,ObjectMapper json,PaddleAiStudioClient aiStudio,PaddleAiStudioProperties aiStudioConfig,BaiduPpOcrClient ppocr,PpOcrProperties ppocrConfig){this.books=books;this.jobs=jobs;this.export=export;this.config=config;this.qwen=qwen;this.miniMax=miniMax;this.paddle=paddle;this.qwenAssist=qwenAssist;this.qwenAssistConfig=qwenAssistConfig;this.issueImages=issueImages;this.json=json;this.aiStudio=aiStudio;this.aiStudioConfig=aiStudioConfig;this.ppocr=ppocr;this.ppocrConfig=ppocrConfig;}
     @org.springframework.beans.factory.annotation.Autowired public void setSettings(SettingsService settings){this.settings=settings;}
     private BookPresentationService presentation;
+    /** C：手写/影印稿转写通道（可选注入；未配置时该通道显示为不可用）。 */
+    private HandwritingTranscribeService handwriting;
     /** U3：投影注入后页面载荷附带只读展示投影；未注入走旧适配器（保守兼容）。 */
     @org.springframework.beans.factory.annotation.Autowired(required=false) public void setPresentation(BookPresentationService presentation){this.presentation=presentation;}
+    @org.springframework.beans.factory.annotation.Autowired(required=false) public void setHandwriting(HandwritingTranscribeService handwriting){this.handwriting=handwriting;}
     @GetMapping("/config") public Map<String,Object> config(){
         SettingsService.State s=settings==null?null:settings.state();
         boolean studio=s==null?aiStudio.configured():!s.paddleAccessToken().isBlank();
@@ -42,7 +45,8 @@ public class ApiController {
         boolean fallback=s!=null&&s.fallbackEnabled();
         return Map.of("defaultProvider",defaultProvider,"fallbackEnabled",fallback,"providers",List.of(
                 Map.of("id","paddle-aistudio","label","PaddleOCR-VL-1.6 · 飞桨 AI Studio","available",studio,"reason",studio?"已配置":"缺少 Access Token"),
-                Map.of("id","ppocr","label","PP-OCRv6 · 百度智能云","available",baidu,"reason",baidu?"已配置":"缺少 API Key 或 Secret Key")),
+                Map.of("id","ppocr","label","PP-OCRv6 · 百度智能云","available",baidu,"reason",baidu?"已配置":"缺少 API Key 或 Secret Key"),
+                Map.of("id","handwriting","label",HandwritingTranscribeService.LABEL,"available",handwriting!=null&&handwriting.configured(),"reason",handwriting!=null&&handwriting.configured()?"已配置 Qwen 视觉":"缺少 Qwen API Key","handwritingOnly",true)),
                 "ocrChannels",List.of(
                         Map.of("id","paddle-aistudio","configured",studio,"model","PaddleOCR-VL-1.6","endpoint","https://paddleocr.aistudio-app.com/api/v2/ocr/jobs","credentialType","Access Token"),
                         Map.of("id","ppocr","configured",baidu,"model","PP-OCRv6","endpoint","https://aip.baidubce.com/rest/2.0/ocr/v1/pp_ocrv5","credentialType","API Key + Secret Key")),
@@ -86,6 +90,10 @@ public class ApiController {
     @PutMapping("/books/{id}/pages/{n}") public Map<String,Object> update(@PathVariable String id,@PathVariable int n,@Valid@RequestBody PageUpdateRequest request){return pagePayload(id,books.update(id,n,request));}
     @GetMapping("/books/{id}/pages/{n}/revisions") public Map<String,Object> revisions(@PathVariable String id,@PathVariable int n){return Map.of("revisions",books.revisions(id,n));}
     @PostMapping("/books/{id}/pages/{n}/revert") public Map<String,Object> revert(@PathVariable String id,@PathVariable int n,@RequestBody Map<String,Object> body){int target=requiredRevision(body==null?null:body.get("revision"),"缺少 revision");int expected=requiredRevision(body==null?null:body.get("expectedRevision"),"缺少 expectedRevision，请刷新后重试");return pagePayload(id,books.revert(id,n,target,expected));}
+    @PostMapping("/books/{id}/pages/{n}/comprehensibility-check")
+    public Map<String,Object> comprehensibilityCheck(@PathVariable String id,@PathVariable int n) throws Exception {
+        return pagePayload(id, books.checkComprehensibility(id, n));
+    }
     // A1-C09：只接受整数范围内的版本号；小数、溢出、负数一律可预测 400，不经 intValue 截断
     private static int requiredRevision(Object value,String missingMessage){
         if(value==null)throw new ApiException(HttpStatus.BAD_REQUEST,missingMessage);

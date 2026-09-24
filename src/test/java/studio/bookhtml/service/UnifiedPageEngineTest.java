@@ -179,4 +179,29 @@ class UnifiedPageEngineTest {
         verify(store,times(1)).finishPageAttempt(any(),anyString());
         assertArrayEquals(original,Files.readAllBytes(store.pagePath(book,1)));
     }
+
+    @ParameterizedTest @EnumSource(Mode.class)
+    void automaticComprehensibilityRunsAfterReadableBaselineWithoutAssistCheckbox(Mode mode)throws Exception {
+        var entered=new CountDownLatch(1);var release=new CountDownLatch(1);
+        when(processor.automaticCheckAvailable(book,1)).thenReturn(true);
+        when(processor.processBaseline(eq(book),eq(1),anyString(),anyString(),anyBoolean(),any())).thenReturn(text("可先阅读的原文"));
+        when(processor.checkReadableBaseline(eq(book),eq(1),any(),any())).thenAnswer(inv->{
+            assertEquals("可先阅读的原文",store.readPage(book,1).blocks().get(0).original());
+            entered.countDown();assertTrue(release.await(5,TimeUnit.SECONDS));
+            Page page=inv.getArgument(2);return new PageProcessor.EnrichResult(page.blocks(),page.provider(),List.of(ParagraphComprehensibilityService.COMPLETE),true);
+        });
+        try {launch(mode,false);assertTrue(entered.await(3,TimeUnit.SECONDS));assertEquals(1,store.readPage(book,1).revision());}
+        finally{release.countDown();}
+        done(mode);outcome("SUCCEEDED");verify(processor,never()).enrichBaseline(anyString(),anyInt(),any(),anyString(),anyString(),any());
+        verify(processor,times(1)).checkReadableBaseline(eq(book),eq(1),any(),any());
+    }
+    @ParameterizedTest @EnumSource(Mode.class)
+    void automaticSelfCheckFailureKeepsReadableTextAndSettlesPartial(Mode mode)throws Exception {
+        when(processor.automaticCheckAvailable(book,1)).thenReturn(true);
+        when(processor.processBaseline(eq(book),eq(1),anyString(),anyString(),anyBoolean(),any())).thenReturn(text("自检失败仍保留正文"));
+        when(processor.checkReadableBaseline(eq(book),eq(1),any(),any())).thenThrow(new IOException("fixture timeout"));
+        launch(mode,false);done(mode);outcome("PARTIAL");
+        assertEquals("自检失败仍保留正文",store.readPage(book,1).blocks().get(0).original());
+        assertTrue(store.readPage(book,1).warnings().stream().anyMatch(w->w.startsWith(ParagraphComprehensibilityService.DEFERRED)));
+    }
 }

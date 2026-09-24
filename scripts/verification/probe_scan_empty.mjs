@@ -30,3 +30,12 @@ test('failed and pending states are not changed to success', () => {
   assert.equal(statusMessage({ ...empty, status: 'FAILED', error: 'OCR_EMPTY_UNRESOLVED' }), 'OCR_EMPTY_UNRESOLVED');
   assert.match(statusMessage({ ...empty, status: 'PENDING' }), /尚未识别/);
 });
+
+test('ordinary ready pages and model transcripts cannot hit an uninitialized quality flag', () => {
+  const page = { ...empty, blocks: [{ id:'b1', original:'正文', type:'text', issues:[] }], reviewed:false };
+  assert.equal(qualityOf(page).label, '自动处理完成');
+  const handwritten = { ...page, provider:'handwriting-transcribe' };
+  assert.equal(qualityOf(handwritten).label, '模型转写 · 待核对');
+  assert.match(qualityOf(handwritten).detail, /模型转写/);
+  assert.equal(qualityOf({...handwritten,reviewed:true}).label, '已人工校对');
+});
