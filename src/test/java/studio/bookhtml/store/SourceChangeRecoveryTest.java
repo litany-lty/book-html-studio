@@ -88,12 +88,14 @@ class SourceChangeRecoveryTest {
         Page page1 = readyPage(1, "基础文字");
         store.writePage(bookId, page1, true);
 
-        // Inject simulated crash: create a PREPARED event matching current page
-        Page currentPage = store.readPage(bookId, 1);
+        // Use a genuinely published page with a commit identity, not an uncommitted
+        // imported page whose lastCommitId is null.
+        Page currentPage = store.commitPage(bookId, readyPage(1,"已持久发布文字"),0,
+                CommitActor.MANUAL,null,CommitOp.MANUAL_SAVE);
         String currentHash = store.pageContentHash(currentPage);
         long seq = store.sourceJournal().nextSourceSeq(store.bookDir(bookId), bookId);
         store.sourceJournal().prepare(store.bookDir(bookId), bookId, "PAGE", 1,
-                currentPage.lastCommitId(), null, 0, 0, "0000000000000000000000000000000000000000000000000000000000000000",
+                currentPage.lastCommitId(), null, 0, 1, "0000000000000000000000000000000000000000000000000000000000000000",
                 currentHash, "CRASH_SIMULATION");
 
         // Reconcile
@@ -149,7 +151,10 @@ class SourceChangeRecoveryTest {
         var cfg = config(realDir);
         // We test that BookStore catch block protects the published page
         Page next = readyPage(1, "虽然finalize失败但正文必须安全持久化");
-        Page saved = store.commitPage(bookId, next, 0, CommitActor.MANUAL, null, CommitOp.MANUAL_SAVE);
+        Page saved;
+        var faulty=new FaultyBookStore(cfg,json);
+        try { saved=faulty.commitPage(bookId,next,0,CommitActor.MANUAL,null,CommitOp.MANUAL_SAVE); }
+        finally { faulty.close(); }
 
         assertNotNull(saved);
         assertEquals(1, saved.revision());

@@ -137,8 +137,11 @@ public final class DurableEventJournal {
             throw new IOException("segment file unsafe: " + segmentPath);
         }
 
-        try (FileChannel channel = FileChannel.open(segmentPath, StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+        try (FileChannel channel = allowTruncatedTail
+                ? FileChannel.open(segmentPath,StandardOpenOption.READ,StandardOpenOption.WRITE,LinkOption.NOFOLLOW_LINKS)
+                : FileChannel.open(segmentPath,StandardOpenOption.READ,LinkOption.NOFOLLOW_LINKS)) {
             long fileSize = channel.size();
+            if(fileSize>MAX_SEGMENT_BYTES+MAX_FRAME_PAYLOAD_BYTES+512) throw new IOException("WAL segment exceeds read bound");
             SegmentHeader header = readHeader(channel, expectedBookId);
             long validLength = channel.position();
             List<JournalFrame> frames = new ArrayList<>();
@@ -147,7 +150,7 @@ public final class DurableEventJournal {
             while (channel.position() < fileSize) {
                 long frameStart = channel.position();
                 ByteBuffer lenBuf = ByteBuffer.allocate(4);
-                int read = channel.read(lenBuf);
+                int read = fill(channel,lenBuf);
                 if (read < 4) {
                     if (allowTruncatedTail) {
                         tailTruncated = true;
@@ -160,7 +163,7 @@ public final class DurableEventJournal {
                 lenBuf.flip();
                 int payloadLen = lenBuf.getInt();
                 if (payloadLen <= 0 || payloadLen > MAX_FRAME_PAYLOAD_BYTES) {
-                    if (allowTruncatedTail && isNearEnd(channel, frameStart, fileSize)) {
+                    if (allowTruncatedTail && fileSize-frameStart < 20) {
                         tailTruncated = true;
                         if (warnings != null) warnings.add("Corrupted frame length at tail offset " + frameStart);
                         break;
@@ -171,7 +174,7 @@ public final class DurableEventJournal {
 
                 int restSize = 8 + payloadLen + 8; // seq(8) + payload + crc(8)
                 ByteBuffer restBuf = ByteBuffer.allocate(restSize);
-                read = channel.read(restBuf);
+                read = fill(channel,restBuf);
                 if (read < restSize) {
                     if (allowTruncatedTail) {
                         tailTruncated = true;
@@ -195,13 +198,9 @@ public final class DurableEventJournal {
                 crc.update(verifyBuf.array(), 0, verifyBuf.capacity());
 
                 if (crc.getValue() != expectedCrc) {
-                    if (allowTruncatedTail && channel.position() == fileSize) {
-                        tailTruncated = true;
-                        if (warnings != null) warnings.add("Checksum mismatch at tail frame offset " + frameStart);
-                        break;
-                    } else {
-                        throw new IOException("frame checksum mismatch at seq " + seq + ", offset " + frameStart);
-                    }
+                    // A complete bad checksum may be disk corruption, not an incomplete append.
+                    // Preserve its bytes and reject, including the final frame.
+                    throw new IOException("frame checksum mismatch at seq " + seq + ", offset " + frameStart);
                 }
 
                 frames.add(new JournalFrame(seq, payload, frameStart));
@@ -216,14 +215,16 @@ public final class DurableEventJournal {
         }
     }
 
-    private static boolean isNearEnd(FileChannel channel, long frameStart, long fileSize) {
-        return (fileSize - frameStart) <= (MAX_FRAME_PAYLOAD_BYTES + 32);
+    private static int fill(FileChannel channel,ByteBuffer buffer) throws IOException {
+        int total=0;
+        while(buffer.hasRemaining()) { int count=channel.read(buffer);if(count<0) break;total+=count; }
+        return total;
     }
 
     private SegmentHeader readHeader(FileChannel channel, String expectedBookId) throws IOException {
         channel.position(0);
         ByteBuffer magicBuf = ByteBuffer.allocate(MAGIC.length);
-        if (channel.read(magicBuf) < MAGIC.length) throw new IOException("segment file truncated at magic header");
+        if (fill(channel,magicBuf) < MAGIC.length) throw new IOException("segment file truncated at magic header");
         magicBuf.flip();
         byte[] actualMagic = new byte[MAGIC.length];
         magicBuf.get(actualMagic);
@@ -232,7 +233,7 @@ public final class DurableEventJournal {
         }
 
         ByteBuffer metaBuf = ByteBuffer.allocate(4 + 4); // schemaVersion + bookIdLen
-        if (channel.read(metaBuf) < metaBuf.capacity()) throw new IOException("truncated segment header");
+        if (fill(channel,metaBuf) < metaBuf.capacity()) throw new IOException("truncated segment header");
         metaBuf.flip();
         int schemaVersion = metaBuf.getInt();
         if (schemaVersion != SCHEMA_VERSION) {
@@ -242,14 +243,14 @@ public final class DurableEventJournal {
         if (bookIdLen <= 0 || bookIdLen > 128) throw new IOException("invalid bookId length in segment: " + bookIdLen);
 
         ByteBuffer bookIdBuf = ByteBuffer.allocate(bookIdLen);
-        if (channel.read(bookIdBuf) < bookIdLen) throw new IOException("truncated bookId in segment");
+        if (fill(channel,bookIdBuf) < bookIdLen) throw new IOException("truncated bookId in segment");
         String bookId = new String(bookIdBuf.array(), StandardCharsets.UTF_8);
         if (expectedBookId != null && !expectedBookId.equals(bookId)) {
             throw new IOException("bookId mismatch in segment: expected " + expectedBookId + ", got " + bookId);
         }
 
         ByteBuffer tailBuf = ByteBuffer.allocate(16 + 8 + 4); // segmentId(16) + startSeq(8) + prevShaLen(4)
-        if (channel.read(tailBuf) < tailBuf.capacity()) throw new IOException("truncated segment header tail");
+        if (fill(channel,tailBuf) < tailBuf.capacity()) throw new IOException("truncated segment header tail");
         tailBuf.flip();
         long mostSig = tailBuf.getLong();
         long leastSig = tailBuf.getLong();
@@ -259,11 +260,11 @@ public final class DurableEventJournal {
         if (prevShaLen < 0 || prevShaLen > 128) throw new IOException("invalid prevShaLen in segment: " + prevShaLen);
 
         ByteBuffer prevShaBuf = ByteBuffer.allocate(prevShaLen);
-        if (channel.read(prevShaBuf) < prevShaLen) throw new IOException("truncated prevSha in segment");
+        if (fill(channel,prevShaBuf) < prevShaLen) throw new IOException("truncated prevSha in segment");
         String prevSha = new String(prevShaBuf.array(), StandardCharsets.US_ASCII);
 
         ByteBuffer crcBuf = ByteBuffer.allocate(8);
-        if (channel.read(crcBuf) < 8) throw new IOException("truncated header crc");
+        if (fill(channel,crcBuf) < 8) throw new IOException("truncated header crc");
         crcBuf.flip();
         long expectedCrc = crcBuf.getLong();
 
@@ -271,7 +272,7 @@ public final class DurableEventJournal {
         int headerDataLen = (int) channel.position() - 8;
         channel.position(0);
         ByteBuffer checkBuf = ByteBuffer.allocate(headerDataLen);
-        channel.read(checkBuf);
+        fill(channel,checkBuf);
         CRC32 crc = new CRC32();
         crc.update(checkBuf.array(), 0, headerDataLen);
         if (crc.getValue() != expectedCrc) {

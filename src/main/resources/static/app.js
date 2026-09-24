@@ -7,6 +7,7 @@ import { createDecisionPanel } from './decision.js';
 import './settings.js';
 import { openBookUsage } from './usage.js';
 import { createReadingWindow } from './reading-window.js';
+import { allowsAutomaticReading } from './auto-reading-policy.js';
 import { createLibrary } from './library.js';
 import { initReaderMode } from './reader-mode.js';
 import { recordAnchor, restoreAnchor } from './reading-anchor.js';
@@ -299,6 +300,10 @@ async function ensureReadingWindowActive() {
   const providerConfig = state.config?.providers?.find(p => p.id === provider && p.available && !p.handwritingOnly)
     || state.config?.providers?.find(p => p.available && !p.handwritingOnly);
   if (!providerConfig) return;
+  const bookId = state.book.id, scope = bookRequest;
+  const policy = await api.readingPolicy().catch(() => null);
+  if (state.book?.id !== bookId || bookRequest !== scope || readingWindow.active() ||
+      !allowsAutomaticReading(policy, bookId, providerConfig.id)) return;
   const form = $('#job-form') ? new FormData($('#job-form')) : null;
   const options = {
     provider: providerConfig.id,

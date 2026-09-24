@@ -45,6 +45,7 @@ async function request(path, options = {}, timeout = 30000) {
 }
 
 export const api = {
+  readingPolicy: () => request('/reading-policy'),
   config: () => request('/config'),
   settings: () => request('/settings'),
   saveSettings: (body, csrfToken) => request('/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Settings-Token': csrfToken }, body: JSON.stringify(body) }),
