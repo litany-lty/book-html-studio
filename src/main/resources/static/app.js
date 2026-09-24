@@ -7,6 +7,7 @@ import { createDecisionPanel } from './decision.js';
 import './settings.js';
 import { openBookUsage } from './usage.js';
 import { createReadingWindow } from './reading-window.js';
+import { settledJobSummary } from './job-summary.js';
 import { allowsAutomaticReading } from './auto-reading-policy.js';
 import { createLibrary } from './library.js';
 import { initReaderMode } from './reader-mode.js';
@@ -1426,7 +1427,7 @@ function renderJob(job) {
   $('#progress-count').textContent = job.total
     ? (active
       ? `${pct}% (${job.completed || 0} / ${job.total} 页)${job.currentPage ? ` · 当前第 ${job.currentPage} 页` : ''}`
-      : `已识别 ${job.completed || 0} / ${job.total} 页${errors.length ? ` · ${errors.length} 条未逐字验证` : ' · 全部成功'}`)
+      : settledJobSummary(job, errors.length))
     : '';
   $('#progress-bar').max = Math.max(1, job.total || 1); $('#progress-bar').value = job.completed || 0;
   $('#job-panel').classList.toggle('job-settled', job.status === 'COMPLETED' && !errors.length && !jobSyncError);

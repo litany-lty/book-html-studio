@@ -39,6 +39,9 @@ public class DiagnosticsController {
         this.lanPairingService = lanPairingService;
     }
 
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private studio.bookhtml.service.RemoteJobRegistry remoteJobs;
+
     @GetMapping("/diagnostics")
     public Map<String, Object> diagnostics() {
         MemoryMXBean memory = ManagementFactory.getMemoryMXBean();
@@ -67,6 +70,8 @@ public class DiagnosticsController {
             result.put("lanActiveTokens", lanPairingService.activeTokenCount());
             result.put("lanLocked", lanPairingService.isLocked());
         }
+        if(remoteJobs!=null)result.put("remoteRecovery",Map.of("newSubmissionsBlocked",remoteJobs.recoveryBlocked(),
+                "quarantinedRecords",remoteJobs.quarantinedRecordCount(),"knownActiveJobs",remoteJobs.activeJobCount()));
         result.put("schemaVersion", 2);
         return result;
     }
