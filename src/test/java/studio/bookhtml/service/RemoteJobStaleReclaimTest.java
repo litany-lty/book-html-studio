@@ -139,4 +139,21 @@ class RemoteJobStaleReclaimTest {
         assertThrows(ApiException.class,()->registry.register("book-2",1,"paddle-aistudio","account","fingerprint","usage"));
         assertThrows(ApiException.class,()->registry.register("book-1",1,"paddle-aistudio","other-account","fingerprint","usage"));
     }
+
+    @Test void unknownSubmitCannotBeReusedForAnotherPhysicalSubmission()throws Exception {
+        var registry=new RemoteJobRegistry(dataDir,json);
+        var record=registry.register("book-1",1,"paddle-aistudio","account","fingerprint","usage");
+        registry.markSubmitting(record.handleId(),"physical-first");
+        registry.markSubmitUnknown(record.handleId(),"network-ended-before-receipt");
+        var before=registry.get(record.handleId());
+        assertThrows(java.io.IOException.class,()->registry.markSubmitting(record.handleId(),"physical-again"));
+        assertEquals(before,registry.get(record.handleId()));assertEquals(1,registry.activeJobCount());
+    }
+    @Test void duplicateSubmittingCannotAuthorizeASecondTransportStart()throws Exception {
+        var registry=new RemoteJobRegistry(dataDir,json);
+        var record=registry.register("book-1",1,"paddle-aistudio","account","fingerprint","usage");
+        registry.markSubmitting(record.handleId(),"physical-first");
+        assertThrows(java.io.IOException.class,()->registry.markSubmitting(record.handleId(),"physical-first"));
+        assertEquals("physical-first",registry.get(record.handleId()).physicalCallId());
+    }
 }

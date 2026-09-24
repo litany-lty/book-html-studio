@@ -224,6 +224,8 @@ public class RemoteJobRegistry {
     public RemoteJobRecord markSubmitting(String handleId, String physicalCallId) throws IOException {
         synchronized (lock) {
             RemoteJobRecord current = getRequired(handleId);
+            if (!STATE_RESERVED.equals(current.state()) || current.remoteJobId()!=null || current.physicalCallId()!=null)
+                throw new IOException("已有提交可能已送达，不能重新发送；请先核对远端任务状态");
             RemoteJobRecord updated = new RemoteJobRecord(
                     current.handleId(), current.bookId(), current.page(), current.provider(),
                     current.accountScope(), current.remoteJobId(), physicalCallId,
