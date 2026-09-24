@@ -263,7 +263,41 @@ function imageStage() {
 }
 
 function selectedProvider() {
-  return $('#provider-options input[name="provider"]:checked')?.value || '';
+  const checked = $('#provider-options input[name="provider"]:checked')?.value;
+  if (checked) return checked;
+  const defaultProvider = state.config?.defaultProvider || 'paddle-aistudio';
+  const available = state.config?.providers?.find(p => p.id === defaultProvider && p.available)
+    || state.config?.providers?.find(p => p.available);
+  return available?.id || defaultProvider;
+}
+
+const storedOption = (key, fallback) => { try { const value = localStorage.getItem(key); return value == null ? fallback : value === 'true'; } catch (_) { return fallback; } };
+const isAutoProcessAll = () => storedOption('book_html_auto_process_all_v2', true);
+const isAutoReadEnabled = () => storedOption('book_html_auto_read', true);
+try {
+  if (localStorage.getItem('book_html_auto_read_default_v2') !== 'true') {
+    localStorage.setItem('book_html_auto_read', 'true');
+    localStorage.setItem('book_html_auto_process_all_v2', 'true');
+    localStorage.setItem('book_html_auto_read_default_v2', 'true');
+  }
+} catch (_) {}
+
+async function ensureReadingWindowActive() {
+  if (!state.book || readingWindow.active()) return;
+  if (!isAutoReadEnabled() || jobSyncError || activeJobs.has(state.job?.status)) return;
+  const provider = selectedProvider();
+  const providerConfig = state.config?.providers?.find(p => p.id === provider && p.available)
+    || state.config?.providers?.find(p => p.available);
+  if (!providerConfig) return;
+  const form = $('#job-form') ? new FormData($('#job-form')) : null;
+  const options = {
+    provider: providerConfig.id,
+    layout: form?.get('layout') || 'auto',
+    splitSpreads: form?.get('splitSpreads') === 'on',
+    assist: $('#qwen-assist')?.checked && !$('#qwen-assist')?.disabled,
+    autoProcessAll: isAutoProcessAll()
+  };
+  await readingWindow.enable(options);
 }
 
 function providerChannel(id) {
@@ -1293,9 +1327,19 @@ async function goToPage(n, options = {}) {
     deferredReady = null;
     resetConvertingState(n);
     renderJobHeading();
-    if (!readingWindow.active()) renderReadingWindowStatus(null);
-    readingWindow.navigated();
-  } else if (!readingWindow.active()) readingWindow.prefetch();
+    if (!readingWindow.active()) {
+      renderReadingWindowStatus(null);
+      void ensureReadingWindowActive().then(() => {
+        if (readingWindow.active()) readingWindow.navigated();
+      });
+    } else {
+      readingWindow.navigated();
+    }
+  } else if (!readingWindow.active()) {
+    void ensureReadingWindowActive().then(() => {
+      if (!readingWindow.active()) readingWindow.prefetch();
+    });
+  }
   const requestId = ++pageRequest, bookId = state.book.id;
   const sessionToken = sessionGuard.setSession(bookId, n);
   // 阶段2：取消上一次未完成的正文请求，后端仍以自身预算为准继续或终止解码
@@ -1398,16 +1442,7 @@ async function selectBook(id) {
     await previousWindowStopped;
     await jobSynced;
     if (requestId !== bookRequest) return;
-    if (isAutoReadEnabled() && !jobSyncError && !activeJobs.has(state.job?.status)) {
-      const provider = selectedProvider();
-      if (state.config?.providers?.some(p => p.id === provider && p.available)) {
-        const form = new FormData($('#job-form'));
-        await readingWindow.enable({ provider, layout: form.get('layout') || 'auto',
-          splitSpreads: form.get('splitSpreads') === 'on',
-          assist: $('#qwen-assist').checked && !$('#qwen-assist').disabled,
-          autoProcessAll: isAutoProcessAll() });
-      }
-    }
+    await ensureReadingWindowActive();
   } catch (error) { if (requestId === bookRequest) showError(error); }
 }
 
@@ -1856,16 +1891,6 @@ $('#reading-window-refresh').addEventListener('click', () => { void readingWindo
 $('#retry-page-header')?.addEventListener('click', retryCurrentPage);
 $('#reload-page-header')?.addEventListener('click', reloadCurrentPage);
 $('#reader-reload-page')?.addEventListener('click', reloadCurrentPage);
-const storedOption = (key, fallback) => { try { const value = localStorage.getItem(key); return value == null ? fallback : value === 'true'; } catch (_) { return fallback; } };
-const isAutoProcessAll = () => storedOption('book_html_auto_process_all_v2', true);
-const isAutoReadEnabled = () => storedOption('book_html_auto_read', true);
-try {
-  if (localStorage.getItem('book_html_auto_read_default_v1') !== 'true') {
-    localStorage.setItem('book_html_auto_read', 'true');
-    localStorage.setItem('book_html_auto_process_all_v2', 'true');
-    localStorage.setItem('book_html_auto_read_default_v1', 'true');
-  }
-} catch (_) {}
 const autoReadCheckbox = $('#reading-window-auto-start');
 if (autoReadCheckbox) {
   autoReadCheckbox.checked = isAutoReadEnabled();
@@ -2107,9 +2132,8 @@ $('#reader').addEventListener('scroll', () => { window.clearTimeout(scrollTimer)
 window.addEventListener('beforeunload', event => { if (state.dirty) { event.preventDefault(); event.returnValue = ''; } });
 window.addEventListener('pagehide', () => { void readingWindow.stop({ beacon: true }); });
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && readingWindow.active()) {
-    void readingWindow.stop();
-    toast('页面进入后台，已停止随读识别；返回后需主动重新开启。');
+  if (!document.hidden && state.book && !readingWindow.active() && isAutoReadEnabled()) {
+    void ensureReadingWindowActive();
   }
 });
 window.addEventListener('keydown', event => { if (event.key === 'Escape') { closeMore(true); closeDrawers(true); } if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && state.page) { event.preventDefault(); $('#save-page').click(); } });
