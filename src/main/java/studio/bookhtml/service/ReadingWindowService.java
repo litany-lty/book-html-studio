@@ -26,6 +26,8 @@ import java.util.concurrent.TimeUnit;
 @Service
 public class ReadingWindowService {
     private static final Duration LEASE = Duration.ofSeconds(60);
+    /** A-02：随读连续失败达到该页数即自动停止并释放预留，避免"僵住但占着整本书"。 */
+    private static final int FAILURE_STREAK_LIMIT = 6;
     private static final int TOMBSTONE_LIMIT = 256;
     private final BookStore store;
     private final JobService jobs;
@@ -216,7 +218,26 @@ public class ReadingWindowService {
         }
         Session session = sessions.get(command.sessionId());
         if (session == null && current != null && current.sessionId.equals(command.sessionId())) session = current;
-        if (session == null || !session.sessionId.equals(command.sessionId()) || !session.bookId.equals(bookId)) {
+        if (session == null) {
+            // A-01：自愈路径。会话编号只存在于标签页内存中，刷新/换标签后前端已丢失，
+            // 旧行为只回一个"已停止"的墓碑而不真正停掉活动会话，预留会永久占住这本书
+            // （此后任何批量任务都被 409 拒绝）。本地单用户工具按"停止本书窗口"处理。
+            Session active = activeSessionFor(bookId);
+            if (active != null) {
+                ReadingWindowResponse before;
+                try { before = snapshot(active); }
+                catch (RuntimeException error) {
+                    before = new ReadingWindowResponse(active.sessionId, active.sequence, false, active.status,
+                            active.centerPage, active.fromPage, active.toPage, null, List.of(), List.of(),
+                            "阅读窗口已停止", List.of());
+                }
+                active.sequence = Math.max(active.sequence, command.sequence());
+                disable(active, "STOPPING", "阅读窗口已停止（由当前标签页停止原窗口）");
+                if (active.processingPages.isEmpty()) finish(active);
+                return new ReadingWindowResponse(command.sessionId(), command.sequence(), false, before.status(),
+                        before.centerPage(), before.fromPage(), before.toPage(), null, List.of(), before.pages(),
+                        "阅读窗口已停止");
+            }
             ReadingWindowResponse stopped = new ReadingWindowResponse(command.sessionId(), command.sequence(), false,
                     "STOPPING", null, null, null, null, List.of(), List.of(), "阅读窗口已停止");
             remember(command.sessionId(), new Tombstone(bookId, stopped));
@@ -293,9 +314,26 @@ public class ReadingWindowService {
             boolean active = jobs.readingJobActive(s.reservation, p);
             if (!active) {
                 s.processingChannels.remove(p);
+                // A-02：记录本页结局，用于识别"一直在失败、从不推进"的僵住会话。
+                try {
+                    Page settled = store.readPage(s.bookId, p);
+                    if (settled != null && "READY".equals(settled.status())) {
+                        s.consecutiveFailures = 0;
+                        s.lastProgressAt = now;
+                    } else if (settled != null && "FAILED".equals(settled.status())) {
+                        s.consecutiveFailures++;
+                    }
+                } catch (RuntimeException ignored) { }
             }
             return !active;
         });
+        // A-02：连续失败达到上限就自动停止并释放预留，把书还给批量处理；
+        // 旧行为会让一个永远失败的随读窗口一直占着整本书（提交任务永远 409）。
+        if (s.enabled && s.consecutiveFailures >= FAILURE_STREAK_LIMIT && s.processingPages.isEmpty()) {
+            disable(s, "BLOCKED", "随读连续 " + s.consecutiveFailures + " 页识别失败（常见原因：远端 OCR 并发名额长期被占用），已自动停止并释放本书；可稍后重新开启或改用批量处理");
+            finish(s);
+            return;
+        }
         if (!s.enabled) {
             if (s.processingPages.isEmpty()) finish(s);
             return;
@@ -595,6 +633,15 @@ public class ReadingWindowService {
         s.queued.clear();
     }
 
+    /** A-01：按书籍查找当前活动的阅读会话（用于刷新后丢失会话编号的自愈停止）。 */
+    private Session activeSessionFor(String bookId) {
+        if (current != null && bookId.equals(current.bookId) && current.enabled) return current;
+        for (Session s : sessions.values()) {
+            if (bookId.equals(s.bookId) && s.enabled) return s;
+        }
+        return null;
+    }
+
     private void finish(Session s) {
         if (!sessions.containsKey(s.sessionId) && current != s) return;
         sessions.remove(s.sessionId);
@@ -678,6 +725,9 @@ public class ReadingWindowService {
         long sequence;
         int centerPage, fromPage, toPage;
         Instant deadline, notBefore;
+        /** A-02：最近一次成功推进（页面变 READY）与连续失败计数，用于僵住会话自愈。 */
+        Instant lastProgressAt;
+        int consecutiveFailures;
         boolean enabled = true;
         boolean autoProcessAll;
         String status = "SETTLING", message = "";

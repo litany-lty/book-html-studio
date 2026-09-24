@@ -506,7 +506,7 @@ public class JobService {
     public synchronized Job submit(String bookId,JobRequest request){
         requireOpen();
         if(readingReservations.containsKey(bookId) || (readingReservation!=null && bookId.equals(readingReservationBookId)))throw new ApiException(HttpStatus.CONFLICT,"阅读窗口正在运行，请先停止随读处理");
-        SettingsService.Lease lease=settings==null?null:settings.beginWork();boolean transferred=false;try{Book book=books.get(bookId);if(book.archived())throw new ApiException(HttpStatus.CONFLICT,"本书已归档，请先恢复后再识别");String provider=request.provider()==null?(settings==null?"paddle-aistudio":settings.state().defaultProvider()):request.provider();if(settings!=null&&!List.of("paddle-aistudio","ppocr").contains(provider))throw new ApiException(HttpStatus.BAD_REQUEST,"新任务仅支持 AI Studio 与 PP-OCRv6 通道");String layout=request.layout()==null?"auto":request.layout();List<Integer> pages=PageRanges.parse(request.pages(),book.totalPages());String fingerprint=bookId+"|"+pages+"|"+provider+"|"+layout+"|"+request.splitSpreads()+"|"+request.force()+"|"+request.assistEnabled();
+        SettingsService.Lease lease=settings==null?null:settings.beginWork();boolean transferred=false;try{Book book=books.get(bookId);if(book.archived())throw new ApiException(HttpStatus.CONFLICT,"本书已归档，请先恢复后再识别");String provider=request.provider()==null?(settings==null?"paddle-aistudio":settings.state().defaultProvider()):request.provider();if(settings!=null&&!List.of("paddle-aistudio","ppocr",HandwritingTranscribeService.PROVIDER_ID).contains(provider))throw new ApiException(HttpStatus.BAD_REQUEST,"新任务仅支持 AI Studio、PP-OCRv6 与手写/影印稿转写通道");String layout=request.layout()==null?"auto":request.layout();List<Integer> pages=PageRanges.parse(request.pages(),book.totalPages());String fingerprint=bookId+"|"+pages+"|"+provider+"|"+layout+"|"+request.splitSpreads()+"|"+request.force()+"|"+request.assistEnabled();
         if(active!=null){if(active.bookId.equals(bookId)&&!active.cancelled&&active.fingerprint.equals(fingerprint))return store.readJob(bookId);throw new ApiException(HttpStatus.CONFLICT,"已有识别任务正在运行或正在取消");}
         Job current = null;
         try { current = store.readJob(bookId); } catch (Exception ignored) { }
@@ -577,7 +577,7 @@ public class JobService {
                                 provider,layout,split,force,assist,()->running.cancelled||Thread.currentThread().isInterrupted(),
                                 ()->stillCurrent(running,initial.id())));
                         if(!"SUCCEEDED".equals(result.lifecycle()))
-                            errors.add("第 "+page+" 页未全部完成（"+result.messageCode()+"）");
+                            errors.add("第 "+page+" 页"+outcomeText(result.messageCode()));
                         if("CANCELLED".equals(result.lifecycle()))throw new CancelledException();
                     } catch(CancelledException cancelled) { throw cancelled; }
                     catch(Exception failure) { errors.add("第 "+page+" 页无法完成，保留已有版本"); }
@@ -694,4 +694,13 @@ public class JobService {
     static int textChars(List<Block> blocks){if(blocks==null)return 0;return blocks.stream().map(Block::original).filter(Objects::nonNull).mapToInt(s->(int)s.codePoints().filter(cp->!Character.isWhitespace(cp)).count()).sum();}
     private static int blockChars(Page page){if(page==null||page.blocks()==null)return 0;return page.blocks().stream().map(Block::original).filter(Objects::nonNull).mapToInt(s->(int)s.codePoints().filter(cp->!Character.isWhitespace(cp)).count()).sum();}
     private static final class Running{Map<Integer,Integer> overwriteRevisions=Map.of();final Set<Integer> settledPages=ConcurrentHashMap.newKeySet(); final Map<Integer, PageAttempt> attempts = new ConcurrentHashMap<>(); Job job;final String bookId,fingerprint;final SettingsService.Lease lease;volatile boolean cancelled;boolean started;boolean interruptionRequested;Thread thread;Future<?> future;Running(String bookId,String fingerprint,SettingsService.Lease lease){this.bookId=bookId;this.fingerprint=fingerprint;this.lease=lease;}}
+
+    /** P1：把内部结果码翻成用户能懂的话，不在界面暴露 OCR_RECOVERY_PARTIAL 这类内部标识。 */
+    private static String outcomeText(String messageCode){
+        String code=messageCode==null?"":messageCode;
+        if(code.contains("OCR_RECOVERY_PARTIAL"))return "已识别主要文字，但未能逐字验证，建议对照原稿核对";
+        if(code.contains("PROCESSING_FAILED"))return "本次处理未完成，已保留原有版本";
+        if(code.contains("BLANK"))return "疑似空白页或仅含插图，已保留原稿";
+        return "结果不完整，已保留原稿与已有内容";
+    }
 }

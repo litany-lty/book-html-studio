@@ -148,7 +148,8 @@ public class PaddleAiStudioClient {
                 try {
                     String bId = UsageContext.current() == null ? "book" : UsageContext.current().bookId();
                     int pNum = UsageContext.current() == null || UsageContext.current().pageNumber() == null ? 1 : UsageContext.current().pageNumber();
-                    remoteRecord = remoteJobRegistry.register(bId, pNum, "paddle-aistudio", credentialHash(), fingerprint, usageAttemptId);
+                    // B-02：命中并发上限时有界等待名额释放，不再让瞬时饱和变成页面永久失败。
+                    remoteRecord = remoteJobRegistry.registerWaiting(bId, pNum, "paddle-aistudio", credentialHash(), fingerprint, usageAttemptId, deadline, cancelled);
                 } catch (Exception e) {
                     if (e instanceof ApiException) throw (ApiException) e;
                     throw new OcrException("远端任务登记失败", e);

@@ -249,6 +249,7 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
   async function enable(options) {
     if (!state.book || active()) return;
     session = { id: generateUuid(), bookId: state.book.id, confirmed: false };
+    persistSession();
     sequence = 0;
     fixedOptions = { ...options };
     seenReady.clear();
@@ -263,6 +264,7 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
     const previous = session;
     const stopSequence = ++sequence;
     session = null;
+    clearStoredSession();
     fixedOptions = null;
     seenReady.clear();
     readyInFlight.clear();
@@ -302,5 +304,50 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
     }
   }
 
-  return { enable, stop, navigated, active, refreshStatus, retryCurrentPage, prefetch: schedulePrefetch };
+  // A-03：会话编号只存在于标签页内存中，刷新即丢失，导致服务端预留无人能停。
+  // 仅把"会话编号 + 书籍"放进 sessionStorage（关闭标签页即消失，不延长授权的持久性），
+  // 刷新后仍可停止原窗口。
+  const SESSION_STORAGE_KEY = 'book-html:reading-window:v1';
+  function persistSession() {
+    try {
+      if (session) sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ id: session.id, bookId: session.bookId }));
+      else sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch (_) { /* 禁止本地存储时按原行为运行 */ }
+  }
+  function clearStoredSession() {
+    try { sessionStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) { /* ignore */ }
+  }
+  function storedSession(bookId) {
+    try {
+      const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed && parsed.bookId === bookId && parsed.id ? parsed : null;
+    } catch (_) { return null; }
+  }
+
+  /**
+   * A-03：刷新后恢复"可停止"能力。不续租、不自动派发——只在服务端确认会话仍启用时
+   * 认领该会话，使用户能点"停止"；若服务端已停止/过期则清理本地记录。
+   */
+  async function restore(bookId) {
+    if (!bookId || session) return false;
+    const saved = storedSession(bookId);
+    if (!saved) return false;
+    try {
+      const snapshot = await api.readingWindowStatus(bookId, saved.id);
+      if (snapshot && snapshot.enabled === true && state.book?.id === bookId) {
+        session = { id: saved.id, bookId, confirmed: true };
+        sequence = Math.max(sequence, Number(snapshot.sequence) || 0);
+        onStatus(snapshot);
+        return true;
+      }
+      clearStoredSession();
+    } catch (_) {
+      clearStoredSession();
+    }
+    return false;
+  }
+
+  return { enable, stop, navigated, active, refreshStatus, retryCurrentPage, prefetch: schedulePrefetch, restore };
 }

@@ -142,10 +142,15 @@ export function qualityOf(page) {
   const reviewed = page.reviewed;
   const provider = page.provider ? ` · ${page.provider}` : '';
   const warnings = page.warnings?.length ? ` · ${page.warnings.length} 条版面提示` : '';
-  const detail = `${blocks.length} 个块${unresolvedIssues ? `，${unresolvedIssues} 处内容疑点未解决` : uncertain ? `，${uncertain} 个块需留意` : ''}${average == null ? '' : `，识别参考值 ${Math.round(average * 100)}%`}${provider}${warnings}`;
+  const origin = transcribed ? '整页为手写/影印稿模型转写（推断），必须对照原稿核对 · ' : '';
+  const detail = `${origin}${blocks.length} 个块${unresolvedIssues ? `，${unresolvedIssues} 处内容疑点未解决` : uncertain ? `，${uncertain} 个块需留意` : ''}${average == null ? '' : `，识别参考值 ${Math.round(average * 100)}%`}${provider}${warnings}`;
   // U1：默认阅读只显示轻量标签（有待核对文字）；块数/provider/参考值/提示数进入诊断详情。
-  const label = reviewed ? '已人工校对' : uncertain || unresolvedIssues ? '有待核对文字' : '自动处理完成';
-  const tone = reviewed ? 'reviewed' : uncertain || unresolvedIssues ? 'warning' : 'ready';
+  // C：整页模型转写必须自报来源，不能与印刷体 OCR 的"待核对"混同（诚实性要求）。
+  const transcribed = /handwriting/i.test(String(page.provider || ''));
+  const label = reviewed ? '已人工校对'
+    : transcribed ? '模型转写 · 待核对'
+    : uncertain || unresolvedIssues ? '有待核对文字' : '自动处理完成';
+  const tone = reviewed ? 'reviewed' : transcribed || uncertain || unresolvedIssues ? 'warning' : 'ready';
   return { label, tone, detail };
 }
 

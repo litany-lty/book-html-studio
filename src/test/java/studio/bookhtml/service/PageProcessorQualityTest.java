@@ -154,4 +154,33 @@ class PageProcessorQualityTest {
         }
         assertNotNull(json);
     }
+
+    @Test void processAutomaticallyInvokesComprehensibilityCheckWhenConfigured() throws Exception {
+        BookStore store = mock(BookStore.class);
+        PdfService pdf = mock(PdfService.class);
+        NativeTextExtractor nativeText = mock(NativeTextExtractor.class);
+        CloudOcrPipeline qwen = mock(CloudOcrPipeline.class);
+        PaddleOcrPipeline paddle = mock(PaddleOcrPipeline.class);
+        ParagraphComprehensibilityService compService = mock(ParagraphComprehensibilityService.class);
+        when(compService.configured()).thenReturn(true);
+
+        PageProcessor processor = new PageProcessor(store, pdf, nativeText, mock(TesseractService.class), qwen,
+                paddle, mock(MiniMaxVisionClient.class), mock(QwenLayoutClient.class), mock(QwenTocRecoveryService.class),
+                new SparsePageGuard(), mock(VerticalLayoutNormalizer.class), mock(AssistedReviewService.class), new TraditionalConverter());
+        processor.setComprehensibilityService(compService);
+
+        Path file = temp.resolve("comp.pdf");
+        Files.writeString(file, "pdf");
+        when(store.pdf("book-comp")).thenReturn(file);
+        when(store.readPage("book-comp", 1)).thenReturn(new Page(1, 600, 800, "PENDING", "", List.of(), List.of(), false, null, List.of()));
+
+        Block block = new Block("native-0", "text", 0, new double[]{.1, .1, .5, .5}, "horizontal-tb",
+                "这是一段测试段落内容，用于验证自动自检。".repeat(15), "这是一段测试段落内容，用于验证自动自检。".repeat(15),
+                null, true, false, null, "native", null, null, null);
+        when(nativeText.extract(file, 1, "auto")).thenReturn(Optional.of(List.of(block)));
+        when(compService.checkPage(eq("book-comp"), eq(1), any(), any())).thenReturn(List.of(block));
+
+        processor.process("book-comp", 1, "native", "auto", false, false, () -> false);
+        verify(compService, times(1)).checkPage(eq("book-comp"), eq(1), any(), any());
+    }
 }

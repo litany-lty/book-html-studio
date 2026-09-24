@@ -17,6 +17,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
 
 /**
  * Persistent registry for asynchronous remote OCR jobs (B05 / G04 / CONC-12).
@@ -28,6 +29,11 @@ public class RemoteJobRegistry {
     public static final int MAX_ACTIVE_REMOTE_JOBS = 3;
     public static final int DEFAULT_MAX_POLLS = 36;
     public static final Duration DEFAULT_JOB_TTL = Duration.ofMinutes(15);
+    /**
+     * B-01：活动记录超过该时长没有任何更新即视为陈旧（崩溃/中断残留），
+     * 可回收为终态并释放并发名额。正在被轮询的任务每轮都会刷新 updatedAt，不受影响。
+     */
+    public static final Duration STALE_AFTER = Duration.ofMinutes(5);
 
     public static final String STATE_RESERVED = "RESERVED";
     public static final String STATE_SUBMITTING = "SUBMITTING";
@@ -116,12 +122,75 @@ public class RemoteJobRegistry {
                 System.getLogger(RemoteJobRegistry.class.getName()).log(System.Logger.Level.WARNING,
                         "Failed to list remote jobs directory: " + e.getMessage());
             }
+            // B-01：重启时先回收陈旧活动记录，避免崩溃残留永久占满并发名额。
+            purgeStale(Instant.now());
+        }
+    }
+
+    /**
+     * B-01：回收陈旧的活动远端任务记录。
+     * 判定条件（满足其一）：已超过 expiresAt；或超过 {@link #STALE_AFTER} 没有任何状态更新。
+     * 回收写入终态并把名额还给后续页面，不再让一次性并发饱和演变成整批页面永久失败。
+     */
+    int purgeStale(Instant now) {
+        int reclaimed = 0;
+        for (RemoteJobRecord record : new ArrayList<>(activeRecords.values())) {
+            if (record == null || !record.isActive() || !isStale(record, now)) continue;
+            try {
+                markTerminal(record.handleId(), STATE_TERMINAL_PROVEN, "stale-reclaimed");
+            } catch (Exception ignored) {
+                activeRecords.remove(record.handleId());
+            }
+            reclaimed++;
+        }
+        return reclaimed;
+    }
+
+    static boolean isStale(RemoteJobRecord record, Instant now) {
+        if (record == null || !record.isActive() || now == null) return false;
+        if (record.expiresAt() != null && !record.expiresAt().isAfter(now)) return true;
+        Instant updated = record.updatedAt() != null ? record.updatedAt() : record.createdAt();
+        return updated != null && !updated.plus(STALE_AFTER).isAfter(now);
+    }
+
+    /**
+     * B-02：命中并发上限时按剩余期限有界等待，而不是把页面判为永久失败。
+     * 等待期间尊重取消；超时抛出可读错误，由调用方记录为该页失败原因。
+     */
+    public RemoteJobRecord registerWaiting(String bookId, int page, String provider, String accountScope,
+                                           String inputFingerprint, String usageAttemptId,
+                                           long deadlineNanos, BooleanSupplier cancelled) throws IOException {
+        long backoffMs = 200L;
+        String lastMessage = null;
+        while (true) {
+            if (cancelled != null && cancelled.getAsBoolean()) throw new CancelledException();
+            try {
+                return register(bookId, page, provider, accountScope, inputFingerprint, usageAttemptId);
+            } catch (ApiException busy) {
+                if (busy.status() != HttpStatus.TOO_MANY_REQUESTS) throw busy;
+                lastMessage = busy.getMessage();
+            }
+            long remainingNanos = deadlineNanos - System.nanoTime();
+            if (remainingNanos <= 0) {
+                throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE,
+                        "远端 OCR 并发名额长时间被占用，等待超时（" + (lastMessage == null ? "已达并发上限" : lastMessage) + "）");
+            }
+            long sleepMs = Math.max(1L, Math.min(backoffMs, remainingNanos / 1_000_000L));
+            try {
+                Thread.sleep(Math.min(sleepMs, 1_000L));
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new CancelledException();
+            }
+            backoffMs = Math.min(backoffMs * 2, 2_000L);
         }
     }
 
     public RemoteJobRecord register(String bookId, int page, String provider, String accountScope,
                                     String inputFingerprint, String usageAttemptId) throws IOException {
         synchronized (lock) {
+            // B-01：计数前先回收陈旧记录，避免崩溃残留造成持续"已达上限"。
+            purgeStale(Instant.now());
             long activeCount = activeRecords.values().stream().filter(RemoteJobRecord::isActive).count();
             if (activeCount >= MAX_ACTIVE_REMOTE_JOBS) {
                 throw new ApiException(HttpStatus.TOO_MANY_REQUESTS,

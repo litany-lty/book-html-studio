@@ -1290,3 +1290,81 @@ input, select, textarea, .button, .upload-button, .segmented,
   .editor-field input, .editor-field select, .bbox-grid input, .issue-workbench select { min-height: 44px; }
   .reader-primary-actions .button { min-width: 44px; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   运行态信息条重排：任务面板（顶部）与页内识别卡（正文上方）
+   目标：状态说清楚、进度有主次、去掉无谓留白与过重的底色
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── 任务面板：状态成两行（状态 / 进度摘要），右侧操作对齐顶部 ── */
+.job-panel { padding: 12px 22px 14px; }
+.job-title { align-items: flex-start; gap: 16px; }
+.job-title > div:first-child { display: grid; gap: 3px; min-width: 0; }
+.job-title h1 { display: block; margin: 0; font-size: 13px; font-weight: 650; letter-spacing: .02em; color: var(--ink); }
+.job-title.is-converting h1 { color: var(--primary-deep); }
+.job-title p { display: block; margin: 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.job-title-actions { padding-top: 1px; }
+
+/* ── 进度区：与状态分离一条浅线；文案左、百分比右（无空档） ── */
+.progress-area { margin-top: 10px; border-top: 1px solid var(--line-soft); padding-top: 9px; }
+.progress-copy { align-items: baseline; margin-bottom: 8px; gap: 12px; }
+.progress-copy strong { font-size: 13px; font-weight: 600; color: var(--ink); }
+.progress-copy span { margin-left: auto; color: var(--ink); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+progress { height: 6px; border-radius: 999px; overflow: hidden; }
+progress::-webkit-progress-bar { border-radius: 999px; }
+progress::-webkit-progress-value { border-radius: 999px; }
+progress::-moz-progress-bar { border-radius: 999px; }
+/* 任务面板的进度用黛蓝（识别），与底栏青碧的阅读位置区分 */
+.progress-area progress::-webkit-progress-value { background: var(--info); }
+.progress-area progress::-moz-progress-bar { background: var(--info); }
+
+/* ── 页内信息条（识别中）：安静卡片，不再整块蓝底 ── */
+.page-head { align-items: center; gap: 10px; margin: 16px auto 8px; }
+.page-head progress { flex: 1 1 80px; min-width: 60px; height: 3px; border-radius: 999px; background: var(--bg-deep); }
+#quality-diagnostics { max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+#page-save-status { margin-left: auto; }
+.page-head #bookmark-button { flex: none; }
+
+.page-message.is-processing { margin: 0 auto 10px; }
+.page-progress-card {
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--info);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  padding: 10px 14px;
+  color: var(--ink-soft);
+  box-shadow: none;
+}
+.page-progress-head { align-items: baseline; }
+.page-progress-title { gap: 8px; font-size: 13px; font-weight: 600; color: var(--ink); }
+.page-progress-title::before {
+  content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--info);          /* 静态圆点：仅表示进行中，无脉冲动画 */
+}
+.page-progress-track { height: 4px; background: var(--bg-deep); }
+.page-progress-fill { background: var(--info-fg); }
+/* 未知剩余工作量：只给静态斜纹，不出现任何"填充比例"，避免被读成完成度 */
+.page-progress-track.is-indeterminate {
+  background: repeating-linear-gradient(90deg, var(--bg-deep) 0 10px, var(--line) 10px 20px);
+}
+.page-progress-fill.is-indeterminate { display: none; }
+.page-progress-meta { gap: 6px 14px; color: var(--muted); font-size: 12px; }
+.page-progress-hint { margin-left: auto; color: var(--muted); }
+
+@media (max-width: 620px) {
+  .job-panel { padding: 10px 12px 12px; }
+  .job-title { gap: 8px; }
+  .job-title-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .progress-copy { flex-wrap: wrap; }
+  .progress-copy span { margin-left: auto; }
+  .page-head { margin-top: 10px; }
+  #quality-diagnostics { max-width: 18ch; }
+}
+
+
+/* ── 任务终态：不再重复标题、不保留占满宽度的进度条 ── */
+.progress-area.is-settled .progress-copy,
+.progress-area.is-settled progress { display: none; }
+.progress-area.is-settled { border-top-color: transparent; padding-top: 2px; }
+.progress-area.is-settled .inline-message { margin-top: 0; }

@@ -1,4 +1,5 @@
 import { api } from './api.js';
+import { groupJobErrors, compressPages } from './job-errors.js';
 import { state, loadPreferences, savePreferences, getBookmarks, setBookmarks, cloneBlocks, isSameSession, canonicalJson, sessionGuard } from './store.js';
 import { renderPaper, qualityOf, statusMessage } from './reader.js';
 import { renderEditor, renderIssueWorkbench, unmountIssueWorkbench, issueReferences, createOverlay, enableDrawing } from './editor.js';
@@ -18,6 +19,7 @@ const pageProgress = createPageProgress({
   onPublished: (n, page) => acceptReadyPage(n, page),
   onRetry: () => retryCurrentPage()
 });
+const activeJobs = new Set(['QUEUED', 'RUNNING', 'CANCELLING']);
 const readerNavigation = globalThis.BookReaderNavigation;
 let cancelDrawing = null;
 let scrollTimer = null;
@@ -276,12 +278,16 @@ function selectedProvider() {
 
 const storedOption = (key, fallback) => { try { const value = localStorage.getItem(key); return value == null ? fallback : value === 'true'; } catch (_) { return fallback; } };
 const isAutoProcessAll = () => storedOption('book_html_auto_process_all_v2', true);
-const isAutoReadEnabled = () => storedOption('book_html_auto_read', true);
+// A-04：随读默认关闭。此前默认 true（并被下面的迁移强制写为 true），打开一本书就自动开启随读：
+// 既会未经确认调用云端识别消耗额度，又会独占本书使批量任务永远 409（书页永远"解析不出来"）。
+// 这里回到 README 与 U1/U2 的契约：必须由用户显式开启，浏览器记忆仅记录用户自己的选择。
+const isAutoReadEnabled = () => storedOption('book_html_auto_read', false);
 try {
-  if (localStorage.getItem('book_html_auto_read_default_v2') !== 'true') {
-    localStorage.setItem('book_html_auto_read', 'true');
-    localStorage.setItem('book_html_auto_process_all_v2', 'true');
-    localStorage.setItem('book_html_auto_read_default_v2', 'true');
+  // 历史版本曾把随读强制写为开启（book_html_auto_read=true）。这里做一次性纠正：
+  // 未由用户显式开启的浏览器回到"关闭"，纠正完后不再改写（用户可自行开启）。
+  if (localStorage.getItem('book_html_auto_read_default_v3') !== 'true') {
+    localStorage.setItem('book_html_auto_read', 'false');
+    localStorage.setItem('book_html_auto_read_default_v3', 'true');
   }
 } catch (_) {}
 
@@ -289,8 +295,9 @@ async function ensureReadingWindowActive() {
   if (!state.book || readingWindow.active()) return;
   if (!isAutoReadEnabled() || jobSyncError || activeJobs.has(state.job?.status)) return;
   const provider = selectedProvider();
-  const providerConfig = state.config?.providers?.find(p => p.id === provider && p.available)
-    || state.config?.providers?.find(p => p.available);
+  // 逐页自动派发的随读窗口只支持印刷体通道；手写转写需整页手动处理。
+  const providerConfig = state.config?.providers?.find(p => p.id === provider && p.available && !p.handwritingOnly)
+    || state.config?.providers?.find(p => p.available && !p.handwritingOnly);
   if (!providerConfig) return;
   const form = $('#job-form') ? new FormData($('#job-form')) : null;
   const options = {
@@ -327,7 +334,8 @@ function renderProviders() {
   const wrap = $('#provider-options');
   const previous = selectedProvider();
   wrap.replaceChildren();
-  const providers = (state.config?.providers || []).filter(provider => ['paddle-aistudio', 'ppocr'].includes(provider.id));
+  // C：手写/影印稿转写与印刷体 OCR 并列展示，但阅读窗口（逐页自动派发）只走印刷体通道。
+  const providers = (state.config?.providers || []).filter(provider => ['paddle-aistudio', 'ppocr', 'handwriting'].includes(provider.id));
   providers.forEach(provider => {
     const label = document.createElement('label');
     label.className = `radio${provider.available ? '' : ' disabled'}`;
@@ -698,7 +706,30 @@ async function runComprehensibilityCheck() {
   }
 }
 
+// P1：批量重试失败页。失败页清单取自书籍页摘要（PageSummary.status），
+// 只提交这些页，不动已成功页面；提交前明确告知会调用云端识别并产生用量。
+const failedPageNumbers = () => (state.summaries || [])
+  .filter(item => item && item.status === 'FAILED' && Number.isInteger(item.pageNumber))
+  .map(item => item.pageNumber)
+  .sort((a, b) => a - b);
+
+const compressPageRanges = compressPages;
+
+function renderFailedRetry() {
+  const button = $('#retry-failed-pages');
+  if (!button) return;
+  const pages = failedPageNumbers();
+  const busy = activeJobs.has(state.job?.status) || readingWindow.active();
+  button.hidden = !state.book || pages.length === 0;
+  button.disabled = busy;
+  button.textContent = pages.length ? `重试失败页（${pages.length}）` : '重试失败页';
+  button.title = pages.length
+    ? `重新处理 ${pages.length} 页失败页（${compressPageRanges(pages).slice(0, 60)}…）；会调用云端识别并产生用量`
+    : '没有失败页';
+}
+
 function renderBookMeta() {
+  renderFailedRetry();
   if (!state.book) {
     renderJobHeading();
     $('#book-summary').textContent = '先导入一本 PDF，原稿会始终保留。';
@@ -710,7 +741,7 @@ function renderBookMeta() {
   }
   const b = state.book;
   const pct = b.totalPages ? Math.round(((b.processedPages || 0) / b.totalPages) * 100) : 0;
-  $('#book-summary').textContent = `已处理 ${b.processedPages || 0} / ${b.totalPages} 页 (${pct}%) · 已校对 ${b.reviewedPages || 0} 页`;
+  $('#book-summary').textContent = `识别进度 ${b.processedPages || 0} / ${b.totalPages} 页（${pct}%） · 校对进度 ${b.reviewedPages || 0} 页`;
   $('#book-select').title = b.title;
   $('#export-button').disabled = false;
   $('#usage-open').disabled = false;
@@ -758,7 +789,10 @@ function renderToc() {
 function renderReadingProgress(previewPage) {
   const info = readerNavigation.progress(previewPage ?? state.currentPage, state.book?.totalPages);
   const range = $('#reading-progress-range');
-  range.min = '1'; range.max = String(Math.max(1, info.total)); range.value = String(info.page || 1);
+  range.min = '1'; range.max = String(Math.max(1, info.total));
+  if (previewPage == null || String(range.value) !== String(info.page)) {
+    range.value = String(info.page || 1);
+  }
   range.disabled = info.total <= 1;
   const text = info.total ? `${info.page} / ${info.total} 页 · ${Math.round(info.percent)}%` : '0 / 0 页';
   $('#reading-progress-output').textContent = text;
@@ -1454,6 +1488,8 @@ async function selectBook(id) {
     const book = await api.readerBook(id);
     if (requestId !== bookRequest) return;
     state.book = book; state.summaries = []; $('#book-select').value = id;
+    // A-03：刷新后尝试认领仍在运行的随读会话，保证"停止随读"始终可达（不再占住整本书）。
+    void readingWindow.restore(id);
     $('#workspace').classList.remove('is-empty'); $('#empty-state').hidden = true; $('#reader-shell').hidden = false;
     renderBookMeta(); renderBookmarks();
     const finiteDefault = Math.min(20, book.totalPages);
@@ -1509,15 +1545,22 @@ function renderJob(job) {
   $('#progress-count').textContent = job.total
     ? (active
       ? `${pct}% (${job.completed || 0} / ${job.total} 页)${job.currentPage ? ` · 当前第 ${job.currentPage} 页` : ''}`
-      : `已结束 ${job.completed || 0} / ${job.total} 页${errors.length ? ` · ${errors.length} 条需处理` : ' · 全部成功'}`)
+      : `已识别 ${job.completed || 0} / ${job.total} 页${errors.length ? ` · ${errors.length} 条未逐字验证` : ' · 全部成功'}`)
     : '';
   $('#progress-bar').max = Math.max(1, job.total || 1); $('#progress-bar').value = job.completed || 0;
   $('#job-panel').classList.toggle('job-settled', job.status === 'COMPLETED' && !errors.length && !jobSyncError);
+  // P1：终态时隐藏「与标题重复的进度标题 + 占满宽度的进度条」，只留结论、错误与恢复入口。
+  const terminal = ['COMPLETED', 'COMPLETED_WITH_ERRORS', 'CANCELLED', 'FAILED', 'INTERRUPTED'].includes(job.status);
+  $('#job-progress').classList.toggle('is-settled', terminal && !jobSyncError);
   $('#job-errors').textContent = errors.slice(-3).join('；');
   $('#job-error-details').hidden = errors.length <= 3;
-  $('#job-error-summary').textContent = `查看全部错误（${errors.length} 条）`;
+  // P2：按原因聚合，几百页失败时先给结论（原因 + 页数 + 页码区间），而不是几百行。
+  const groupedErrors = groupJobErrors(errors);
+  $('#job-error-summary').textContent = groupedErrors.length > 1
+    ? `查看全部原因（${groupedErrors.length} 类 / ${errors.length} 条）`
+    : `查看全部错误（${errors.length} 条）`;
   const list = $('#job-all-errors'); list.replaceChildren();
-  errors.forEach(error => { const item = document.createElement('li'); item.textContent = error; list.append(item); });
+  groupedErrors.forEach(group => { const item = document.createElement('li'); item.textContent = group.text; list.append(item); });
   const guidance = {
     COMPLETED_WITH_ERRORS: '部分页面未完成。按上方错误页码重新选择范围；默认会跳过已完成页，不会覆盖手工校对。',
     CANCELLED: '已完成的页面保留。可按需重新选择未完成的页码继续处理。',
@@ -1565,6 +1608,7 @@ function schedulePoll(delay = 1500) {
 function showJobSyncError() {
   jobSyncError = true;
   $('#job-panel').classList.remove('job-settled');
+  $('#job-progress')?.classList.remove('is-settled');
   $('#job-progress').hidden = false;
   $('#job-recovery').hidden = false;
   $('#job-recovery-message').textContent = '暂时无法确认任务状态，处理可能仍在后台运行。请先刷新状态，不要重复创建任务。';
@@ -1885,8 +1929,26 @@ $('#line-height').addEventListener('input', event => { state.lineHeight = Number
 $('#line-height').addEventListener('change', () => { renderCurrent(false); saveReadingPosition(); });
 $('#prev-page').addEventListener('click', () => goToPage(state.currentPage - 1)); $('#next-page').addEventListener('click', () => goToPage(state.currentPage + 1));
 $('#jump-form').addEventListener('submit', event => { event.preventDefault(); commitPageInput(); }); $('#page-jump').addEventListener('change', commitPageInput);
+const commitProgressRange = () => {
+  const val = Number($('#reading-progress-range').value);
+  if (Number.isInteger(val) && val >= 1) goToPage(val);
+};
 $('#reading-progress-range').addEventListener('input', event => renderReadingProgress(Number(event.target.value)));
-$('#reading-progress-range').addEventListener('change', event => goToPage(Number(event.target.value)));
+$('#reading-progress-range').addEventListener('change', commitProgressRange);
+$('#reading-progress-range').addEventListener('pointerup', commitProgressRange);
+$('#reading-progress')?.addEventListener('click', event => {
+  if (event.target === $('#reading-progress-range')) return;
+  const range = $('#reading-progress-range');
+  if (!range || range.disabled || !state.book || !state.book.totalPages) return;
+  const rect = range.getBoundingClientRect();
+  if (rect.width > 0 && event.clientX >= rect.left && event.clientX <= rect.right) {
+    const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const target = Math.max(1, Math.min(state.book.totalPages, Math.round(1 + ratio * (state.book.totalPages - 1))));
+    range.value = String(target);
+    renderReadingProgress(target);
+    goToPage(target);
+  }
+});
 // U7-Style：诊断详情默认收起，按需展开；关闭面板/切书时收起。
 document.querySelector('#quality-diagnostics-toggle')?.addEventListener('click', event => {
   const toggle = event.currentTarget;
@@ -1905,6 +1967,14 @@ $('#reading-window-open').addEventListener('click', () => {
   const providerConfig = state.config?.providers?.find(item => item.id === provider);
   const assist = $('#qwen-assist').checked && !$('#qwen-assist').disabled;
   const qwenModel = state.config?.qwenAssist?.model || 'Qwen';
+  // C：随读只支持印刷体通道。选中手写转写时明确说明原因，而不是让服务端回一句"参数无效"。
+  if (providerConfig?.handwritingOnly && !readingWindow.active()) {
+    $('#reading-window-choice').textContent = '随读识别只支持印刷体通道（PaddleOCR-VL / PP-OCRv6）。手写/影印稿转写涉及多次视觉调用且结果必须逐块核对，请在「处理设置 → 识别通道」里选择手写转写后按页处理。';
+    $('#reading-window-enable').hidden = false;
+    $('#reading-window-enable').disabled = true;
+    dialog.showModal();
+    return;
+  }
   $('#reading-window-choice').textContent = readingWindow.active()
     ? '随读识别已开启。本次通道和辅助选项固定；停止后可重新选择。'
     : `本次使用：${providerConfig?.label || provider || '未选择可用通道'}。${providerConfig ? providerUsage(providerConfig) : ''} ${assist ? `另启用 ${qwenModel} 结构整理，可能额外计费。` : '不启用 Qwen；只有在处理设置中主动勾选后才会使用。'}`;
@@ -1926,6 +1996,21 @@ $('#reading-window-enable').addEventListener('click', async () => {
 $('#reading-window-stop').addEventListener('click', () => { void readingWindow.stop(); });
 $('#reading-window-refresh').addEventListener('click', () => { void readingWindow.refreshStatus(); });
 $('#retry-page-header')?.addEventListener('click', retryCurrentPage);
+$('#retry-failed-pages')?.addEventListener('click', async () => {
+  const pages = failedPageNumbers();
+  if (!state.book || !pages.length) return;
+  const range = compressPageRanges(pages);
+  const provider = selectedProvider() || 'paddle-aistudio';
+  const layout = new FormData($('#job-form')).get('layout') || 'auto';
+  if (!window.confirm(`将重新处理 ${pages.length} 页失败页（${range}）。\n会调用所选云识别通道并产生用量；已成功的页面不会被覆盖。继续吗？`)) return;
+  try {
+    await api.startJob(state.book.id, { pages: range, provider, layout, splitSpreads: false, force: false, assist: false });
+    toast(`已提交 ${pages.length} 页失败页重试，可在任务状态查看进度。`);
+    await refreshJob();
+    renderFailedRetry();
+  } catch (error) { showError(error); }
+});
+
 $('#reload-page-header')?.addEventListener('click', reloadCurrentPage);
 $('#reader-reload-page')?.addEventListener('click', reloadCurrentPage);
 $('#comprehensibility-check-btn')?.addEventListener('click', runComprehensibilityCheck);
