@@ -104,6 +104,7 @@ public class BookService {
                 result.add(pageSummary(id,p));
             }
         }
+        if(store.indexService()!=null) store.indexService().warm(store,b);
         return result;
     }
     /** U3：同一投影结果选择页面代表标题；无标题回到“第 N 页”，不冒用书眉。 */
@@ -129,7 +130,7 @@ public class BookService {
         if(q.length()>200)throw new ApiException(HttpStatus.BAD_REQUEST,"搜索词过长");
         if(store.indexService()!=null) {
             List<Map<String,Object>> indexed = store.indexService().search(store.bookDir(id), id, q, null, 500);
-            if(indexed != null && !indexed.isEmpty()) return indexed;
+            if(indexed != null) return indexed;
         }
         List<Map<String,Object>> result=new ArrayList<>();
         for(int n=1;n<=b.totalPages()&&result.size()<500;n++){
@@ -140,6 +141,7 @@ public class BookService {
                     result.add(Map.of("pageNumber",n,"blockId",block.id(),"text",Optional.ofNullable(block.simplified()).orElse(block.original())));
             }
         }
+        if(store.indexService()!=null) store.indexService().warm(store,b);
         return result;
     }
     public byte[] image(String id,int n,int width){page(id,n);try(ImageArtifact artifact=pdf.renderArtifact(store.pdf(id),n,width)){return pdf.pngArtifact(artifact);}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"页面图片生成失败");}}

@@ -35,6 +35,17 @@ final class PageStatisticsCache {
             if (hit != null && hit.totalPages() == book.totalPages() && hit.epoch() == epoch && (epoch & 1) == 0)
                 return hit.counts();
         }
+        var index=store.indexService()==null?null:store.indexService().manifest(store.bookDir(book.id()));
+        if(index!=null && index.totalPages()==book.totalPages()) {
+            Counts persisted=new Counts(index.processedPages(),index.reviewedPages());
+            synchronized(entries) {
+                if((epoch&1)==0 && store.pageEpoch(book.id())==epoch) {
+                    entries.put(book.id(),new Entry(book.totalPages(),epoch,persisted));
+                    while(entries.size()>CAPACITY) entries.remove(entries.keySet().iterator().next());
+                    return persisted;
+                }
+            }
+        }
         int processed = 0, reviewed = 0;
         for (int n = 1; n <= book.totalPages(); n++) {
             Page page = store.readPage(book.id(), n);

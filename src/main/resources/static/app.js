@@ -6,6 +6,7 @@ import { createDecisionPanel } from './decision.js';
 import './settings.js';
 import { openBookUsage } from './usage.js';
 import { createReadingWindow } from './reading-window.js';
+import { allowsAutomaticReading } from './auto-reading-policy.js';
 import { createLibrary } from './library.js';
 import { initReaderMode } from './reader-mode.js';
 import { recordAnchor, restoreAnchor } from './reading-anchor.js';
@@ -1401,6 +1402,11 @@ async function selectBook(id) {
     if (isAutoReadEnabled() && !jobSyncError && !activeJobs.has(state.job?.status)) {
       const provider = selectedProvider();
       if (state.config?.providers?.some(p => p.id === provider && p.available)) {
+        // Configured credentials alone do not prove this book/provider has an active
+        // automatic-reading policy. Only read it; never manufacture a consent here.
+        const policy = await api.readingPolicy().catch(() => null);
+        if (requestId !== bookRequest || state.book?.id !== id) return;
+        if (!allowsAutomaticReading(policy, id, provider)) return;
         const form = new FormData($('#job-form'));
         await readingWindow.enable({ provider, layout: form.get('layout') || 'auto',
           splitSpreads: form.get('splitSpreads') === 'on',

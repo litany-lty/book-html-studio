@@ -152,6 +152,7 @@ public class BookStore {
     /** 释放数据目录租约（Spring 销毁时调用；测试可显式调用验证释放语义）。 */
     @jakarta.annotation.PreDestroy
     public void close() {
+        if(indexService!=null) indexService.close();
         lease.close();
     }
 
@@ -316,9 +317,9 @@ public class BookStore {
         int prevRev = revisionOrZero(current);
         int nextRev = saved.revision();
 
-        long sourceSeq = sourceJournal.nextSourceSeq(dir, id);
         var sourceChange = sourceJournal.prepare(dir, id, "PAGE", page, saved.lastCommitId(), null,
                 prevRev, nextRev, prevHash, nextHash, operation.name());
+        long sourceSeq = sourceChange.sourceSeq();
 
         var entry=new PageCommitJournal.Entry(saved.lastCommitId(),id,page,a==null?null:a.attemptId(),a==null?0:a.generation(),
                 operation.name(),claim==null?"SUCCEEDED":claim.outcome(),prevRev,nextRev,
@@ -340,7 +341,8 @@ public class BookStore {
                 commits.reconcile(dir,id,page,actual);
             } catch (IOException | RuntimeException unknown) { /* Preserve PREPARED for conservative recovery. */ }
             if (!published) {
-                sourceJournal.markNotPublished(dir, id, sourceSeq);
+                // A failed read or rename is not proof of non-publication. Keep PREPARED
+                // until recovery compares the exact commitId, revision and content hash.
                 throw failure;
             }
         }
