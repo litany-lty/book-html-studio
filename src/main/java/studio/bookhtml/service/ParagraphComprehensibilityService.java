@@ -22,7 +22,7 @@ public class ParagraphComprehensibilityService {
     static final int CHUNK_CHARS=2000, MAX_CHUNKS=4, MAX_FINDINGS=32, MAX_RESPONSE_BYTES=256*1024;
     public static final String COMPLETE="[COMPREHENSIBILITY_CHECKED]";
     public static final String DEFERRED="[COMPREHENSIBILITY_DEFERRED]";
-    private static final String VERSION="comprehensibility-v2-evidence";
+    private static final String VERSION="comprehensibility-v3-validated-coverage";
     private static final HttpClient HTTP=HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     @FunctionalInterface public interface Transport { HttpResponse<InputStream> send(HttpRequest request) throws Exception; }
     private final QwenAssistProperties config;
@@ -39,6 +39,7 @@ public class ParagraphComprehensibilityService {
     private final Map<String,List<Finding>> cache=new LinkedHashMap<>(16,.75f,true);
     record Slice(String id,String blockId,int offset,String text) {}
     record Finding(String blockId,int start,int end,String reason,String candidate) {}
+    record ParsedFindings(List<Finding> findings,boolean complete) {}
     public record Result(List<Block> blocks,boolean complete,int planned,int completed) {}
     @Autowired public ParagraphComprehensibilityService(QwenAssistProperties c,ObjectMapper j,TraditionalConverter converter) {
         this(c,j,converter,r->HTTP.send(r,HttpResponse.BodyHandlers.ofInputStream()),true);
@@ -114,7 +115,7 @@ public class ParagraphComprehensibilityService {
                 check(cancelled);var group=groups.get(groupIndex);
                 String fingerprint=studio.bookhtml.decision.DecisionHash.sha256Hex(VERSION+"|"+bookId+"|"+page+"|"+model()+"|"+config.getBaseUrl()+"|"
                         +studio.bookhtml.decision.DecisionHash.sha256Hex(Objects.toString(key(),""))+"|"+bookContext+"|"+json.writeValueAsString(group));
-                List<Finding> result;
+                List<Finding> result;boolean groupComplete=true;
                 synchronized(cache){result=cache.get(fingerprint);}
                 try(UsageContext.Scope unit=UsageContext.open(bookId,page,"COMPREHENSIBILITY","chunk-"+groupIndex)) {
                     if(result==null) {
@@ -125,17 +126,25 @@ public class ParagraphComprehensibilityService {
                             var response=call.send(request,transport::send);
                             if(response.statusCode()<200||response.statusCode()>=300)throw new OcrException("自检服务暂未完成（HTTP "+response.statusCode()+"），保留原文");
                             JsonNode envelope=strict(call.read(response,MAX_RESPONSE_BYTES));call.captureUsage(envelope);
-                            if("length".equals(envelope.at("/choices/0/finish_reason").asText()))throw new OcrException("自检输出截断，未当作无疑点结果");
+                            JsonNode choices=envelope.get("choices");
+                            if(choices==null || !choices.isArray() || choices.size()!=1
+                                    || !"stop".equals(envelope.at("/choices/0/finish_reason").asText()))
+                                throw new OcrException("自检输出未正常完整结束，未当作无疑点结果");
                             JsonNode content=envelope.at("/choices/0/message/content");
                             if(!content.isTextual())throw new OcrException("自检返回结构无效");
-                            result=parse(strict(stripFence(content.asText()).getBytes(StandardCharsets.UTF_8)),group);
-                            call.succeeded();
+                            ParsedFindings parsed=parse(strict(stripFence(content.asText()).getBytes(StandardCharsets.UTF_8)),group);
+                            result=parsed.findings();groupComplete=parsed.complete();
+                            // A malformed annotation is not evidence of a problem-free paragraph.
+                            // Keep accepted findings but do not finalize the review as successful.
+                            if(groupComplete)call.succeeded();
                         }
-                        synchronized(cache){cache.put(fingerprint,result);while(cache.size()>64)cache.remove(cache.keySet().iterator().next());}
+                        if(groupComplete)synchronized(cache){cache.put(fingerprint,result);while(cache.size()>64)cache.remove(cache.keySet().iterator().next());}
                     } else if(usage!=null) usage.cacheReused("qwen",model());
                 } catch(CancelledException stop){throw stop;}
                 catch(Exception failed){coverage=false;break;} // Keep valid earlier findings; never whole-page retry.
-                findings.addAll(result);completed++;
+                findings.addAll(result);
+                if(!groupComplete){coverage=false;break;}
+                completed++;
             }
         }
         return new Result(merge(initial,findings,"comp-"),coverage&&completed==groups.size(),groups.size(),completed);
@@ -147,7 +156,7 @@ public class ParagraphComprehensibilityService {
             if(root==null||!root.isObject()||parser.nextToken()!=null)throw new OcrException("自检 JSON 结构无效");return root;
         }
     }
-    private List<Finding> parse(JsonNode root,List<Slice> slices)throws OcrException {
+    private ParsedFindings parse(JsonNode root,List<Slice> slices)throws OcrException {
         var array=root.get("findings");
         if(array==null||!array.isArray()||array.size()>MAX_FINDINGS)throw new OcrException("自检疑点清单无效");
         Map<String,Slice> map=new HashMap<>();for(var s:slices){map.put(s.id(),s);if(s.offset()==0)map.putIfAbsent(s.blockId(),s);}
@@ -157,6 +166,9 @@ public class ParagraphComprehensibilityService {
             Slice s=map.get(item.path("blockId").asText());if(s==null)continue;
             if(!item.path("start").isIntegralNumber()||!item.path("start").canConvertToInt()
                     ||!item.path("end").isIntegralNumber()||!item.path("end").canConvertToInt())continue;
+            JsonNode reasonNode=item.get("reason"),inferenceNode=item.get("inferredText");
+            if(reasonNode!=null&&!reasonNode.isNull()&&!reasonNode.isTextual()
+                    || inferenceNode!=null&&!inferenceNode.isNull()&&!inferenceNode.isTextual())continue;
             String quote=item.path("quote").asText(),reason=item.path("reason").asText("");
             String proposed=item.path("inferredText").isTextual()?item.path("inferredText").asText():null;
             if(quote.isBlank()||quote.length()>256||reason.length()>400||proposed!=null&&proposed.length()>256)continue;
@@ -168,7 +180,7 @@ public class ParagraphComprehensibilityService {
             results.add(new Finding(s.blockId(),s.offset()+start,s.offset()+end,reason.isBlank()?"语义疑点，仅供核对；不代表原图证据":reason,
                     proposed==null||proposed.isBlank()||quote.equals(proposed)?null:proposed));
         }
-        return List.copyOf(results);
+        return new ParsedFindings(List.copyOf(results),results.size()==array.size());
     }
     private List<Block> merge(List<Block> input,List<Finding> findings,String prefix) {
         List<Block> out=new ArrayList<>(input.size());
