@@ -44,6 +44,7 @@ class ParagraphComprehensibilityServiceTest {
         {
           "choices": [
             {
+              "finish_reason": "stop",
               "message": {
                 "content": "{\\"findings\\":[{\\"blockId\\":\\"b1\\",\\"quote\\":\\"語句不通順\\",\\"start\\":0,\\"end\\":5,\\"reason\\":\\"上下文敘述學術原理，此處字詞錯漏\\",\\"inferredText\\":\\"語義通順\\"}]}"
               }
@@ -63,7 +64,9 @@ class ParagraphComprehensibilityServiceTest {
         Block b2 = new Block("b2", "text", 1, new double[]{0, 1, 1, 1}, "horizontal-tb",
                 "第二段內容上下文正常", "第二段内容上下文正常", 0.98, false, false, null, "ocr", List.of(), null, null, List.of());
 
-        List<Block> result = service.checkPage("book-1", 1, List.of(b1, b2), () -> false);
+        var checked = service.check("book-1", 1, List.of(b1, b2), () -> false);
+        assertTrue(checked.complete());
+        List<Block> result = checked.blocks();
 
         assertNotNull(sentRequest.get());
         assertEquals(2, result.size());
@@ -95,6 +98,7 @@ class ParagraphComprehensibilityServiceTest {
         {
           "choices": [
             {
+              "finish_reason": "stop",
               "message": {
                 "content": "{\\"findings\\":[{\\"blockId\\":\\"b1\\",\\"quote\\":\\"錯別字\\",\\"start\\":5,\\"end\\":8,\\"reason\\":\\"筆畫辨析失誤\\",\\"inferredText\\":\\"正確字\\"}]}"
               }
@@ -108,7 +112,9 @@ class ParagraphComprehensibilityServiceTest {
         Block b1 = new Block("b1", "text", 0, new double[]{0, 0, 1, 1}, "horizontal-tb",
                 "包含錯別字的文章段落", "包含错别字的文章段落", 0.95, false, false, null, "ocr", List.of(), null, null, List.of());
 
-        List<Block> result = service.checkPage("book-1", 1, List.of(b1), () -> false);
+        var checked = service.check("book-1", 1, List.of(b1), () -> false);
+        assertTrue(checked.complete());
+        List<Block> result = checked.blocks();
         assertEquals(1, result.get(0).issues().size());
         ContentIssue issue = result.get(0).issues().get(0);
 
@@ -149,6 +155,7 @@ class ParagraphComprehensibilityServiceTest {
         {
           "choices": [
             {
+              "finish_reason": "stop",
               "message": {
                 "content": "{\\"findings\\":[{\\"blockId\\":\\"b1\\",\\"quote\\":\\"別字\\",\\"start\\":3,\\"end\\":5,\\"reason\\":\\"重疊問題\\",\\"inferredText\\":\\"新推斷\\"}]}"
               }
@@ -163,7 +170,9 @@ class ParagraphComprehensibilityServiceTest {
         Block b1 = new Block("b1", "text", 0, new double[]{0, 0, 1, 1}, "horizontal-tb",
                 "包含錯別字的文章段落", "包含错别字的文章段落", 0.95, false, false, null, "ocr", List.of(), null, null, List.of(existing));
 
-        List<Block> result = service.checkPage("book-1", 1, List.of(b1), () -> false);
+        var checked = service.check("book-1", 1, List.of(b1), () -> false);
+        assertTrue(checked.complete());
+        List<Block> result = checked.blocks();
         // Overlapping finding must be dropped, retaining existing issue unchanged
         assertEquals(1, result.get(0).issues().size());
         assertEquals("exist-1", result.get(0).issues().get(0).id());
