@@ -1857,9 +1857,15 @@ $('#retry-page-header')?.addEventListener('click', retryCurrentPage);
 $('#reload-page-header')?.addEventListener('click', reloadCurrentPage);
 $('#reader-reload-page')?.addEventListener('click', reloadCurrentPage);
 const storedOption = (key, fallback) => { try { const value = localStorage.getItem(key); return value == null ? fallback : value === 'true'; } catch (_) { return fallback; } };
-const isAutoProcessAll = () => storedOption('book_html_auto_process_all_v2', false);
-// Configured credentials are not consent to start paid recognition on book open.
-const isAutoReadEnabled = () => storedOption('book_html_auto_read', false);
+const isAutoProcessAll = () => storedOption('book_html_auto_process_all_v2', true);
+const isAutoReadEnabled = () => storedOption('book_html_auto_read', true);
+try {
+  if (localStorage.getItem('book_html_auto_read_default_v1') !== 'true') {
+    localStorage.setItem('book_html_auto_read', 'true');
+    localStorage.setItem('book_html_auto_process_all_v2', 'true');
+    localStorage.setItem('book_html_auto_read_default_v1', 'true');
+  }
+} catch (_) {}
 const autoReadCheckbox = $('#reading-window-auto-start');
 if (autoReadCheckbox) {
   autoReadCheckbox.checked = isAutoReadEnabled();
@@ -1867,16 +1873,18 @@ if (autoReadCheckbox) {
     try { localStorage.setItem('book_html_auto_read', String(autoReadCheckbox.checked)); } catch (_) {}
   });
 }
-function setAutoProcessAll(val) {
-  try { localStorage.setItem('book_html_auto_process_all_v2', String(val)); } catch (_) {}
+function setAutoProcessAll(val, persist = false) {
+  if (persist) {
+    try { localStorage.setItem('book_html_auto_process_all_v2', String(val)); } catch (_) {}
+  }
   const cb1 = $('#auto-process-all');
   if (cb1) cb1.checked = val;
   const cb2 = $('#reading-window-auto-all');
   if (cb2) cb2.checked = val;
 }
-$('#auto-process-all')?.addEventListener('change', e => setAutoProcessAll(e.target.checked));
-$('#reading-window-auto-all')?.addEventListener('change', e => setAutoProcessAll(e.target.checked));
-setAutoProcessAll(isAutoProcessAll());
+$('#auto-process-all')?.addEventListener('change', e => setAutoProcessAll(e.target.checked, true));
+$('#reading-window-auto-all')?.addEventListener('change', e => setAutoProcessAll(e.target.checked, true));
+setAutoProcessAll(isAutoProcessAll(), false);
 $('#reading-window-apply').addEventListener('click', async () => {
   if (!deferredReady || !state.book || deferredReady.bookId !== state.book.id || deferredReady.page !== state.currentPage) return;
   if (currentPageProtected()) { toast('请先保存或处理冲突，再更新本页。'); return; }

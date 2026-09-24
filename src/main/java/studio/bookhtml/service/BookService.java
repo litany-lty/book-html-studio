@@ -27,6 +27,8 @@ public class BookService {
     @Autowired public BookService(BookStore store,PdfService pdf,AppProperties config,OutlineService outlines){this.store=store;this.pdf=pdf;this.config=config;this.outlines=outlines;this.statistics=new PageStatisticsCache(store);}
     /** U3：投影注入后，摘要标题使用统一投影；未注入走旧适配器（保守兼容）。 */
     @Autowired(required=false) public void setPresentation(BookPresentationService presentation){this.presentation=presentation;}
+    private CloudConsentService consentService;
+    @Autowired(required=false) public void setConsentService(CloudConsentService consentService){this.consentService=consentService;}
     public Book upload(MultipartFile file) {
         if(file==null||file.isEmpty())throw new ApiException(HttpStatus.BAD_REQUEST,"请选择 PDF 文件");
         String original=Optional.ofNullable(file.getOriginalFilename()).orElse("book.pdf");
@@ -39,7 +41,18 @@ public class BookService {
             Instant now=Instant.now();String safeName=safeFilename(original);String title=safeName.replaceFirst("(?i)\\.pdf$","");Book book=new Book(id,title,safeName,info.pages(),now,now,0,0);
             List<PdfService.Dimensions> dimensions=pdf.allDimensions(target);if(dimensions.size()!=info.pages())throw new ApiException(HttpStatus.BAD_REQUEST,"PDF 页数在导入期间发生变化");for(int i=0;i<dimensions.size();i++){var d=dimensions.get(i);store.writePage(id,Page.pending(i+1,d.width(),d.height()),false);}
             // 列表以 book.json 为发布标记：所有页准备好后再使新书可见。
-            store.writeBook(book);return book;
+            store.writeBook(book);
+            if (consentService != null) {
+                try {
+                    consentService.ensureDefaultConsent();
+                    var active = consentService.findActiveConsent(null, id);
+                    if (active != null) {
+                        Path bp = dir.resolve("cloud-consent.json");
+                        studio.bookhtml.store.DurableJson.write(bp, active, store.json(), 256 * 1024);
+                    }
+                } catch (Exception ignored) {}
+            }
+            return book;
         }catch(ApiException e){cleanup(dir);throw e;}catch(Exception e){cleanup(dir);throw new ApiException(HttpStatus.BAD_REQUEST,"PDF 文件无法读取或已损坏");}
     }
     public List<Book> list(){return store.listBooks().stream().map(this::refresh).toList();}

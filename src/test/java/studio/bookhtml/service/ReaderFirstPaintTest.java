@@ -10,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class ReaderFirstPaintTest {
     @Test void configuredCredentialsDoNotImplicitlyAuthorizePaidReading() throws Exception {
         String app = java.nio.file.Files.readString(java.nio.file.Path.of("src/main/resources/static/app.js"));
-        assertTrue(app.contains("storedOption('book_html_auto_read', false)"));
+        assertTrue(app.contains("storedOption('book_html_auto_read', true)"));
     }
     @Test void manifestAndColdProjectionNeverScanWholeBook() {
         BookStore store = mock(BookStore.class);

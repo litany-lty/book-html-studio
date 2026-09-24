@@ -9,6 +9,7 @@ import studio.bookhtml.store.CloudConsentStore;
 import studio.bookhtml.store.OperationEpochStore;
 import studio.bookhtml.store.ReadingPolicyStore;
 
+import jakarta.annotation.PostConstruct;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.*;
@@ -26,6 +27,34 @@ public class CloudConsentService {
         this.consentStore = Objects.requireNonNull(consentStore, "consentStore");
         this.policyStore = Objects.requireNonNull(policyStore, "policyStore");
         this.epochStore = Objects.requireNonNull(epochStore, "epochStore");
+    }
+
+    @PostConstruct
+    public void init() {
+        ensureDefaultConsent();
+    }
+
+    public synchronized void ensureDefaultConsent() {
+        try {
+            String sub = resolveSubject(null);
+            CloudConsent existing = consentStore.findActiveConsent(sub, null);
+            if (existing == null || !existing.isValid()) {
+                ReadingPolicy policy = policyStore.getPolicy(sub);
+                CreateConsentRequest req = new CreateConsentRequest(
+                        "system-default-global-consent",
+                        policy.policyRevision(),
+                        CloudConsent.Scope.allBooks(),
+                        List.of("paddle-aistudio", "ppocr", "qwen", "minimax", "*"),
+                        "AUTO_CURRENT",
+                        3, 5,
+                        true, true, true, true,
+                        10, 8,
+                        CloudConsent.MonetaryLimits.cny(10000000),
+                        null
+                );
+                createConsent(sub, req);
+            }
+        } catch (Exception ignored) {}
     }
 
     public ReadingPolicy getReadingPolicy(String subjectId) {

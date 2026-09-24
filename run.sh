@@ -26,6 +26,18 @@ fi
 if [[ -z "$BOOK_JAVA_HOME" && -d /Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home ]]; then
   BOOK_JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home
 fi
+if [[ -z "$BOOK_JAVA_HOME" ]] && command -v java >/dev/null 2>&1; then
+  _java_bin="$(command -v java)"
+  _java_real="$_java_bin"
+  while [[ -L "$_java_real" ]]; do
+    _target="$(readlink "$_java_real")"
+    if [[ "$_target" == /* ]]; then _java_real="$_target"; else _java_real="$(dirname "$_java_real")/$_target"; fi
+  done
+  _candidate="$(cd -- "$(dirname "$_java_real")/.." && pwd -P 2>/dev/null || true)"
+  if [[ -x "$_candidate/bin/java" ]]; then
+    BOOK_JAVA_HOME="$_candidate"
+  fi
+fi
 if [[ -z "$BOOK_JAVA_HOME" || ! -x "$BOOK_JAVA_HOME/bin/java" ]]; then
   printf '%s\n' '未找到 JDK 17，请先设置 JAVA_HOME。' >&2
   exit 1
@@ -40,6 +52,7 @@ export JAVA_HOME="$BOOK_JAVA_HOME"
 export PATH="$JAVA_HOME/bin:$PATH"
 
 BOOK_PORT="${PORT:-18765}"
+BOOK_BIND="${BIND:-0.0.0.0}"
 BOOK_APP_ARGS=()
 while (($#)); do
   case "$1" in
@@ -49,6 +62,18 @@ while (($#)); do
       if (($# < 2)); then printf '%s\n' '--server.port 缺少端口值。' >&2; exit 2; fi
       BOOK_PORT="$2"; shift 2
       ;;
+    --server.address=*) BOOK_BIND="${1#--server.address=}"; shift ;;
+    --server.address)
+      if (($# < 2)); then printf '%s\n' '--server.address 缺少地址值。' >&2; exit 2; fi
+      BOOK_BIND="$2"; shift 2
+      ;;
+    --bind=*) BOOK_BIND="${1#--bind=}"; shift ;;
+    --bind)
+      if (($# < 2)); then printf '%s\n' '--bind 缺少地址值。' >&2; exit 2; fi
+      BOOK_BIND="$2"; shift 2
+      ;;
+    --lan) BOOK_BIND="0.0.0.0"; shift ;;
+    --local) BOOK_BIND="127.0.0.1"; shift ;;
     *) BOOK_APP_ARGS+=("$1"); shift ;;
   esac
 done
@@ -56,8 +81,9 @@ if [[ ! "$BOOK_PORT" =~ ^[0-9]+$ ]] || ((BOOK_PORT < 1 || BOOK_PORT > 65535)); t
   printf '%s\n' "端口无效：${BOOK_PORT}" >&2
   exit 2
 fi
-# Bash 3.2 在 nounset 下不能展开空数组；显式端口也让检查端口与实际监听保持一致。
-BOOK_APP_ARGS+=("--server.port=$BOOK_PORT")
+export BIND="$BOOK_BIND"
+# Bash 3.2 在 nounset 下不能展开空数组；显式端口与绑定地址也让检查端口与实际监听保持一致。
+BOOK_APP_ARGS+=("--server.port=$BOOK_PORT" "--server.address=$BOOK_BIND")
 
 release_lock() {
   if ((BOOK_LOCK_HELD)); then
@@ -113,6 +139,35 @@ acquire_lock() {
   fi
   printf '%s\n' "$$" > "$BOOK_LOCK_DIR/pid"
   BOOK_LOCK_HELD=1
+}
+
+get_lan_ip() {
+  local ip=""
+  local def_if=""
+  def_if="$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')"
+  if [[ -n "$def_if" ]]; then
+    ip="$(ipconfig getifaddr "$def_if" 2>/dev/null || true)"
+  fi
+  if [[ -z "$ip" ]]; then
+    ip="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
+  fi
+  if [[ -z "$ip" ]]; then
+    ip="$(ifconfig 2>/dev/null | awk '/inet / && !/127\.0\.0\.1/ {print $2; exit}')"
+  fi
+  printf '%s' "$ip"
+}
+
+print_access_urls() {
+  printf '%s\n' "纸页工坊：http://127.0.0.1:${BOOK_PORT}（Ctrl+C 停止）"
+  if [[ "$BOOK_BIND" == "0.0.0.0" || "$BOOK_BIND" != "127.0.0.1" ]]; then
+    local lan_ip
+    lan_ip="$(get_lan_ip)"
+    if [[ -n "$lan_ip" ]]; then
+      printf '%s\n' "局域网访问：http://${lan_ip}:${BOOK_PORT}（手机连同一 Wi-Fi 打开；仅限局域网，无登录保护）"
+    else
+      printf '%s\n' "局域网访问：http://<本机局域网IP>:${BOOK_PORT}（手机连同一 Wi-Fi 打开）"
+    fi
+  fi
 }
 
 listening_pids() {
@@ -198,15 +253,7 @@ if [[ -n "$(listening_pids)" ]]; then
   exit 1
 fi
 
-printf '%s\n' "纸页工坊：http://127.0.0.1:${BOOK_PORT}（Ctrl+C 停止）"
-if [[ "${BIND:-127.0.0.1}" == "0.0.0.0" ]]; then
-  BOOK_LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
-  if [[ -n "$BOOK_LAN_IP" ]]; then
-    printf '%s\n' "局域网访问：http://${BOOK_LAN_IP}:${BOOK_PORT}（手机连同一 Wi-Fi 打开；仅限局域网，无登录保护）"
-  else
-    printf '%s\n' "局域网访问：http://<本机局域网IP>:${BOOK_PORT}（手机连同一 Wi-Fi 打开）"
-  fi
-fi
+print_access_urls
 # 资源预算（阶段2，均为暂定参数）：BOOK_XMX 为 JVM 堆上限（默认 768m，运行中不可任意扩大）；
 # RENDER_MAX_CONCURRENT / RENDER_MAX_IN_FLIGHT_MB / RENDER_MAX_WAIT_MS 控制共享渲染准入；
 # RENDER_WORKER_TIMEOUT_S 控制独立解码进程超时。
@@ -230,6 +277,7 @@ if ((BOOK_STARTED == 0)); then
   BOOK_CHILD_PID=""
   exit 1
 fi
+printf '%s\n' "服务已就绪，正在监听端口 ${BOOK_PORT}。"
 
 release_lock
 stop_child() {

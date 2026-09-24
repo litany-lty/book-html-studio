@@ -49,7 +49,7 @@
     <form id="job-form" class="job-form" hidden>
       <label class="field"><span>页码范围</span><input id="page-range" name="pages" value="1-20" placeholder="例如 1-20 或 1,3,25" required><small>默认前 20 页，点击后才会识别；全书需主动选择。疑似漏识文字时默认至多补识 4 个同通道区域，可能增加费用，可由服务端关闭。</small></label>
       <label class="check full-book"><input id="all-pages" type="checkbox"><span>处理全部页面</span></label>
-      <label id="auto-process-all-label" class="check"><input id="auto-process-all" type="checkbox"><span>随读就绪后自动处理全书其他页<small>开启随读时，即时准备当前阅读窗口后，在后台继续处理本书其余未转换页面（仅限当前书籍）。</small></span></label>
+      <label id="auto-process-all-label" class="check"><input id="auto-process-all" type="checkbox" checked><span>随读就绪后自动处理全书其他页<small>开启随读时，即时准备当前阅读窗口后，在后台继续处理本书其余未转换页面（仅限当前书籍）。</small></span></label>
       <fieldset><legend>识别通道</legend><div id="provider-options" class="provider-options"></div><p id="provider-note" class="field-note">正在读取服务端识别配置…</p></fieldset>
       <label id="qwen-assist-label" class="check assist-check"><input id="qwen-assist" name="assist" type="checkbox"><span>启用 Qwen3.8-Max 结构整理与疑点建议<small id="qwen-assist-note">会额外调用阿里云服务，建议不会自动覆盖 OCR 原文。</small></span></label>
       <label class="field"><span>版面方向</span><select name="layout"><option value="auto">自动判断</option><option value="vertical">竖排</option><option value="horizontal">横排</option></select></label>
@@ -235,7 +235,7 @@
     </form>
   </dialog>
   <dialog id="reading-window-dialog" class="reading-window-dialog" aria-labelledby="reading-window-heading"><form method="dialog"><div class="reading-window-dialog-head"><div><h2 id="reading-window-heading">随读识别</h2><p>只准备当前页、前 3 页和后 5 页；翻页后停留约 1 秒才送识。阅读不等待识别，未完成时照常显示原稿。</p></div><button class="button quiet" value="cancel" aria-label="关闭">关闭</button></div><p id="reading-window-choice"></p><label class="checkbox"><input id="reading-window-auto-start" type="checkbox" checked>打开书籍时自动随读处理（使用已配置通道，可能计费）</label>
-      <label class="check" style="margin: 12px 0 6px;"><input id="reading-window-auto-all" type="checkbox"><span>随读就绪后自动处理全书其他页</span></label><p class="reading-window-caution">开启后可能产生云服务用量。已识别并缓存的页面不会重复送识；本次选择固定到停止为止。关闭页面或切换书籍将停止新任务，已送出的当前页可能完成。</p><div class="reading-window-dialog-actions"><button id="reading-window-enable" class="button primary" type="button">确认开启随读识别</button></div></form></dialog>
+      <label class="check" style="margin: 12px 0 6px;"><input id="reading-window-auto-all" type="checkbox" checked><span>随读就绪后自动处理全书其他页</span></label><p class="reading-window-caution">开启后可能产生云服务用量。已识别并缓存的页面不会重复送识；本次选择固定到停止为止。关闭页面或切换书籍将停止新任务，已送出的当前页可能完成。</p><div class="reading-window-dialog-actions"><button id="reading-window-enable" class="button primary" type="button">确认开启随读识别</button></div></form></dialog>
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
   <script src="/reader-navigation.js"></script>
   <script src="/reading-layout.js"></script>
