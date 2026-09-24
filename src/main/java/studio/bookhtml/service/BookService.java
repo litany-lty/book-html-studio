@@ -125,29 +125,13 @@ public class BookService {
         // A1-C09：版本号必须为非负整数，不经截断解释
         if(targetRevision<0||expectedRevision<0)throw new ApiException(HttpStatus.BAD_REQUEST,"revision 非法");
         try{Page next=store.revertPage(id,n,targetRevision,expectedRevision);touchAfterCommit(id);return next;}catch(ApiException e){throw e;}catch(IOException e){throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,"回退版本失败");}}
-    public Page checkComprehensibility(String id, int n) throws Exception {
-        if (comprehensibilityService == null) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "段落可理解性自检服务尚未装配");
-        }
-        Page old = page(id, n);
-        if ("PROCESSING".equals(old.status())) {
-            throw new ApiException(HttpStatus.CONFLICT, "本页正在识别，请等待完成后再进行自检");
-        }
-        List<Block> checkedBlocks = comprehensibilityService.checkPage(id, n, old.blocks(), () -> false);
-        BlockValidator.validate(checkedBlocks);
-        Page next = new Page(n, old.width(), old.height(), old.status(), old.provider(),
-                checkedBlocks, old.warnings(), old.reviewed(), old.error(), old.sourceRecords(), null);
-        try {
-            Page committed = store.commitPage(id, next, BookStore.revisionOrZero(old), CommitActor.MANUAL, null, CommitOp.MANUAL_SAVE);
-            touchAfterCommit(id);
-            return committed;
-        } catch (PageConflictException e) {
-            throw e;
-        } catch (ApiException e) {
-            throw e;
-        } catch (IOException e) {
-            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "保存自检结果失败");
-        }
+    /** Legacy endpoint is a local preview only; automatic cloud review runs under the page engine's authority. */
+    public Page checkComprehensibility(String id,int n) {
+        Page old=page(id,n);
+        if(comprehensibilityService==null)return old;
+        List<Block> checked=comprehensibilityService.checkLocal(old.blocks());
+        return new Page(old.pageNumber(),old.width(),old.height(),old.status(),old.provider(),checked,old.warnings(),
+                old.reviewed(),old.error(),old.sourceRecords(),old.revision(),old.lastCommitId());
     }
     public List<Map<String,Object>> search(String id,String query){
         Book b=store.readBook(id);

@@ -1368,3 +1368,24 @@ progress::-moz-progress-bar { border-radius: 999px; }
 .progress-area.is-settled progress { display: none; }
 .progress-area.is-settled { border-top-color: transparent; padding-top: 2px; }
 .progress-area.is-settled .inline-message { margin-top: 0; }
+
+/* Reading-first action hierarchy: task details are a deliberate dialog, not an always-on billboard. */
+#reading-window-dialog { max-width: min(820px, calc(100vw - 24px)); max-height: min(90dvh, 960px); overflow-y: auto; }
+#reading-window-dialog #job-panel { border: 0; border-top: 1px solid var(--line); margin-top: 16px; padding: 16px 0 0; background: transparent; }
+#reading-window-dialog .job-title { align-items: flex-start; flex-wrap: wrap; }
+#reading-window-dialog .job-form { grid-template-columns: repeat(2,minmax(0,1fr)); }
+.reader-page-actions { position: relative; }
+.reader-page-actions > summary { list-style: none; cursor: pointer; min-height: 40px; display: inline-flex; align-items: center; }
+.reader-page-actions > summary::-webkit-details-marker { display: none; }
+.reader-page-menu { position: absolute; right: 0; top: calc(100% + 4px); min-width: 152px; padding: 8px; z-index: 20; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-control); box-shadow: var(--shadow-sm); }
+.reader-page-menu:has(button[hidden])::after { content: '本页操作见页头状态'; display: block; color: var(--muted); font-size: 12px; padding: 6px; }
+.reader-primary-actions { gap: 4px; }
+.page-message.is-processing { animation: none; }
+@media(max-width:620px) { #reading-window-dialog .job-form { grid-template-columns: 1fr; } .reader-page-actions > summary { min-height: 44px; } }
+
+/* Fixed focus geometry is loaded with the shell and keyed on each affected element. */
+#workspace.focus-layout { position: fixed; inset: 0; width: 100%; height: 100vh; height: 100dvh; display: block; }
+#reader.focus-layout { height: 100vh; height: 100dvh; min-width: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable;
+  padding: max(12px,env(safe-area-inset-top,0px)) max(clamp(12px,2vw,28px),env(safe-area-inset-right,0px))
+    calc(var(--focus-footer-height,64px) + 28px) max(clamp(12px,2vw,28px),env(safe-area-inset-left,0px)); }
+#reading-progress.focus-layout { left: 0 !important; right: 0 !important; width: 100%; grid-template-columns: auto minmax(0,1fr) auto; }

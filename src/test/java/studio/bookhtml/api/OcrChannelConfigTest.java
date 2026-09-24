@@ -19,10 +19,13 @@ import org.springframework.http.HttpStatus;
 
 class OcrChannelConfigTest {
     @Test
-    void reportsOnlyTwoChannelsAndAiStudioDefault() {
+    void reportsTwoOcrChannelsAndExplicitHandwritingChoice() {
         Map<String, Object> baiduOnly = controller(true, false).config();
         assertEquals("paddle-aistudio", baiduOnly.get("defaultProvider"));
-        assertEquals(2, ((List<?>) baiduOnly.get("providers")).size());
+        assertEquals(3, ((List<?>) baiduOnly.get("providers")).size());
+        assertEquals(true,provider(baiduOnly,"handwriting").get("handwritingOnly"));
+        assertEquals(false,provider(baiduOnly,"handwriting").get("available"));
+        assertEquals(2,((List<?>)baiduOnly.get("ocrChannels")).size());
         assertEquals(true, provider(baiduOnly, "ppocr").get("available"));
         assertEquals(false, provider(baiduOnly, "paddle-aistudio").get("available"));
         assertEquals(true, channel(baiduOnly, "ppocr").get("configured"));

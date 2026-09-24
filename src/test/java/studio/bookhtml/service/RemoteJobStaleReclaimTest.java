@@ -123,4 +123,20 @@ class RemoteJobStaleReclaimTest {
                         deadline, cancelled::get));
         canceller.join();
     }
+
+    @Test void remoteUnknownCannotBeReclaimedByElapsedTimeAlone()throws Exception {
+        var registry=new RemoteJobRegistry(dataDir,json);
+        var record=registry.register("book-1",1,"paddle-aistudio","account","fingerprint","usage");
+        registry.markSubmitting(record.handleId(),"physical");registry.markRemoteUnknown(record.handleId(),"transport-unknown");
+        makeStale(record.handleId());var recovered=new RemoteJobRegistry(dataDir,json);
+        assertEquals(1,recovered.activeJobCount());assertFalse(recovered.get(record.handleId()).isTerminal());
+    }
+    @Test void exactResumeWorksAtCapacityButCannotCrossBookOrAccount()throws Exception {
+        var registry=new RemoteJobRegistry(dataDir,json);
+        var record=registry.register("book-1",1,"paddle-aistudio","account","fingerprint","usage");
+        registry.register("book-1",2,"paddle-aistudio","account","second","usage2");registry.register("book-1",3,"paddle-aistudio","account","third","usage3");
+        assertEquals(record.handleId(),registry.register("book-1",1,"paddle-aistudio","account","fingerprint","usage").handleId());
+        assertThrows(ApiException.class,()->registry.register("book-2",1,"paddle-aistudio","account","fingerprint","usage"));
+        assertThrows(ApiException.class,()->registry.register("book-1",1,"paddle-aistudio","other-account","fingerprint","usage"));
+    }
 }

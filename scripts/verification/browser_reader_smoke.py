@@ -10,11 +10,23 @@ parser=argparse.ArgumentParser(); parser.add_argument('--base', default='http://
 out=Path(args.out);out.mkdir(parents=True,exist_ok=True)
 base=args.base; book='bbbbbbbb-2222-2222-2222-222222222222'
 
+def wait_script(page, predicate, timeout=30000):
+    """Use CDP function calls rather than page-side eval; keep production CSP intact."""
+    import time
+    deadline=time.monotonic()+timeout/1000
+    while time.monotonic()<deadline:
+        if page.evaluate("() => ("+predicate+")"): return
+        page.wait_for_timeout(40)
+    diagnostics=page.evaluate("() => ({progress:document.querySelector('#page-processing-progress')?.textContent,paper:document.querySelector('#paper')?.textContent?.slice(0,160),messages:[...document.querySelectorAll('.toast')].map(x=>x.textContent)})")
+    print('SYNTHETIC_SMOKE_DIAGNOSTIC', diagnostics)
+    raise AssertionError("Browser condition was not met: "+predicate)
+
+
 def check_environment_settings(page):
     """Exercise the real settings module before any reading/paid-work lease is admitted."""
     names=['paddleAccessToken','ppocrApiKey','ppocrSecretKey','qwenApiKey','jevApiKey']
     page.locator('#settings-open').click()
-    page.wait_for_function("!document.querySelector('#settings-form').hidden")
+    wait_script(page, "!document.querySelector('#settings-form').hidden")
     before=page.request.get(base+'/api/settings').json()
     assert before['secretStorage']['mode']=='ENV_ONLY' and not before['secretStorage']['writable']
     for name in names:
@@ -26,14 +38,14 @@ def check_environment_settings(page):
     with page.expect_response(is_put) as saved:
         page.locator('#settings-save').click()
     assert saved.value.status==200, 'non-secret settings must remain writable'
-    page.wait_for_function("!document.querySelector('#settings-save').disabled && document.querySelector('#settings-save-status').textContent.includes('配置已保存')")
+    wait_script(page, "!document.querySelector('#settings-save').disabled && document.querySelector('#settings-save-status').textContent.includes('配置已保存')")
     after=page.request.get(base+'/api/settings').json()
     assert after['revision']==before['revision']+1
     assert 'qa-mock-not-a-credential' not in json.dumps(after)
     page.locator('#settings-close').click()
-    page.wait_for_function("!document.querySelector('#settings-dialog').open")
+    wait_script(page, "!document.querySelector('#settings-dialog').open")
     page.locator('#settings-open').click()
-    page.wait_for_function("!document.querySelector('#settings-form').hidden")
+    wait_script(page, "!document.querySelector('#settings-form').hidden")
     for name in names:
         assert page.locator(f'#settings-form [name="{name}"]').input_value()==''
     # Emulate a stale/autofilled value and a failed write without sending either to a provider.
@@ -50,7 +62,7 @@ def check_environment_settings(page):
     page.route('**/api/settings',reject_write)
     try:
         page.locator('#settings-save').click()
-        page.wait_for_function("document.querySelector('#settings-status').textContent.includes('配置未确认保存') && !document.querySelector('#settings-save').disabled")
+        wait_script(page, "document.querySelector('#settings-status').textContent.includes('配置未确认保存') && !document.querySelector('#settings-save').disabled")
         assert len(requests)==1
         for name in names:
             control=page.locator(f'#settings-form [name="{name}"]')
@@ -59,7 +71,7 @@ def check_environment_settings(page):
         page.unroute('**/api/settings',reject_write)
     assert page.request.get(base+'/api/settings').json()['revision']==after['revision']
     page.locator('#settings-close').click()
-    page.wait_for_function("!document.querySelector('#settings-dialog').open")
+    wait_script(page, "!document.querySelector('#settings-dialog').open")
     return {'mode':'ENV_ONLY','secret_controls_read_only':True,'non_secret_save_and_reopen':True,
             'failed_save_scrubs_inputs':True,'disabled_credentials_not_submitted':True}
 
@@ -68,13 +80,13 @@ with sync_playwright() as p:
     page=browser.new_page(viewport={'width':1440,'height':1000},reduced_motion='reduce')
     errors=[]; page.on('pageerror',lambda e: errors.append(str(e)))
     page.add_init_script(f"localStorage.setItem('paper-studio:{book}:reading', JSON.stringify({{page:8, view:'reading'}}));")
-    # This fixture explicitly opts in; a fresh browser must not implicitly authorize OCR.
-    page.add_init_script("localStorage.setItem('book_html_auto_read', 'true');")
+    # Model a browser that explicitly opted in after the v3 preference migration; a fresh browser remains unconsented.
+    page.add_init_script("localStorage.setItem('book_html_auto_read_default_v3', 'true'); localStorage.setItem('book_html_auto_read', 'true');")
     page.goto(base,wait_until='domcontentloaded')
-    page.wait_for_function("document.querySelector('#book-select').options.length > 1")
+    wait_script(page, "document.querySelector('#book-select').options.length > 1")
     settings_result=check_environment_settings(page)
     page.evaluate("id=>{const el=document.querySelector('#book-select');el.value=id;el.dispatchEvent(new Event('change'));}",book)
-    page.wait_for_function("document.querySelector('#page-processing-progress').textContent.includes('10%')",timeout=15000)
+    wait_script(page, "document.querySelector('#page-processing-progress').textContent.includes('10%')",timeout=15000)
     page.screenshot(path=str(out/'desktop-processing.png'))
     result={'errors':errors,'progress':page.locator('#page-processing-progress').inner_text(),'settings':settings_result}
     result['positions']=page.evaluate("""() => { const r=id=>{const x=document.querySelector(id).getBoundingClientRect();return {x:x.x,y:x.y,width:x.width,height:x.height}};return {save:r('#page-save-status'), progress:r('#page-processing-progress'), reader:r('#reader'), paper:r('#paper')}; }""")
@@ -96,7 +108,7 @@ with sync_playwright() as p:
     assert 'qa-mock-not-a-credential' not in json.dumps(settings)
     result['saved_credentials_not_returned']=True
     page.locator('#page-jump').fill('27');page.locator('#page-jump').press('Enter')
-    page.wait_for_function("document.querySelector('#page-jump').value === '27'")
+    wait_script(page, "document.querySelector('#page-jump').value === '27'")
     deadline=time.time()+10
     while time.time()<deadline:
         calls=page.request.get(base+'/__qa/reading-calls').json()['calls']
@@ -115,8 +127,8 @@ with sync_playwright() as p:
     result['mobile_status_pair']=pair
     # Release the isolated mock calls; this fixture never contacts a paid provider.
     for _ in range(4): page.request.post(base+'/__qa/release')
-    page.wait_for_function("document.querySelector('#paper').textContent.includes('这是第 27 页')",timeout=15000)
-    page.wait_for_function("document.querySelector('#page-processing-progress').hidden",timeout=15000)
+    wait_script(page, "document.querySelector('#paper').textContent.includes('这是第 27 页')",timeout=15000)
+    wait_script(page, "document.querySelector('#page-processing-progress').hidden",timeout=15000)
     result['ready_progress_hidden']=page.locator('#page-processing-progress').is_hidden()
     page.screenshot(path=str(out/'mobile-ready.png'))
     result['errors']=errors

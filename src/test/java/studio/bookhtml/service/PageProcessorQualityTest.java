@@ -155,7 +155,7 @@ class PageProcessorQualityTest {
         assertNotNull(json);
     }
 
-    @Test void processAutomaticallyInvokesComprehensibilityCheckWhenConfigured() throws Exception {
+    @Test void baselineAlwaysRunsLocalCheckWithoutBlockingOnCloud() throws Exception {
         BookStore store = mock(BookStore.class);
         PdfService pdf = mock(PdfService.class);
         NativeTextExtractor nativeText = mock(NativeTextExtractor.class);
@@ -178,9 +178,11 @@ class PageProcessorQualityTest {
                 "这是一段测试段落内容，用于验证自动自检。".repeat(15), "这是一段测试段落内容，用于验证自动自检。".repeat(15),
                 null, true, false, null, "native", null, null, null);
         when(nativeText.extract(file, 1, "auto")).thenReturn(Optional.of(List.of(block)));
-        when(compService.checkPage(eq("book-comp"), eq(1), any(), any())).thenReturn(List.of(block));
+        when(compService.checkLocal(any())).thenReturn(List.of(block));
 
         processor.process("book-comp", 1, "native", "auto", false, false, () -> false);
-        verify(compService, times(1)).checkPage(eq("book-comp"), eq(1), any(), any());
+        verify(compService,times(1)).checkLocal(any());
+        verify(compService,never()).checkPage(anyString(),anyInt(),any(),any());
+        verify(compService,never()).check(anyString(),anyInt(),any(),any());
     }
 }

@@ -33,7 +33,8 @@ public final class OcrTextRecovery {
     public static Result recover(BufferedImage image,List<Block> source,String layout,
                                  BooleanSupplier cancelled,int maxPhysicalStarts,Recognizer recognizer) throws Exception {
         List<Block> initial=source==null?List.of():List.copyOf(source);
-        if(bodyChars(initial)>0)return new Result(initial,
+        boolean sparse=bodyChars(initial)>0 && bodyChars(initial)<80 && textCoverage(initial)<.12;
+        if(bodyChars(initial)>0 && !sparse)return new Result(initial,
                 initial.stream().anyMatch(b->"ocr-region-unresolved".equals(b.source()))
                     ? PARTIAL+" 跨页扫描有区域未获得可用文字，已保留原图区域供核对" : null);
         check(cancelled);
@@ -43,8 +44,8 @@ public final class OcrTextRecovery {
         List<Block> recovered=new ArrayList<>();
         // Preserve every original region/folio as evidence, not as inferred text.
         for(Block b:initial)recovered.add(copy(b,b.id(),recovered.size(),b.bbox(),b.sourceRect(),b.source(),b.sourceIds()));
-        int unresolved=0, found=0;
-        int startsRemaining = Math.max(0, maxPhysicalStarts);
+        int unresolved=0, found=bodyChars(initial)>0?1:0;
+        int startsRemaining = Math.max(0, Math.min(maxPhysicalStarts,sparse?2:4));
         long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(90);
         BooleanSupplier stopped=()->cancelled.getAsBoolean()||System.nanoTime()>=deadline;
         List<Region> regions=regions(image,layout);
@@ -87,6 +88,7 @@ public final class OcrTextRecovery {
                     // Non-overlapping ownership cores suppress duplicated overlap text
                     // without deleting identical words that occur elsewhere on the page.
                     if(cx<r.core[0]||cx>=r.core[0]+r.core[2]||cy<r.core[1]||cy>=r.core[1]+r.core[3])continue;
+                    if(sparse && coveredCenter(initial,cx,cy))continue;
                     String id="region-"+(index+1)+"-"+b.id();
                     if(id.length()>120)id="region-"+UUID.nameUUIDFromBytes(id.getBytes(java.nio.charset.StandardCharsets.UTF_8));
                     double[] raw={box[0]*image.getWidth(),box[1]*image.getHeight(),box[2]*image.getWidth(),box[3]*image.getHeight()};
@@ -117,6 +119,17 @@ public final class OcrTextRecovery {
         // overprint. Always retain partial status until a human has checked the source.
         return new Result(List.copyOf(recovered),PARTIAL+" "+RECOVERED+" 已恢复部分局部转录，原图和原始区域保留；"+
                 (unresolved>0?unresolved+" 个区域未获得可用文字；":"")+"防盗印、水印、手写或网格干扰可能仍有漏字，需对照原稿核对");
+    }
+    private static double textCoverage(List<Block> source) {
+        double coverage=0;
+        for(Block b:source)if(b!=null&&bodyChars(List.of(b))>0&&b.bbox()!=null&&b.bbox().length==4)
+            coverage+=Math.max(0,b.bbox()[2])*Math.max(0,b.bbox()[3]);
+        return Math.min(1,coverage);
+    }
+    private static boolean coveredCenter(List<Block> source,double x,double y) {
+        for(Block b:source)if(b!=null&&bodyChars(List.of(b))>0&&b.bbox()!=null&&b.bbox().length==4) {
+            double[] box=b.bbox();if(x>=box[0]&&x<=box[0]+box[2]&&y>=box[1]&&y<=box[1]+box[3])return true;
+        }return false;
     }
     private static int retainMissing(List<Block> out, List<Region> regions, int from) {
         for(int i=from;i<regions.size();i++) {

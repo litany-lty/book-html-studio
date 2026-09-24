@@ -135,14 +135,14 @@ test('restarted server can recover an attempt even after old event version 100; 
   } finally {progress.clear();globalThis.document=previous;}
 });
 
-test('failed processing shows retry button and clicking invokes onRetry', () => {
+test('failed processing retains a usable retry control while preventing duplicate clicks', async () => {
   const previous = globalThis.document;
   const progressEl = { hidden: true, dataset: {}, style: { setProperty() {} }, setAttribute(k, v) { this[k] = v; }, removeAttribute(k) { delete this[k]; } };
   const retryBtn = {
     hidden: true,
     handlers: {},
     addEventListener(type, handler) { this.handlers[type] = handler; },
-    click() { if (this.handlers.click) this.handlers.click(); }
+    click() { if (this.handlers.click) return this.handlers.click(); }
   };
   globalThis.document = {
     hidden: false,
@@ -154,9 +154,13 @@ test('failed processing shows retry button and clicking invokes onRetry', () => 
   try {
     progress.setPage('A', 1, { status: 'FAILED', revision: 1 });
     assert.equal(retryBtn.hidden, false);
-    retryBtn.click();
+    const pending = retryBtn.click();
     assert.equal(retried, 1);
-    assert.equal(retryBtn.hidden, true);
+    assert.equal(retryBtn.disabled, true);
+    retryBtn.click(); assert.equal(retried, 1);
+    await pending;
+    assert.equal(retryBtn.disabled, false);
+    assert.equal(retryBtn.hidden, false);
   } finally {
     progress.clear();
     globalThis.document = previous;

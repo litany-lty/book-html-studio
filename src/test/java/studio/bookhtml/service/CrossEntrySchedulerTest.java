@@ -62,7 +62,8 @@ class CrossEntrySchedulerTest {
         Thread.sleep(50);
 
         // Submit P3 (page 1), P2 (page 2), P1 (page 3)
-        CompletableFuture<PageProcessingService.Result> f1 = scheduler.schedule(createRequest(bookId, 1), PageWorkScheduler.Priority.P3);
+        PageProcessingService.Request firstRequest=createRequest(bookId,1);
+        CompletableFuture<PageProcessingService.Result> f1 = scheduler.schedule(firstRequest, PageWorkScheduler.Priority.P3);
         CompletableFuture<PageProcessingService.Result> f2 = scheduler.schedule(createRequest(bookId, 2), PageWorkScheduler.Priority.P2);
         CompletableFuture<PageProcessingService.Result> f3 = scheduler.schedule(createRequest(bookId, 3), PageWorkScheduler.Priority.P1);
 
@@ -71,7 +72,7 @@ class CrossEntrySchedulerTest {
         assertTrue(promoted);
 
         // Scheduling page 1 again with P0 should return the same future without duplicate queue entries
-        CompletableFuture<PageProcessingService.Result> f1Again = scheduler.schedule(createRequest(bookId, 1), PageWorkScheduler.Priority.P0);
+        CompletableFuture<PageProcessingService.Result> f1Again = scheduler.schedule(firstRequest, PageWorkScheduler.Priority.P0);
         assertSame(f1, f1Again);
 
         // Release blocker

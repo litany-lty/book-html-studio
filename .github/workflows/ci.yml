@@ -94,9 +94,12 @@ jobs:
             for suite in FinalGapRegressionTest PriorityTaskSchedulerTest QwenAssistCoordinatorTest ReadingWindowServiceTest PageAttemptLifecycleTest RemediationLifecycleTest ProgressReducerRegressionTest QwenRequestGateTest DurableReprocessTest PageStatisticsCacheTest PagePublicationAuthorityTest PublicationProcessCrashTest UnifiedPageEngineTest QwenPhysicalCallTest QwenLedgerIntegrationTest; do
               cp "target/surefire-reports/TEST-studio.bookhtml.service.$suite.xml" "test-results/lifecycle-repeat-$round/"
             done
-            mvn --batch-mode -Dtest=IndexReadIntegrityTest,SourcePublicationIntegrityTest test
+            mvn --batch-mode -Dtest=IndexReadIntegrityTest,SourcePublicationIntegrityTest,AutomaticComprehensibilityTest,HandwritingTranscribeServiceTest,PageWorkSchedulerOwnershipTest,RemoteJobStaleReclaimTest test
             cp target/surefire-reports/TEST-studio.bookhtml.service.IndexReadIntegrityTest.xml "test-results/lifecycle-repeat-$round/"
             cp target/surefire-reports/TEST-studio.bookhtml.store.SourcePublicationIntegrityTest.xml "test-results/lifecycle-repeat-$round/"
+            for suite in AutomaticComprehensibilityTest HandwritingTranscribeServiceTest PageWorkSchedulerOwnershipTest RemoteJobStaleReclaimTest; do
+              cp "target/surefire-reports/TEST-studio.bookhtml.service.$suite.xml" "test-results/lifecycle-repeat-$round/"
+            done
           done
       - name: Build manifest
         run: |

@@ -125,6 +125,11 @@ export function initFocusReading({ document: doc = document, model = state, onPr
       doc.querySelector('[data-view="reading"]')?.click();
     }
     setClass('focus-reading', enabled);
+    // Local classes also invalidate the geometry after a native dialog closes;
+    // do not depend solely on ancestor-class style invalidation for fixed elements.
+    for (const node of [doc.getElementById('workspace'), reader, progress]) {
+      if (node && node.classList.contains('focus-layout') !== enabled) node.classList.toggle('focus-layout', enabled);
+    }
     for (const node of [previous, next, exit, help]) node.hidden = !enabled;
     const unavailable = Boolean(enabled && model.page && !paper.querySelector('.reading-flow'));
     setClass('focus-unavailable', unavailable);

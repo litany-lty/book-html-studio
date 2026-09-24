@@ -57,7 +57,10 @@ function olderRevision(incoming, current) {
 function renderReadingWindowStatus(snapshot = readingSnapshot) {
   readingSnapshot = snapshot;
   const currentProgress = snapshot?.pages?.find(p => p.pageNumber === state.currentPage)?.processing;
-  if (currentProgress) pageProgress.update(currentProgress);
+  if (currentProgress) {
+    pageProgress.update(currentProgress);
+    if (['SUCCEEDED','PARTIAL','FAILED','CANCELLED','INTERRUPTED','UNKNOWN'].includes(currentProgress.lifecycle)) { state.reprocessingPage = null; convertingState.isReprocessing = false; }
+  }
   const active = readingWindow?.active() || false;
   const bar = $('#reading-window-bar');
   bar.hidden = !active && !snapshot && !deferredReady;
@@ -272,13 +275,12 @@ function selectedProvider() {
   const checked = $('#provider-options input[name="provider"]:checked')?.value;
   if (checked) return checked;
   const defaultProvider = state.config?.defaultProvider || 'paddle-aistudio';
-  const available = state.config?.providers?.find(p => p.id === defaultProvider && p.available)
-    || state.config?.providers?.find(p => p.available);
+  const available = state.config?.providers?.find(p => p.id === defaultProvider && p.available);
   return available?.id || defaultProvider;
 }
 
 const storedOption = (key, fallback) => { try { const value = localStorage.getItem(key); return value == null ? fallback : value === 'true'; } catch (_) { return fallback; } };
-const isAutoProcessAll = () => storedOption('book_html_auto_process_all_v2', true);
+const isAutoProcessAll = () => storedOption('book_html_auto_process_all_v2', false);
 // A-04：随读默认关闭。此前默认 true（并被下面的迁移强制写为 true），打开一本书就自动开启随读：
 // 既会未经确认调用云端识别消耗额度，又会独占本书使批量任务永远 409（书页永远"解析不出来"）。
 // 这里回到 README 与 U1/U2 的契约：必须由用户显式开启，浏览器记忆仅记录用户自己的选择。
@@ -298,7 +300,7 @@ async function ensureReadingWindowActive() {
   const provider = selectedProvider();
   // 逐页自动派发的随读窗口只支持印刷体通道；手写转写需整页手动处理。
   const providerConfig = state.config?.providers?.find(p => p.id === provider && p.available && !p.handwritingOnly)
-    || state.config?.providers?.find(p => p.available && !p.handwritingOnly);
+    ;
   if (!providerConfig) return;
   const bookId = state.book.id, scope = bookRequest;
   const policy = await api.readingPolicy().catch(() => null);
@@ -389,9 +391,10 @@ function updateAssistAvailability() {
   input.checked = available && Boolean(assistPreference);
   $('#qwen-assist-label').classList.toggle('disabled', !available);
   const model = assist?.model || 'Qwen3.8-Max';
-  if (!assist?.configured) $('#qwen-assist-note').textContent = '结构辅助未配置；请从顶栏“工具配置”填写百炼凭据并开启 Qwen。';
-  else if (!cloudPrimary) $('#qwen-assist-note').textContent = '本地识别模式下不调用云端结构辅助。';
-  else $('#qwen-assist-note').textContent = `${model} 会额外读取完整页面和 OCR 来源块，只给出顺序、分类及疑点建议，不自动覆盖原文，并产生账户用量。`;
+  const automaticNote = '自动可理解性自检默认运行，无需单独配置；本地检查不外发。';
+  if (!assist?.configured) $('#qwen-assist-note').textContent = automaticNote + '当前云自检和结构重排不可用，保留原文与本地疑点。';
+  else if (!cloudPrimary) $('#qwen-assist-note').textContent = automaticNote + '云自检仅在已有授权和预算内执行；本地识别不额外启用结构重排。';
+  else $('#qwen-assist-note').textContent = automaticNote + `${model} 云自检使用已有授权和预算；此选项另启用整页结构重排，产生额外用量，建议不自动覆盖原文。`;
 }
 
 function updateSplitSpreadsAvailability() {
@@ -496,15 +499,11 @@ function isCurrentPageConverting() {
 function renderJobHeading() {
   const headingEl = $('#job-heading');
   const titleContainer = $('#job-panel .job-title');
-  const retryHeaderBtn = $('#retry-page-header');
-  const reloadHeaderBtn = $('#reload-page-header');
   const readerReloadBtn = $('#reader-reload-page');
   if (!headingEl) return;
   if (!state.book) {
     headingEl.textContent = '开始转换';
     titleContainer?.classList.remove('is-converting');
-    retryHeaderBtn?.setAttribute('hidden', '');
-    reloadHeaderBtn?.setAttribute('hidden', '');
     readerReloadBtn?.setAttribute('hidden', '');
     return;
   }
@@ -514,38 +513,19 @@ function renderJobHeading() {
   const isReady = state.page?.status === 'READY' && !converting;
   const isReprocessing = Boolean(state.reprocessingPage === pageNum || convertingState.isReprocessing);
 
-  if (retryHeaderBtn) {
-    if (isFailed) retryHeaderBtn.removeAttribute('hidden');
-    else retryHeaderBtn.setAttribute('hidden', '');
-  }
-  if (reloadHeaderBtn) {
-    if (converting && isReprocessing) {
-      reloadHeaderBtn.removeAttribute('hidden');
-      reloadHeaderBtn.disabled = true;
-      reloadHeaderBtn.innerHTML = '<span class="reprocessing-inline-spinner"></span> 正在二次处理…';
-    } else if (isReady) {
-      reloadHeaderBtn.removeAttribute('hidden');
-      reloadHeaderBtn.disabled = false;
-      reloadHeaderBtn.textContent = '重新处理本页';
-    } else {
-      reloadHeaderBtn.setAttribute('hidden', '');
-      reloadHeaderBtn.disabled = false;
-      reloadHeaderBtn.textContent = '重新处理本页';
-    }
-  }
   if (readerReloadBtn) {
     if (converting && isReprocessing) {
       readerReloadBtn.removeAttribute('hidden');
       readerReloadBtn.disabled = true;
       readerReloadBtn.innerHTML = '<span class="reprocessing-inline-spinner"></span> 正在二次处理…';
-    } else if (isReady) {
+    } else if (isReady || (!converting && state.page?.status === 'PENDING')) {
       readerReloadBtn.removeAttribute('hidden');
-      readerReloadBtn.disabled = false;
-      readerReloadBtn.textContent = '重新处理本页';
+      readerReloadBtn.disabled = pageReprocessRequests.has(`${state.book.id}:${pageNum}`);
+      readerReloadBtn.textContent = isReady ? '重新处理本页' : '处理本页';
     } else {
       readerReloadBtn.setAttribute('hidden', '');
-      readerReloadBtn.disabled = false;
-      readerReloadBtn.textContent = '重新处理本页';
+      readerReloadBtn.disabled = pageReprocessRequests.has(`${state.book.id}:${pageNum}`);
+      readerReloadBtn.textContent = isReady ? '重新处理本页' : '处理本页';
     }
   }
 
@@ -602,113 +582,56 @@ function renderJobHeading() {
   headingEl.textContent = '本书处理';
 }
 
-async function retryCurrentPage() {
-  if (!state.book || !state.currentPage) return;
-  const pageNum = state.currentPage;
-  state.page = { ...state.page, status: 'PROCESSING', error: null };
-  state.pageCache.delete(pageNum);
-  renderCurrent();
-  renderJobHeading();
-  if (readingWindow?.active()) {
-    await readingWindow.retryCurrentPage();
-  } else {
-    const provider = selectedProvider();
-    const providerConfig = state.config?.providers?.find(item => item.id === provider);
-    if (!providerConfig?.available) { toast('请在处理设置中选择可用的云识别通道。', 'error'); return; }
-    try {
-      await api.startJob(state.book.id, {
-        pages: String(pageNum),
-        provider,
-        layout: 'auto',
-        splitSpreads: false,
-        force: true,
-        assist: $('#qwen-assist')?.checked && !$('#qwen-assist').disabled
-      });
-      schedulePoll();
-    } catch (err) {
-      showError(err);
-    }
-  }
-}
-
-async function reloadCurrentPage() {
-  if (!state.book || !state.currentPage) return;
-  const pageNum = state.currentPage;
-  state.reprocessingPage = pageNum;
-  convertingState.isReprocessing = true;
-  convertingState.pageNumber = pageNum;
-  convertingState.completedAt = 0;
-  convertingState.completedPage = null;
-
-  // 保留已有 blocks 供视觉平滑过渡，不闪烁、不退回原图
-  state.page = {
-    ...state.page,
-    status: 'PROCESSING',
-    isReprocessing: true,
-    error: null
-  };
-  if (state.pageCache.has(pageNum)) {
-    const cached = state.pageCache.get(pageNum);
-    state.pageCache.set(pageNum, { ...cached, status: 'PROCESSING', isReprocessing: true });
-  }
-
-  renderCurrent();
-  renderJobHeading();
-
-  if (readingWindow?.active()) {
-    await readingWindow.retryCurrentPage();
-  } else {
-    const provider = selectedProvider();
-    const providerConfig = state.config?.providers?.find(item => item.id === provider);
-    if (!providerConfig?.available) { toast('请在处理设置中选择可用的云识别通道。', 'error'); return; }
-    try {
-      await api.startJob(state.book.id, {
-        pages: String(pageNum),
-        provider,
-        layout: 'auto',
-        splitSpreads: false,
-        force: true,
-        assist: $('#qwen-assist')?.checked && !$('#qwen-assist').disabled
-      });
-      schedulePoll();
-    } catch (err) {
-      showError(err);
-    }
-  }
-}
-
-async function runComprehensibilityCheck() {
-  if (!state.book || !state.currentPage) return;
-  const btn = $('#comprehensibility-check-btn');
-  const prevText = btn ? btn.textContent : '';
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = '自检中...';
-  }
+const pageReprocessRequests = new Set();
+async function retryCurrentPage() { return reprocessCurrentPage(); }
+async function reloadCurrentPage() { return reprocessCurrentPage(); }
+async function reprocessCurrentPage() {
+  if (!state.book || !state.page) return false;
+  const bookId = state.book.id, pageNum = state.currentPage, scope = bookRequest, editEpoch = state.editorEpoch;
+  const key = `${bookId}:${pageNum}`;
+  const current = () => state.book?.id === bookId && state.currentPage === pageNum && bookRequest === scope && state.editorEpoch === editEpoch;
+  if (pageReprocessRequests.has(key) || isCurrentPageConverting()) return false;
+  if (state.dirty || state.saveInFlight || state.conflict) { toast('请先保存校对修改或处理版本冲突，再重新处理本页。'); return false; }
+  if (jobSyncError) { toast('任务状态尚未确认，请先在“任务”中刷新，避免重复处理。'); return false; }
+  const provider = selectedProvider();
+  const config = state.config?.providers?.find(p => p.id === provider);
+  if (!config?.available) { toast('请先在任务设置中选择可用的识别通道。', 'error'); return false; }
+  const protectedPage = state.page.reviewed || state.blocks.some(b => b.reviewed || b.source === 'manual' || b.issues?.some(i => i.resolved));
+  if (protectedPage && !window.confirm('本页包含已确认校对。重新识别可能替换这些内容；旧版本会保留在历史中。确认继续？')) return false;
+  if (!protectedPage && state.page.status === 'READY' && !window.confirm('重新处理本页会产生新的识别用量，完成前保留当前正文。继续吗？')) return false;
+  pageReprocessRequests.add(key);
+  const button = $('#reader-reload-page'); if (button) button.disabled = true;
   try {
-    const pageNum = state.currentPage;
-    const response = await api.checkComprehensibility(state.book.id, pageNum);
-    if (response && state.currentPage === pageNum) {
-      state.page = response;
-      state.blocks = cloneBlocks(response.blocks);
-      state.pageCache.set(pageNum, response);
-      renderCurrent();
-      const newIssuesCount = (response.blocks || []).flatMap(b => b.issues || []).filter(i => !i.resolved).length;
-      if (newIssuesCount > 0) {
-        toast(`自检完成：发现 ${newIssuesCount} 处语句不通顺，已生成推断候选`, 'info');
-        openDrawer('review');
-      } else {
-        toast('自检完成：本页各段落语句通顺，未发现明显语义疑点', 'success');
+    let accepted = false;
+    if (readingWindow.active() && !protectedPage) accepted = await readingWindow.retryCurrentPage();
+    else {
+      if (readingWindow.active()) {
+        const stopped = await readingWindow.stop({ silent: true });
+        if (stopped === false) throw new Error('停止尚未确认，请先核对任务状态，未追加处理请求。');
       }
+      if (!current()) return false;
+      const form = new FormData($('#job-form'));
+      const job = await api.startJob(bookId, { pages: String(pageNum), provider, layout: form.get('layout') || 'auto',
+        splitSpreads: form.get('splitSpreads') === 'on', force: true,
+        assist: $('#qwen-assist')?.checked && !$('#qwen-assist')?.disabled });
+      accepted = true;
+      if (current()) renderJob(job);
     }
-  } catch (err) {
-    showError(err);
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = prevText || '可理解性自检';
+    if (!accepted || !current()) return false;
+    state.reprocessingPage = pageNum;
+    convertingState.isReprocessing = true; convertingState.pageNumber = pageNum;
+    // Canonical page/status/revision and the cache stay untouched until a real newer result arrives.
+    pageProgress.wake(); renderJobHeading(); renderReadingWindowStatus();
+    $('#reader-page-actions')?.removeAttribute('open');
+    return true;
+  } catch (error) {
+    if (current()) {
+      if (!error?.status) jobSyncError = true;
+      showError(error); state.reprocessingPage = null; convertingState.isReprocessing = false;
+      renderJobHeading();
     }
-  }
+    return false;
+  } finally { pageReprocessRequests.delete(key); if (current()) renderJobHeading(); }
 }
 
 // P1：批量重试失败页。失败页清单取自书籍页摘要（PageSummary.status），
@@ -915,57 +838,13 @@ function renderQuality() {
 }
 
 function renderPageMessage(rawMessage) {
-  const node = $('#page-message');
-  if (!node) return;
-  const job = state.job;
-  const isJobRunning = job && activeJobs.has(job.status);
-  const isCurrentProcessing = (state.page?.status === 'PROCESSING') || (isJobRunning && job.currentPage === state.currentPage);
-
-  if (isCurrentProcessing) {
-    node.hidden = false;
-    node.className = 'page-message is-processing';
-    node.replaceChildren();
-
-    const card = document.createElement('div');
-    card.className = 'page-progress-card';
-
-    const head = document.createElement('div');
-    head.className = 'page-progress-head';
-    const title = document.createElement('div');
-    title.className = 'page-progress-title';
-    title.textContent = state.page?.isReprocessing
-      ? `第 ${state.currentPage} 页正在二次处理，保留当前内容…`
-      : `第 ${state.currentPage} 页正在识别，原稿可以继续阅读`;
-    head.append(title);
-
-    const track = document.createElement('div');
-    track.className = 'page-progress-track is-indeterminate';
-    track.setAttribute('role', 'progressbar');
-    track.setAttribute('aria-label', '正在识别本页，剩余工作量未知');
-    const fill = document.createElement('div');
-    fill.className = 'page-progress-fill is-indeterminate';
-    track.append(fill);
-
-    const meta = document.createElement('div');
-    meta.className = 'page-progress-meta';
-    const countSpan = document.createElement('span');
-    countSpan.textContent = job?.total
-      ? `全书任务已结束 ${job.completed || 0} / ${job.total} 页 · 当前页仍在识别`
-      : '正在进行文字与版面识别…';
-    const hintSpan = document.createElement('span');
-    hintSpan.className = 'page-progress-hint';
-    hintSpan.textContent = '识别完成后呈现排版正文；未知进度不显示百分比。';
-    meta.append(countSpan, hintSpan);
-
-    card.append(head, track, meta);
-    node.append(card);
-    return;
-  }
-
-  node.className = 'page-message';
+  const node = $('#page-message'); if (!node) return;
+  const isBusy = isCurrentPageConverting();
   const msg = rawMessage !== undefined ? rawMessage : (state.page ? statusMessage(state.page) : '');
-  node.hidden = !msg;
-  node.textContent = msg || '';
+  // Detailed failures remain in diagnostics/tasks; processing is shown once next to save status.
+  node.className = 'page-message';
+  node.hidden = isBusy || state.page?.status === 'READY' || state.page?.status === 'FAILED' || !msg;
+  node.textContent = node.hidden ? '' : msg;
 }
 
 function renderReview() {
@@ -1400,21 +1279,8 @@ async function goToPage(n, options = {}) {
   // J08：切页换作用域，辅助推荐映射清空，迟到决策响应只能丢弃（关闭面板不等同取消任务）
   state.assistMap = {};
   if (pageChanged) {
-    deferredReady = null;
-    resetConvertingState(n);
-    renderJobHeading();
-    if (!readingWindow.active()) {
-      renderReadingWindowStatus(null);
-      void ensureReadingWindowActive().then(() => {
-        if (readingWindow.active()) readingWindow.navigated();
-      });
-    } else {
-      readingWindow.navigated();
-    }
-  } else if (!readingWindow.active()) {
-    void ensureReadingWindowActive().then(() => {
-      if (!readingWindow.active()) readingWindow.prefetch();
-    });
+    deferredReady = null; resetConvertingState(n); renderJobHeading();
+    if (!readingWindow.active()) renderReadingWindowStatus(null);
   }
   const requestId = ++pageRequest, bookId = state.book.id;
   const sessionToken = sessionGuard.setSession(bookId, n);
@@ -1423,16 +1289,22 @@ async function goToPage(n, options = {}) {
   pageFetchController = new AbortController();
   const fetchSignal = pageFetchController.signal;
   renderReview(); renderToc(); renderReadingProgress(n); $('#page-jump').value = n;
-  $('#paper').replaceChildren();
-  const loading = document.createElement('p'); loading.className = 'paper-loading'; loading.textContent = `正在读取第 ${n} 页…`; $('#paper').append(loading);
+  if (!state.pageCache.get(n)) {
+    $('#paper').replaceChildren();
+    const loading = document.createElement('p'); loading.className = 'paper-loading'; loading.textContent = `正在读取第 ${n} 页…`; $('#paper').append(loading);
+  }
   try {
     const cached = state.pageCache.get(n);
     const page = cached || await api.page(bookId, n, fetchSignal);
     if (requestId !== pageRequest || state.book?.id !== bookId || !sessionGuard.isValid(sessionToken)) return;
     state.pageCache.set(n, page); state.page = page; state.blocks = cloneBlocks(page.blocks); state.reviewedDraft = Boolean(page.reviewed); renderCurrent();
     renderJobHeading();
+    if (readingWindow.active()) readingWindow.navigated();
+    else void ensureReadingWindowActive().then(() => {
+      if (requestId === pageRequest && state.book?.id === bookId && !readingWindow.active()) readingWindow.prefetch();
+    });
     const position = options.restoreScroll ? Number(options.scrollTop || 0) : options.preserveScroll ? previousScrollTop : 0;
-    requestAnimationFrame(() => { $('#reader').scrollTop = position; });
+    requestAnimationFrame(() => { if (requestId === pageRequest && state.book?.id === bookId && state.currentPage === n) $('#reader').scrollTop = position; });
     closeDrawers();
     // 缓存先供即时阅读，但每次实际进入页面都以本地 JSON 重新核对；
     // 旧窗口单页完成后即使不在新窗口状态中，也不会永久停留在 PENDING 原稿。
@@ -1472,6 +1344,7 @@ async function selectBook(id) {
   deferredReady = null;
   renderReadingWindowStatus(null);
   const requestId = ++bookRequest;
+  state.reprocessingPage = null; resetConvertingState();
   $('#usage-open').disabled = true;
   const submit = $('#job-form button[type="submit"]');
   const refresh = $('#refresh-job');
@@ -1494,7 +1367,7 @@ async function selectBook(id) {
     if (requestId !== bookRequest) return;
     state.book = book; state.summaries = []; $('#book-select').value = id;
     // A-03：刷新后尝试认领仍在运行的随读会话，保证"停止随读"始终可达（不再占住整本书）。
-    void readingWindow.restore(id);
+    // Restore the existing session only after the current page has painted.
     $('#workspace').classList.remove('is-empty'); $('#empty-state').hidden = true; $('#reader-shell').hidden = false;
     renderBookMeta(); renderBookmarks();
     const finiteDefault = Math.min(20, book.totalPages);
@@ -1518,6 +1391,8 @@ async function selectBook(id) {
     void refreshOutline(id);
     const jobSynced = refreshJob();
     await previousWindowStopped;
+    if (requestId !== bookRequest) return;
+    await readingWindow.restore(id);
     await jobSynced;
     if (requestId !== bookRequest) return;
     await ensureReadingWindowActive();
@@ -1536,6 +1411,7 @@ function validateRange(value, total) {
 
 function renderJob(job) {
   state.job = job;
+  if (!activeJobs.has(job?.status)) { state.reprocessingPage = null; convertingState.isReprocessing = false; }
   if (activeJobs.has(job?.status)) pageProgress.wake();
   const active = activeJobs.has(job.status);
   $('#job-progress').hidden = job.status === 'IDLE';
@@ -1965,6 +1841,9 @@ document.querySelector('#quality-diagnostics-toggle')?.addEventListener('click',
 });
 // U1：阅读模式默认进入，校对按需进入；后台任务不得自动打开面板。
 initReaderMode();
+// One task surface, opened deliberately; no task card consumes reading space while work runs.
+$('#reading-window-dialog').append($('#job-panel'));
+$('#job-panel').setAttribute('data-task-surface', 'dialog');
 $('#reading-window-open').addEventListener('click', () => {
   if (!state.book) return;
   const dialog = $('#reading-window-dialog');
@@ -1982,7 +1861,7 @@ $('#reading-window-open').addEventListener('click', () => {
   }
   $('#reading-window-choice').textContent = readingWindow.active()
     ? '随读识别已开启。本次通道和辅助选项固定；停止后可重新选择。'
-    : `本次使用：${providerConfig?.label || provider || '未选择可用通道'}。${providerConfig ? providerUsage(providerConfig) : ''} ${assist ? `另启用 ${qwenModel} 结构整理，可能额外计费。` : '不启用 Qwen；只有在处理设置中主动勾选后才会使用。'}`;
+    : `本次使用：${providerConfig?.label || provider || '未选择可用通道'}。${providerConfig ? providerUsage(providerConfig) : ''} ${assist ? `另启用 ${qwenModel} 结构整理，可能额外计费。` : '结构重排未启用；自动可理解性自检在现有授权和预算内运行。'}`;
   $('#reading-window-enable').hidden = readingWindow.active();
   $('#reading-window-enable').disabled = !provider || !providerConfig?.available;
   dialog.showModal();
@@ -2000,7 +1879,6 @@ $('#reading-window-enable').addEventListener('click', async () => {
 });
 $('#reading-window-stop').addEventListener('click', () => { void readingWindow.stop(); });
 $('#reading-window-refresh').addEventListener('click', () => { void readingWindow.refreshStatus(); });
-$('#retry-page-header')?.addEventListener('click', retryCurrentPage);
 $('#retry-failed-pages')?.addEventListener('click', async () => {
   const pages = failedPageNumbers();
   if (!state.book || !pages.length) return;
@@ -2016,9 +1894,7 @@ $('#retry-failed-pages')?.addEventListener('click', async () => {
   } catch (error) { showError(error); }
 });
 
-$('#reload-page-header')?.addEventListener('click', reloadCurrentPage);
 $('#reader-reload-page')?.addEventListener('click', reloadCurrentPage);
-$('#comprehensibility-check-btn')?.addEventListener('click', runComprehensibilityCheck);
 const autoReadCheckbox = $('#reading-window-auto-start');
 if (autoReadCheckbox) {
   autoReadCheckbox.checked = isAutoReadEnabled();

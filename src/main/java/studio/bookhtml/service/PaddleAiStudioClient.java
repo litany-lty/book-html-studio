@@ -167,7 +167,8 @@ public class PaddleAiStudioClient {
                 } catch (java.io.IOException e) { throw new OcrException("用量账本不可用，禁止提交 AI Studio 任务", e); }
                 writeCache(fingerprint, cacheEntry(fingerprint, null, "submitting", null, ownerBookId, usageAttemptId));
                 if (remoteJobRegistry != null && remoteRecord != null) {
-                    try { remoteJobRegistry.markSubmitting(remoteRecord.handleId(), usageAttemptId); } catch (Exception ignored) {}
+                    try { remoteJobRegistry.markSubmitting(remoteRecord.handleId(), usageAttemptId); }
+                    catch(java.io.IOException failure){ throw new OcrException("远端提交意图未能持久化，未发送请求"); }
                 }
                 try {
                     taskId = submit(submission, cancelled, usageAttemptId);

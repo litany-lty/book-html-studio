@@ -1,356 +1,145 @@
 package studio.bookhtml.service;
 
 import studio.bookhtml.domain.PageExecutionRecord;
-
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * Global staged priority scheduler for page OCR and enhancement.
- *
- * Enforces progressive execution:
- * QUEUED_BASELINE -> BASELINE_RUNNING -> BASELINE_COMMITTED
- *  -> WAITING_ENHANCEMENT -> ENHANCEMENT_RUNNING -> SETTLED
- *
- * Priorities:
- * P0: Currently visible page raw/missing baseline
- * P1: User explicit retry / nearest next page baseline
- * P2: Foreground enhancement / neighbor page baseline
- * P3: Background batch / distant page / background enhancement
- *
- * Features:
- * - Current-page priority promotion without duplicate tasks.
- * - Starvation prevention: dispatches background work after at most 8 consecutive foreground tasks when no P0 is waiting.
- * - Stage release: baseline worker releases as soon as baseline commits; enhancement executes in independent pool.
- */
+/** Bounded two-stage scheduler. Physical worker exit, not logical future cancellation, releases ownership. */
 public class PageWorkScheduler implements AutoCloseable {
-
-    public enum Priority {
-        P0(0),
-        P1(1),
-        P2(2),
-        P3(3);
-
-        private final int level;
-        Priority(int level) { this.level = level; }
-        public int level() { return level; }
-    }
-
-    public static final class WorkItem implements Comparable<WorkItem> {
-        final String key;
-        final String bookId;
-        final int pageNumber;
-        final PageProcessingService.Request request;
-        final long submissionOrder;
-        final CompletableFuture<PageProcessingService.Result> future = new CompletableFuture<>();
-        volatile Priority priority;
-        volatile PageExecutionRecord record;
-        volatile boolean running;
-        volatile boolean cancelled;
-        volatile Thread workerThread;
-
-        WorkItem(String key, String bookId, int pageNumber, PageProcessingService.Request request,
-                 PageExecutionRecord record, Priority priority, long submissionOrder) {
-            this.key = key;
-            this.bookId = bookId;
-            this.pageNumber = pageNumber;
-            this.request = request;
-            this.record = record;
-            this.priority = priority;
-            this.submissionOrder = submissionOrder;
-        }
-
-        public void promote(Priority newPriority) {
-            if (newPriority.level() < this.priority.level()) {
-                this.priority = newPriority;
-            }
-        }
-
-        @Override
-        public int compareTo(WorkItem o) {
-            int c = Integer.compare(this.priority.level(), o.priority.level());
-            if (c != 0) return c;
-            return Long.compare(this.submissionOrder, o.submissionOrder);
-        }
-    }
-
-    private final PageProcessingService pageEngine;
-    private final ConcurrentHashMap<String, WorkItem> activeWork = new ConcurrentHashMap<>();
-    private final List<WorkItem> baselineQueue = new ArrayList<>();
-    private final List<WorkItem> enhancementQueue = new ArrayList<>();
-    private final Object queueLock = new Object();
-
-    private final ExecutorService baselineExecutor;
-    private final ExecutorService enhancementExecutor;
-    private final AtomicLong sequence = new AtomicLong(0);
-    private final AtomicInteger consecutiveForeground = new AtomicInteger(0);
-    private static final int MAX_CONSECUTIVE_FOREGROUND = 8;
+    public enum Priority { P0(0),P1(1),P2(2),P3(3);private final int level;Priority(int level){this.level=level;}public int level(){return level;} }
+    private static final int MAX_ACTIVE=64,FAIRNESS=8;
+    private final PageProcessingService engine;
+    private final Object lock=new Object();
+    private final Map<String,Work> active=new HashMap<>();
+    private final List<Work> baseline=new ArrayList<>(),enhancement=new ArrayList<>();
+    private final ExecutorService baselineWorkers,enhancementWorkers;
+    private final AtomicLong sequence=new AtomicLong();
+    private final int[] foregroundRuns=new int[2];
     private volatile boolean closed;
-
-    public PageWorkScheduler(PageProcessingService pageEngine) {
-        this(pageEngine, 4, 4);
+    private static final class Work implements Comparable<Work> {
+        final String key;final long order;final PageProcessingService.Request request;
+        final CompletableFuture<PageProcessingService.Result> future=new CompletableFuture<>() {
+            @Override public boolean cancel(boolean interrupt){return false;} // Only scheduler cancellation knows physical ownership.
+        };
+        volatile boolean cancelled;boolean interruptionSent,running,settling;
+        volatile Thread worker;
+        Priority priority;PageExecutionRecord record;QwenExecutionScope.Value scope;
+        Work(PageProcessingService.Request source,Priority priority,long order) {
+            this.key=source.book()+":"+source.page();this.priority=priority;this.order=order;
+            this.request=new PageProcessingService.Request(source.attempt(),source.provider(),source.layout(),source.split(),source.force(),source.assist(),
+                    ()->cancelled||source.cancelled().getAsBoolean(),source.owned());
+            this.record=PageExecutionRecord.initial(source.attempt());
+        }
+        public int compareTo(Work other){int c=Integer.compare(priority.level(),other.priority.level());return c==0?Long.compare(order,other.order):c;}
     }
-
-    public PageWorkScheduler(PageProcessingService pageEngine, int baselineConcurrency, int enhancementConcurrency) {
-        this.pageEngine = Objects.requireNonNull(pageEngine);
-        this.baselineExecutor = Executors.newFixedThreadPool(Math.max(1, baselineConcurrency), r -> {
-            Thread t = new Thread(r, "page-baseline-worker");
-            t.setDaemon(true);
-            return t;
-        });
-        this.enhancementExecutor = Executors.newFixedThreadPool(Math.max(1, enhancementConcurrency), r -> {
-            Thread t = new Thread(r, "page-enhancement-worker");
-            t.setDaemon(true);
-            return t;
-        });
-
-        for (int i = 0; i < Math.max(1, baselineConcurrency); i++) {
-            baselineExecutor.submit(this::runBaselineWorker);
-        }
-        for (int i = 0; i < Math.max(1, enhancementConcurrency); i++) {
-            enhancementExecutor.submit(this::runEnhancementWorker);
-        }
+    public PageWorkScheduler(PageProcessingService engine){this(engine,3,2);}
+    public PageWorkScheduler(PageProcessingService engine,int baseConcurrency,int enhanceConcurrency) {
+        this.engine=Objects.requireNonNull(engine);
+        int first=Math.max(1,Math.min(8,baseConcurrency)),second=Math.max(1,Math.min(8,enhanceConcurrency));
+        baselineWorkers=pool(first,"page-baseline-worker");enhancementWorkers=pool(second,"page-enhancement-worker");
+        for(int i=0;i<first;i++)baselineWorkers.execute(()->run(false));
+        for(int i=0;i<second;i++)enhancementWorkers.execute(()->run(true));
     }
-
-    public CompletableFuture<PageProcessingService.Result> schedule(PageProcessingService.Request request, Priority priority) {
-        if (closed) {
-            CompletableFuture<PageProcessingService.Result> failed = new CompletableFuture<>();
-            failed.completeExceptionally(new RejectedExecutionException("PageWorkScheduler is closed"));
-            return failed;
-        }
-
-        String key = request.book() + ":" + request.page();
-        WorkItem existing = activeWork.get(key);
-        if (existing != null && !existing.future.isDone()) {
-            existing.promote(priority);
-            synchronized (queueLock) {
-                Collections.sort(baselineQueue);
-                Collections.sort(enhancementQueue);
-                queueLock.notifyAll();
+    private static ExecutorService pool(int n,String name){return Executors.newFixedThreadPool(n,r->{Thread t=new Thread(r,name);t.setDaemon(true);return t;});}
+    public CompletableFuture<PageProcessingService.Result> schedule(PageProcessingService.Request request,Priority priority) {
+        Objects.requireNonNull(request);Objects.requireNonNull(priority);
+        synchronized(lock) {
+            if(closed)return CompletableFuture.failedFuture(new RejectedExecutionException("page scheduler closed"));
+            String key=request.book()+":"+request.page();Work old=active.get(key);
+            if(old!=null) {
+                if(!old.request.id().equals(request.id())||old.request.attempt().generation()!=request.attempt().generation())
+                    return CompletableFuture.failedFuture(new RejectedExecutionException("another page attempt still owns this slot"));
+                if(priority.level()<old.priority.level())old.priority=priority;
+                Collections.sort(baseline);Collections.sort(enhancement);lock.notifyAll();return old.future;
             }
-            return existing.future;
-        }
-
-        PageExecutionRecord record = PageExecutionRecord.initial(request.attempt());
-        WorkItem item = new WorkItem(key, request.book(), request.page(), request, record, priority, sequence.incrementAndGet());
-        activeWork.put(key, item);
-
-        synchronized (queueLock) {
-            baselineQueue.add(item);
-            Collections.sort(baselineQueue);
-            queueLock.notifyAll();
-        }
-
-        return item.future;
-    }
-
-    public boolean promotePriority(String bookId, int pageNumber, Priority newPriority) {
-        String key = bookId + ":" + pageNumber;
-        WorkItem item = activeWork.get(key);
-        if (item != null && !item.future.isDone()) {
-            item.promote(newPriority);
-            synchronized (queueLock) {
-                Collections.sort(baselineQueue);
-                Collections.sort(enhancementQueue);
-                queueLock.notifyAll();
-            }
-            return true;
-        }
-        return false;
-    }
-
-    public void cancel(String bookId, int pageNumber) {
-        String key = bookId + ":" + pageNumber;
-        WorkItem item = activeWork.get(key);
-        if (item == null || item.future.isDone()) return;
-
-        item.cancelled = true;
-        if (item.workerThread != null) {
-            item.workerThread.interrupt();
-        }
-        synchronized (queueLock) {
-            baselineQueue.remove(item);
-            enhancementQueue.remove(item);
-            queueLock.notifyAll();
-        }
-
-        activeWork.remove(key);
-        pageEngine.finish(item.request.attempt(), "CANCELLED", "CANCELLED_CONTENT_KEPT");
-        item.future.completeExceptionally(new CancelledException());
-    }
-
-    public void cancelBook(String bookId) {
-        List<WorkItem> toCancel = new ArrayList<>();
-        synchronized (queueLock) {
-            var it = baselineQueue.iterator();
-            while (it.hasNext()) {
-                WorkItem item = it.next();
-                if (item.bookId.equals(bookId)) {
-                    item.cancelled = true;
-                    it.remove();
-                    toCancel.add(item);
-                }
-            }
-            var eit = enhancementQueue.iterator();
-            while (eit.hasNext()) {
-                WorkItem item = eit.next();
-                if (item.bookId.equals(bookId)) {
-                    item.cancelled = true;
-                    eit.remove();
-                    toCancel.add(item);
-                }
-            }
-            for (WorkItem item : activeWork.values()) {
-                if (item.bookId.equals(bookId)) {
-                    item.cancelled = true;
-                    if (item.workerThread != null) {
-                        item.workerThread.interrupt();
-                    }
-                    if (!toCancel.contains(item)) toCancel.add(item);
-                }
-            }
-            queueLock.notifyAll();
-        }
-
-        for (WorkItem item : toCancel) {
-            activeWork.remove(item.key);
-            pageEngine.finish(item.request.attempt(), "CANCELLED", "CANCELLED_CONTENT_KEPT");
-            item.future.completeExceptionally(new CancelledException());
+            int limit=priority==Priority.P3?MAX_ACTIVE-1:MAX_ACTIVE;
+            if(active.size()>=limit)return CompletableFuture.failedFuture(new RejectedExecutionException("page queue capacity reached"));
+            Work work=new Work(request,priority,sequence.incrementAndGet());
+            active.put(key,work);baseline.add(work);Collections.sort(baseline);lock.notifyAll();return work.future;
         }
     }
-
-    private WorkItem pollNext(List<WorkItem> queue) {
-        synchronized (queueLock) {
-            while (queue.isEmpty() && !closed) {
-                try {
-                    queueLock.wait();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return null;
-                }
-            }
-            if (closed || queue.isEmpty()) return null;
-
-            // Fairness check: if consecutive foreground count >= 8 and no P0 waiting, allow background (P3) task
-            boolean hasP0 = queue.stream().anyMatch(item -> item.priority == Priority.P0);
-            if (consecutiveForeground.get() >= MAX_CONSECUTIVE_FOREGROUND && !hasP0) {
-                for (int i = 0; i < queue.size(); i++) {
-                    WorkItem candidate = queue.get(i);
-                    if (candidate.priority == Priority.P3) {
-                        queue.remove(i);
-                        consecutiveForeground.set(0);
-                        candidate.running = true;
-                        return candidate;
-                    }
-                }
-            }
-
-            // Normal highest priority poll
-            WorkItem selected = queue.remove(0);
-            if (selected.priority != Priority.P3) {
-                consecutiveForeground.incrementAndGet();
-            } else {
-                consecutiveForeground.set(0);
-            }
-            selected.running = true;
-            return selected;
+    public boolean promotePriority(String book,int page,Priority priority) {
+        synchronized(lock){Work work=active.get(book+":"+page);if(work==null||work.cancelled)return false;
+            if(priority.level()<work.priority.level())work.priority=priority;Collections.sort(baseline);Collections.sort(enhancement);lock.notifyAll();return true;}
+    }
+    private Work take(boolean second) {
+        synchronized(lock) {
+            List<Work> queue=second?enhancement:baseline;int lane=second?1:0;
+            while(queue.isEmpty()&&!closed)try{lock.wait();}catch(InterruptedException e){if(closed)return null;}
+            if(closed)return null;
+            int selected=0;
+            if(foregroundRuns[lane]>=FAIRNESS && queue.stream().noneMatch(w->w.priority==Priority.P0))
+                for(int i=0;i<queue.size();i++)if(queue.get(i).priority==Priority.P3){selected=i;break;}
+            Work work=queue.remove(selected);foregroundRuns[lane]=work.priority==Priority.P3?0:foregroundRuns[lane]+1;
+            work.running=true;work.worker=Thread.currentThread();return work;
         }
     }
-
-    private void runBaselineWorker() {
-        while (!closed && !Thread.currentThread().isInterrupted()) {
-            WorkItem item = pollNext(baselineQueue);
-            if (item == null) break;
-
-            item.workerThread = Thread.currentThread();
+    private void run(boolean second) {
+        while(!closed) {
+            Work work=take(second);if(work==null)return;
             try {
-                if (item.cancelled || item.request.cancelled().getAsBoolean()) {
-                    PageProcessingService.Result res = pageEngine.settle(item.request, item.record);
-                    item.future.complete(res);
-                    activeWork.remove(item.key);
-                    continue;
+                if(work.scope==null)work.scope=engine.executionScope(work.request);
+                try(QwenExecutionScope scope=work.scope==null?null:QwenExecutionScope.attach(work.scope)) {
+                    if(work.cancelled||work.request.cancelled().getAsBoolean())work.record=work.record.withSettled("CANCELLED","CANCELLED_CONTENT_KEPT",null);
+                    else work.record=second?engine.executeEnhancement(work.request,work.record):engine.executeBaseline(work.request,work.record);
+                    if(work.record==null)throw new IllegalStateException("page engine returned no execution record");
                 }
-
-                PageExecutionRecord updated = pageEngine.executeBaseline(item.request, item.record);
-                item.record = updated;
-
-                if (updated.isEligibleForEnhancement() && !item.cancelled) {
-                    // Stage release: baseline committed, push enhancement to enhancement queue!
-                    // Baseline worker is now immediately free for the next page!
-                    item.running = false;
-                    synchronized (queueLock) {
-                        enhancementQueue.add(item);
-                        Collections.sort(enhancementQueue);
-                        queueLock.notifyAll();
+                if(!second && work.record.isEligibleForEnhancement()) {
+                    synchronized(lock) {
+                        if(!closed&&!work.cancelled) {
+                            // Transfer ownership before enqueue. The baseline finalizer never clears a successor thread.
+                            work.running=false;work.worker=null;enhancement.add(work);Collections.sort(enhancement);lock.notifyAll();continue;
+                        }
                     }
-                } else {
-                    PageProcessingService.Result res = pageEngine.settle(item.request, updated);
-                    item.future.complete(res);
-                    activeWork.remove(item.key);
                 }
-            } catch (Throwable t) {
-                item.future.completeExceptionally(t);
-                activeWork.remove(item.key);
-            } finally {
-                item.workerThread = null;
+            } catch(Throwable failure) {
+                work.record=work.record.withSettled(work.cancelled?"CANCELLED":work.record.publishedRevision()==null?"FAILED":"PARTIAL",
+                        "PAGE_STAGE_UNFINISHED",work.record.publishedRevision());
             }
+            settle(work);
+            Thread.interrupted(); // A cancelled task must not poison the next owned page on this worker.
         }
     }
-
-    private void runEnhancementWorker() {
-        while (!closed && !Thread.currentThread().isInterrupted()) {
-            WorkItem item = pollNext(enhancementQueue);
-            if (item == null) break;
-
-            item.workerThread = Thread.currentThread();
-            try {
-                if (item.cancelled || item.request.cancelled().getAsBoolean()) {
-                    PageProcessingService.Result res = pageEngine.settle(item.request, item.record);
-                    item.future.complete(res);
-                    activeWork.remove(item.key);
-                    continue;
-                }
-
-                PageExecutionRecord updated = pageEngine.executeEnhancement(item.request, item.record);
-                item.record = updated;
-                PageProcessingService.Result res = pageEngine.settle(item.request, updated);
-                item.future.complete(res);
-            } catch (Throwable t) {
-                item.future.completeExceptionally(t);
-            } finally {
-                item.workerThread = null;
-                activeWork.remove(item.key);
-            }
-        }
-    }
-
-    public int getQueuedBaselineCount() {
-        synchronized (queueLock) { return baselineQueue.size(); }
-    }
-
-    public int getQueuedEnhancementCount() {
-        synchronized (queueLock) { return enhancementQueue.size(); }
-    }
-
-    public int getActiveWorkCount() {
-        return activeWork.size();
-    }
-
-    @Override
-    public void close() {
-        closed = true;
-        synchronized (queueLock) {
-            queueLock.notifyAll();
-        }
-        baselineExecutor.shutdownNow();
-        enhancementExecutor.shutdownNow();
+    private void settle(Work work) {
+        synchronized(lock){if(work.settling)return;work.settling=true;}
+        PageProcessingService.Result result=null;Throwable failure=null;
         try {
-            baselineExecutor.awaitTermination(2, TimeUnit.SECONDS);
-            enhancementExecutor.awaitTermination(2, TimeUnit.SECONDS);
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
+            if(work.cancelled)work.record=work.record.withSettled("CANCELLED","CANCELLED_CONTENT_KEPT",work.record.publishedRevision());
+            result=engine.settle(work.request,work.record);
+            if(result==null)result=new PageProcessingService.Result(work.record.lifecycle(),work.record.messageCode(),work.record.publishedRevision());
+        } catch(Throwable error){failure=error;}
+        finally {synchronized(lock){work.worker=null;work.running=false;active.remove(work.key,work);lock.notifyAll();}}
+        if(work.cancelled)work.future.completeExceptionally(new CancelledException());
+        else if(failure!=null)work.future.completeExceptionally(failure);else work.future.complete(result);
+    }
+    public void cancel(String book,int page) {
+        Work immediate=null;
+        synchronized(lock) {
+            Work work=active.get(book+":"+page);if(work==null||work.settling)return;
+            work.cancelled=true;baseline.remove(work);enhancement.remove(work);
+            if(work.running) {
+                if(!work.interruptionSent&&work.worker!=null){work.interruptionSent=true;work.worker.interrupt();}
+            } else immediate=work;
+            lock.notifyAll();
         }
+        if(immediate!=null)settle(immediate);
+    }
+    public void cancelBook(String book){List<Work> selected;synchronized(lock){selected=active.values().stream().filter(w->w.request.book().equals(book)).toList();}
+        for(Work work:selected)cancel(work.request.book(),work.request.page());}
+    public int getQueuedBaselineCount(){synchronized(lock){return baseline.size();}}
+    public int getQueuedEnhancementCount(){synchronized(lock){return enhancement.size();}}
+    public int getActiveWorkCount(){synchronized(lock){return active.size();}}
+    @Override public void close() {
+        List<Work> all;synchronized(lock){closed=true;all=List.copyOf(active.values());lock.notifyAll();}
+        for(Work work:all)cancel(work.request.book(),work.request.page());
+        baselineWorkers.shutdown();enhancementWorkers.shutdown();
+        boolean interrupted=Thread.interrupted();long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(15);
+        try {
+            for(var pool:List.of(baselineWorkers,enhancementWorkers))while(!pool.isTerminated()) {
+                long remaining=deadline-System.nanoTime();if(remaining<=0)throw new IllegalStateException("page workers still draining");
+                try{pool.awaitTermination(remaining,TimeUnit.NANOSECONDS);}catch(InterruptedException e){interrupted=true;}
+            }
+        } finally {if(interrupted)Thread.currentThread().interrupt();}
     }
 }

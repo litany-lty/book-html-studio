@@ -624,6 +624,12 @@ public class JobService {
                     return future.get();
                 } catch (InterruptedException ie) {
                     scheduler.cancel(request.book(), request.page());
+                    for(;;) {
+                        try { future.get(); break; }
+                        catch(InterruptedException repeated) { /* Preserve ownership until physical cleanup. */ }
+                        catch(ExecutionException | CancellationException done) { break; }
+                    }
+                    Thread.currentThread().interrupt();
                     throw new CancelledException();
                 } catch (ExecutionException ee) {
                     if (ee.getCause() instanceof CancelledException ce) throw ce;

@@ -160,15 +160,8 @@ public class PageProcessor {
         if(advertisements.heldForReview()>0)warnings.add("有 "+advertisements.heldForReview()+" 个疑似广告块含已确认疑点，未自动隐藏，请人工复核");
         int bodyChars=blocks.stream().filter(b->!"advertisement".equals(b.type())).mapToInt(b->QualityGate.nonSpace(b.original())).sum();
         if(advertisements.marked()>0&&bodyChars==0)warnings.add("本页仅识别到页边广告，未确认为正文；请对照原图复核");
-        if (comprehensibilityService != null && comprehensibilityService.configured()) {
-            try {
-                blocks = new ArrayList<>(comprehensibilityService.checkPage(bookId, pageNumber, blocks, cancelled));
-            } catch (CancelledException e) {
-                throw e;
-            } catch (Exception e) {
-                warnings.add("段落可理解性自检跳过：" + e.getMessage());
-            }
-        }
+        // Always-on deterministic checks must not delay the first readable publication with cloud calls.
+        if (comprehensibilityService != null) blocks=comprehensibilityService.checkLocal(blocks);
         BlockValidator.validate(blocks);warnings.add(traceWarning(store.pdf(bookId),pageNumber,actualProvider,layout));
         ProcessingResult.Category category=warnings.stream().anyMatch(w->w.startsWith(OcrTextRecovery.PARTIAL))?ProcessingResult.Category.TEXT_PARTIAL:bodyChars>0?ProcessingResult.Category.TEXT
             :(advertisements.marked()>0||QualityGate.isFigureOnly(blocks))?ProcessingResult.Category.VISUAL_ONLY:ProcessingResult.Category.TEXT;
@@ -188,6 +181,7 @@ public class PageProcessor {
             BufferedImage image=artifact.image();
             List<Block> transcribed=handwriting.transcribe(image,layout,cancelled);
             List<Block> blocks=simplify(transcribed);
+            if(comprehensibilityService!=null)blocks=comprehensibilityService.checkLocal(blocks);
             List<String> warnings=new ArrayList<>();
             warnings.add(HandwritingTranscribeService.WARNING);
             warnings.add(traceWarning(store.pdf(bookId),pageNumber,HandwritingTranscribeService.SOURCE,layout));
@@ -459,19 +453,25 @@ public class PageProcessor {
             blocks=new ArrayList<>(advertisements.blocks());
             if(advertisements.marked()>0)warnings.add("已标记 "+advertisements.marked()+" 个独立页边广告块；原稿和原始识别记录保留可查看");
             if(advertisements.heldForReview()>0)warnings.add("有 "+advertisements.heldForReview()+" 个疑似广告块含已确认疑点，未自动隐藏，请人工复核");
-            if (comprehensibilityService != null && comprehensibilityService.configured()) {
-                try {
-                    blocks = new ArrayList<>(comprehensibilityService.checkPage(bookId, pageNumber, blocks, cancelled));
-                } catch (CancelledException e) {
-                    throw e;
-                } catch (Exception e) {
-                    warnings.add("段落可理解性自检跳过：" + e.getMessage());
-                }
-            }
+
             return new EnrichResult(List.copyOf(blocks),actualProvider,List.copyOf(warnings),complete);
         }finally{image.flush();}}
         }
     }
+    /** Automatic review is policy-driven, not another reader-facing checkbox. */
+    public boolean automaticCheckAvailable(String bookId,int pageNumber) {
+        return comprehensibilityService!=null && comprehensibilityService.automaticAvailable(bookId);
+    }
+    public EnrichResult checkReadableBaseline(String bookId,int pageNumber,Page page,BooleanSupplier cancelled) throws Exception {
+        if(comprehensibilityService==null) return new EnrichResult(page.blocks(),page.provider(),List.of(),true);
+        if(cancelled.getAsBoolean())throw new CancelledException();
+        ParagraphComprehensibilityService.Result checked=comprehensibilityService.check(bookId,pageNumber,page.blocks(),cancelled);
+        String status=checked.complete()?ParagraphComprehensibilityService.COMPLETE:ParagraphComprehensibilityService.DEFERRED;
+        String detail=checked.complete()?" 自动语义自检已结束，疑点仅为未确认建议；未发现疑点不代表文字完全正确"
+                :" 自动语义自检部分未完成，保留原文；已结束 "+checked.completed()+"/"+checked.planned()+" 组";
+        return new EnrichResult(checked.blocks(),page.provider(),List.of(status+detail),checked.complete());
+    }
+
     private List<Block>simplify(List<Block>blocks)throws OcrException{List<Block>result=new ArrayList<>();for(Block b:blocks){String original=b.original()==null?"":b.original();String simplified=converter.toSimplified(original);List<ContentIssue>issues=mapIssues(original,b.issues(),converter);result.add(new Block(b.id(),b.type(),b.order(),b.bbox(),b.writingMode(),b.original(),simplified,b.confidence(),true,false,b.headingLevel(),b.source(),b.sourceIds(),b.suggestion(),b.sourceRect(),issues));}BlockValidator.validate(result);return List.copyOf(result);}
     /** J09/T58：问题区间映射（simplified 偏移）；确认元数据原样保留，不重建丢失。 */
     public static List<ContentIssue>mapIssues(String original,List<ContentIssue>input,TraditionalConverter converter)throws OcrException{List<ContentIssue>issues=new ArrayList<>();for(ContentIssue issue:input==null?List.<ContentIssue>of():input){if(issue.start()<0||issue.end()<=issue.start()||issue.end()>original.length())throw new OcrException("内容问题区间超出 OCR 原文范围");int simpleStart=converter.toSimplified(original.substring(0,issue.start())).length();int simpleEnd=converter.toSimplified(original.substring(0,issue.end())).length();String inferred=issue.inferredText()==null?null:converter.toSimplified(issue.inferredText());issues.add(new ContentIssue(issue.id(),issue.kind(),issue.start(),issue.end(),simpleStart,simpleEnd,issue.reason(),issue.resolved(),issue.replacement(),inferred,issue.resolution()));}return List.copyOf(issues);}

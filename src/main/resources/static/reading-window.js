@@ -73,6 +73,7 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
     Number(oldPage.revision) > Number(newPage.revision);
 
   function schedulePrefetch(reset = true) {
+    if (globalThis.navigator?.connection?.saveData) return;
     if (reset) cancelReads();
     else abortPrefetch();
     const bookId = state.book?.id;
@@ -100,7 +101,7 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
           finally { prefetchControllers = prefetchControllers.filter(item => item !== controller); }
         }
       }
-      await Promise.all([worker(), worker(), worker()]);
+      await Promise.all([worker(), worker()]);
     }, 1000);
   }
 
@@ -282,16 +283,18 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
     try {
       await api.stopReadingWindow(previous.bookId, body);
       if (currentStop()) onStatus({ enabled: false, status: 'STOPPED', message: '已停止后续排队；已发出的当前页仍可能完成。', pages: [] });
+      return true;
     } catch (error) {
       if (currentStop()) {
         onStatus({ enabled: false, status: 'STOP_UNKNOWN', message: '停止尚未确认；最后一次心跳后 60 秒租期到期会停止新派发。请勿重复开启，已发出请求仍可能完成。', pages: [] });
         onError(error);
       }
+      return false;
     }
   }
 
   async function retryCurrentPage() {
-    if (!active()) return;
+    if (!active()) return false;
     seenReady.delete(state.currentPage);
     readyInFlight.delete(state.currentPage);
     const bookId = session.bookId, seq = ++sequence, requestEpoch = epoch;
@@ -299,8 +302,10 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
       fromPage: Math.max(1, state.currentPage - 3), toPage: Math.min(state.book.totalPages, state.currentPage + 5), pages: [] });
     try {
       accept(await api.readingWindow(bookId, { ...payload(seq, false), retryCurrentPage: true }), seq, requestEpoch);
+      return valid(bookId, seq, requestEpoch);
     } catch (error) {
       if (valid(bookId, seq, requestEpoch)) onError(error);
+      return false;
     }
   }
 

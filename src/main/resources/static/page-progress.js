@@ -16,10 +16,13 @@ export function progressView(snapshot, page) {
 export function createPageProgress({ api, onPublished, onRetry }) {
   const element = document.querySelector('#page-processing-progress');
   const retryBtn = document.querySelector('#page-retry-button');
+  let retrying = false;
   if (retryBtn && typeof retryBtn.addEventListener === 'function') {
-    retryBtn.addEventListener('click', () => {
-      retryBtn.hidden = true;
-      if (typeof onRetry === 'function') onRetry();
+    retryBtn.addEventListener('click', async () => {
+      if (retrying || typeof onRetry !== 'function') return;
+      retrying = true; retryBtn.disabled = true;
+      try { await onRetry(); }
+      finally { retrying = false; retryBtn.disabled = false; render(); }
     });
   }
   let current = null, snapshot = null, timer = null, controller = null, epoch = 0;
@@ -30,7 +33,7 @@ export function createPageProgress({ api, onPublished, onRetry }) {
     if (!element) return;
     const view = progressView(snapshot, current?.page);
     element.hidden = view.hidden;
-    const isFailed = snapshot?.lifecycle === 'FAILED' || current?.page?.status === 'FAILED';
+    const isFailed = !['QUEUED', 'RUNNING', 'CANCELLING'].includes(snapshot?.lifecycle) && (snapshot?.lifecycle === 'FAILED' || current?.page?.status === 'FAILED');
     if (retryBtn) {
       retryBtn.hidden = !isFailed;
     }
@@ -43,7 +46,7 @@ export function createPageProgress({ api, onPublished, onRetry }) {
     element.style.setProperty('--page-progress', `${view.percent ?? 0}%`);
     if (snapshot?.accuracyRatio != null && Number.isFinite(Number(snapshot.accuracyRatio)) && Number(snapshot.accuracyRatio) < 1.0) {
       const acc = Math.round(Number(snapshot.accuracyRatio) * 100);
-      element.title = `阶段完成度 ${view.percent ?? 0}%（非全文准确率），当前阶段准确率 ${acc}%。疑点仍须对照原稿核对。`;
+      element.title = `阶段完成度 ${view.percent ?? 0}%（非全文准确率），当前阶段任务覆盖率 ${acc}%（非文字准确率）。疑点仍须对照原稿核对。`;
     } else {
       element.title = '当前页处理阶段完成比例，不是文字准确率或剩余时间。疑点仍须对照原稿核对。';
     }
