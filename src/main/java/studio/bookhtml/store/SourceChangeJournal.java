@@ -20,9 +20,14 @@ public final class SourceChangeJournal {
     private record Watermark(List<Stamp> stamp,long value) {}
     private static final Map<Key,Watermark> WATERMARKS = new LinkedHashMap<>(16,.75f,true);
     private static final long MAX_REPLAY_BYTES=64L*1024*1024;
+    private record Snapshot(List<Stamp> stamp, List<SourceJournalCheckpoint.Seal> seals,
+                            SourceReplayState sealed, SourceReplayState full, int activeFrames, long activeLength) {}
+    private static final Map<Key,Snapshot> SNAPSHOTS=new LinkedHashMap<>(8,.75f,true);
+    private static final org.slf4j.Logger LOG=org.slf4j.LoggerFactory.getLogger(SourceChangeJournal.class);
     private final ObjectMapper json;
+    private final SourceJournalCheckpoint checkpoints;
     private final DurableEventJournal wal=new DurableEventJournal();
-    public SourceChangeJournal(ObjectMapper json) { this.json=Objects.requireNonNull(json); }
+    public SourceChangeJournal(ObjectMapper json) { this.json=Objects.requireNonNull(json); this.checkpoints=new SourceJournalCheckpoint(json); }
     public static Path eventsDir(Path dir) { return dir.resolve("source-events"); }
     /** Index publication must use the same monitor as every source admission. Never read Pages while holding it. */
     public static Object publicationMonitor(Path dir) {
@@ -54,6 +59,11 @@ public final class SourceChangeJournal {
         }
         return List.copyOf(result);
     }
+    private static boolean sameDuringRead(Stamp before,Stamp after) {
+        return before.name().equals(after.name()) && before.size()==after.size()
+                && Objects.equals(before.fileKey(),after.fileKey()) && Objects.equals(before.modified(),after.modified())
+                && (before.changed() instanceof UUID || after.changed() instanceof UUID || Objects.equals(before.changed(),after.changed()));
+    }
     private static void remember(Key key,Watermark value) {
         synchronized(WATERMARKS) {
             WATERMARKS.put(key,value);
@@ -64,8 +74,7 @@ public final class SourceChangeJournal {
         Key key=key(dir,book); List<Stamp> stamp=stamp(dir);Watermark hit;
         synchronized(WATERMARKS) { hit=WATERMARKS.get(key); }
         if(hit!=null && hit.stamp().equals(stamp)) return hit.value();
-        long max=0;
-        for(var event:readAll(dir,book)) max=Math.max(max,event.sourceSeq());
+        long max=snapshot(dir,book).full().maxSeq;
         remember(key,new Watermark(stamp(dir),max));return max;
     }
     public long nextSourceSeq(Path dir,String book) {
@@ -111,12 +120,17 @@ public final class SourceChangeJournal {
     }
     public SourceChange markNotPublished(Path dir,String book,long seq) throws IOException { return markNotPublished(dir,book,seq,null); }
     private SourceChange findIntent(Path dir,String book,long seq) throws IOException {
+        var operation=snapshot(dir,book).full().operation(seq);
+        if(operation!=null && operation.prepared()!=null) return operation.prepared();
+        // Rare replay of an old settled operation falls back to authority; recent/pending
+        // state remains bounded and is not confused with missing history.
         return readAll(dir,book).stream().filter(e->e.sourceSeq()==seq && "PREPARED".equals(e.state())).findFirst()
                 .orElseThrow(()->new IOException("source intent missing"));
     }
     private SourceChange settle(Path dir,String book,SourceChange intent,String state) throws IOException {
-        var events=readAll(dir,book);
-        var latest=events.stream().filter(e->e.sourceSeq()==intent.sourceSeq()).reduce((a,b)->b).orElse(intent);
+        var operation=snapshot(dir,book).full().operation(intent.sourceSeq());
+        var latest=operation==null?readAll(dir,book).stream().filter(e->e.sourceSeq()==intent.sourceSeq())
+                .reduce((a,b)->b).orElse(intent):operation.latest();
         if(state.equals(latest.state())) return latest;
         if(!Set.of("PREPARED","UNKNOWN").contains(latest.state())) throw new IOException("source outcome already settled");
         var event=new SourceChange(intent.sourceSeq(),intent.targetKind(),book,intent.pageNumber(),intent.commitId(),
@@ -124,25 +138,120 @@ public final class SourceChangeJournal {
                 intent.changeReason(),state,Instant.now());
         append(dir,book,event);return event;
     }
+    private static void rememberSnapshot(Key key,Snapshot value) {
+        synchronized(SNAPSHOTS) {
+            if(!value.full().cacheable() || !value.sealed().cacheable()) { SNAPSHOTS.remove(key);return; }
+            SNAPSHOTS.put(key,value);
+            while(SNAPSHOTS.size()>8) SNAPSHOTS.remove(SNAPSHOTS.keySet().iterator().next());
+        }
+    }
+    private static void invalidate(Key key) {
+        synchronized(SNAPSHOTS) { SNAPSHOTS.remove(key); }
+        synchronized(WATERMARKS) { WATERMARKS.remove(key); }
+    }
+    private void checkpoint(Path dir,String book,List<SourceJournalCheckpoint.Seal> seals,SourceReplayState sealed) {
+        if(seals.isEmpty() || Thread.currentThread().isInterrupted()) return;
+        try { checkpoints.save(dir,book,seals,sealed); }
+        catch(IOException | RuntimeException unavailable) {
+            LOG.debug("SOURCE_CHECKPOINT_DEFERRED: authoritative events retained; no operation resent");
+        }
+    }
+    /** A metadata fingerprint is only reused inside this process after actual WAL verification.
+     * Cold checkpoints validate every sealed file's hash; an active tail is replayed independently.
+     */
+    private Snapshot snapshot(Path dir,String book) throws IOException {
+        Key key=key(dir,book);List<Stamp> current=stamp(dir);Snapshot cached;
+        long bytes=0;for(var item:current) bytes=Math.addExact(bytes,item.size());
+        if(bytes>MAX_REPLAY_BYTES) throw new IOException("source journal replay budget exceeded");
+        synchronized(SNAPSHOTS) { cached=SNAPSHOTS.get(key); }
+        if(current.isEmpty() && Files.exists(SourceJournalCheckpoint.path(dir),LinkOption.NOFOLLOW_LINKS)
+                || cached!=null && (current.size()<cached.stamp().size()
+                || !current.isEmpty() && current.size()==cached.stamp().size()
+                && current.get(current.size()-1).size()<cached.activeLength()))
+            throw new IOException("previously verified source history is missing or shortened");
+        if(cached!=null && cached.stamp().equals(current)) return cached;
+        try {
+            List<Path> paths=current.stream().map(st->eventsDir(dir).resolve(st.name())).toList();
+            List<SourceJournalCheckpoint.Seal> seals=new ArrayList<>();
+            SourceReplayState full=new SourceReplayState(),sealed=new SourceReplayState();
+            int start=0,frames=0;long activeLength=0;boolean checkpointNeeded=false,tailRepaired=false;
+            if(cached!=null && !current.isEmpty() && cached.stamp().size()==current.size()
+                    && cached.stamp().subList(0,current.size()-1).equals(current.subList(0,current.size()-1))) {
+                seals.addAll(cached.seals());sealed=cached.sealed();full=sealed.copy();start=seals.size();
+            } else {
+                var loaded=checkpoints.load(dir,book,paths);
+                if(loaded!=null) { seals.addAll(loaded.seals());full=loaded.state();start=seals.size(); }
+                checkpointNeeded=start<Math.max(0,paths.size()-1) || loaded==null;
+            }
+            for(int i=start;i<paths.size();i++) {
+                Path path=paths.get(i);boolean active=i==paths.size()-1;
+                if(active) sealed=full.copy();
+                var scan=wal.readSegment(path,book,active,new ArrayList<>());
+                String previous=scan.header().prevSegmentSha256();
+                if(i>0 && !"chained".equals(previous) && !previous.equals(seals.get(i-1).sha256()))
+                    throw new IOException("source journal segment chain mismatch");
+                for(var frame:scan.frames()) full.replay(decode(frame,book));
+                if(active) { frames=scan.frames().size();activeLength=scan.validLength();tailRepaired=scan.tailTruncated(); }
+                else seals.add(new SourceJournalCheckpoint.Seal(path.getFileName().toString(),scan.validLength(),DurableEventJournal.sha256Hex(path)));
+            }
+            List<Stamp> after=stamp(dir);
+            // Only the final incomplete frame may have been repaired by the active-tail reader.
+            if(after.size()!=current.size()) throw new IOException("source journal changed during verification");
+            for(int i=0;i<after.size();i++) {
+                boolean active=i==after.size()-1;
+                if(active && tailRepaired) {
+                    if(after.get(i).size()!=activeLength || !Objects.equals(after.get(i).fileKey(),current.get(i).fileKey()))
+                        throw new IOException("source tail changed during repair");
+                } else if(!sameDuringRead(current.get(i),after.get(i))) throw new IOException("source journal changed during verification");
+            }
+            var result=new Snapshot(after,List.copyOf(seals),sealed,full,frames,activeLength);
+            rememberSnapshot(key,result);
+            if(checkpointNeeded) checkpoint(dir,book,seals,sealed);
+            return result;
+        } catch(IOException | RuntimeException failure) { invalidate(key);throw failure; }
+    }
     private void append(Path dir,String book,SourceChange event) throws IOException {
         byte[] payload=json.writeValueAsBytes(event);
         if(payload.length>DurableEventJournal.MAX_FRAME_PAYLOAD_BYTES) throw new IOException("source event too large");
+        Snapshot verified=snapshot(dir,book);
+        SourceReplayState next=verified.full().copy();
+        if(!verified.full().cacheable() && !"PREPARED".equals(event.state())) next.replay(event);
+        else next.apply(event); // New admissions obey the cache budget; old debt may still be settled.
         Path events=eventsDir(dir);DurableJson.rejectLinks(events);Files.createDirectories(events);
-        List<Path> paths=segments(dir);Path active;
-        if(paths.isEmpty()) {
-            active=events.resolve("segment-000001.wal");wal.initSegment(active,book,UUID.randomUUID(),event.sourceSeq(),"0".repeat(64));
-        } else {
-            active=paths.get(paths.size()-1);var scan=wal.readSegment(active,book,true,new ArrayList<>());
-            if(scan.frames().size()>=DurableEventJournal.MAX_SEGMENT_RECORDS
-                    || scan.validLength()+payload.length+20>DurableEventJournal.MAX_SEGMENT_BYTES) {
-                String previousHash=DurableEventJournal.sha256Hex(active);
-                active=events.resolve(String.format("segment-%06d.wal",paths.size()+1));
-                wal.initSegment(active,book,UUID.randomUUID(),event.sourceSeq(),previousHash);
+        List<SourceJournalCheckpoint.Seal> seals=new ArrayList<>(verified.seals());
+        SourceReplayState sealed=verified.sealed();int frames=verified.activeFrames();
+        int count=verified.stamp().size();boolean newSegment=count==0 || frames>=DurableEventJournal.MAX_SEGMENT_RECORDS
+                || verified.activeLength()+payload.length+20>DurableEventJournal.MAX_SEGMENT_BYTES;
+        long total=verified.stamp().stream().mapToLong(Stamp::size).sum()+payload.length+20+(newSegment?512:0);
+        if(total>MAX_REPLAY_BYTES || newSegment && count>=4096) throw new IOException("source journal capacity exceeded");
+        Path active=count==0?null:events.resolve(String.format("segment-%06d.wal",count));
+        try {
+            if(newSegment) {
+                String previous=active==null?"0".repeat(64):DurableEventJournal.sha256Hex(active);
+                if(active!=null) { seals.add(new SourceJournalCheckpoint.Seal(active.getFileName().toString(),verified.activeLength(),previous));sealed=verified.full().copy(); }
+                active=events.resolve(String.format("segment-%06d.wal",count+1));
+                wal.initSegment(active,book,UUID.randomUUID(),event.sourceSeq(),previous);frames=0;
             }
-        }
-        wal.append(active,event.sourceSeq(),payload);
-        // Invalidate all handles' cached frontier; failures never cache a made-up zero.
-        synchronized(WATERMARKS) { WATERMARKS.remove(key(dir,book)); }
+            long length=wal.append(active,event.sourceSeq(),payload);
+            rememberSnapshot(key(dir,book),new Snapshot(stamp(dir),List.copyOf(seals),sealed,next,frames+1,length));
+            synchronized(WATERMARKS) { WATERMARKS.remove(key(dir,book)); }
+            if(newSegment) checkpoint(dir,book,seals,sealed);
+        } catch(IOException | RuntimeException failure) { invalidate(key(dir,book));throw failure; }
+    }
+    private SourceChange decode(DurableEventJournal.JournalFrame frame,String book) throws IOException {
+        try(var parser=json.getFactory().createParser(frame.payload())) {
+            parser.enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
+            com.fasterxml.jackson.databind.JsonNode tree=json.readTree(parser);
+            if(tree==null || !tree.isObject() || parser.nextToken()!=null) throw new IOException("source event invalid");
+            for(String f:List.of("sourceSeq","pageNumber","beforeRevision","afterRevision")) {
+                var v=tree.get(f);
+                if(v!=null && !v.isNull() && (!v.isIntegralNumber() || !v.canConvertToLong()
+                        || !f.equals("sourceSeq") && !v.canConvertToInt())) throw new IOException("source event integer invalid");
+            }
+            var event=json.treeToValue(tree,SourceChange.class);validate(event,book);
+            if(event.sourceSeq()!=frame.seq()) throw new IOException("source frame identity mismatch");
+            return event;
+        } catch(RuntimeException invalid) { throw new IOException("source event unreadable"); }
     }
     public List<SourceChange> readAll(Path dir,String book) throws IOException {
         synchronized(publicationMonitor(dir)) {
@@ -154,26 +263,12 @@ public final class SourceChangeJournal {
                 String previous=scan.header().prevSegmentSha256();
                 if(i>0 && !"chained".equals(previous) && !previous.equals(DurableEventJournal.sha256Hex(paths.get(i-1))))
                     throw new IOException("source journal segment chain mismatch");
-                for(var frame:scan.frames()) {
-                    try(var parser=json.getFactory().createParser(frame.payload())) {
-                        parser.enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
-                        com.fasterxml.jackson.databind.JsonNode tree=json.readTree(parser);
-                        if(tree==null || !tree.isObject() || parser.nextToken()!=null) throw new IOException("source event invalid");
-                        for(String f:List.of("sourceSeq","pageNumber","beforeRevision","afterRevision")) {
-                            var v=tree.get(f);
-                            if(v!=null && !v.isNull() && (!v.isIntegralNumber() || !v.canConvertToLong()
-                                    || !f.equals("sourceSeq") && !v.canConvertToInt())) throw new IOException("source event integer invalid");
-                        }
-                        var event=json.treeToValue(tree,SourceChange.class);validate(event,book);
-                        if(event.sourceSeq()!=frame.seq()) throw new IOException("source frame identity mismatch");
-                        result.add(event);
-                    } catch(RuntimeException invalid) { throw new IOException("source event unreadable"); }
-                }
+                for(var frame:scan.frames()) result.add(decode(frame,book));
             }
             return List.copyOf(result);
         }
     }
-    private static void validate(SourceChange e,String book) throws IOException {
+    static void validate(SourceChange e,String book) throws IOException {
         if(e==null || !book.equals(e.bookId()) || e.sourceSeq()<1 || e.timestamp()==null
                 || e.targetKind()==null || !e.targetKind().matches("[A-Z][A-Z_]{0,39}")
                 || e.state()==null || !Set.of("PREPARED","COMMITTED","NOT_PUBLISHED","UNKNOWN").contains(e.state())
@@ -185,31 +280,17 @@ public final class SourceChangeJournal {
         return readAll(dir,book).stream().filter(e->e.sourceSeq()>since).limit(limit).toList();
     }
     public SourceChange latest(Path dir,String book) throws IOException {
-        var all=readAll(dir,book);return all.isEmpty()?null:all.get(all.size()-1);
+        synchronized(publicationMonitor(dir)) { return snapshot(dir,book).full().last; }
     }
-    private Map<Long,SourceChange> unresolved(List<SourceChange> events) throws IOException {
-        Map<Long,SourceChange> pending=new LinkedHashMap<>();
-        for(var e:events) {
-            if(Set.of("PREPARED","UNKNOWN").contains(e.state())) pending.put(e.sourceSeq(),e);
-            else {
-                var p=pending.get(e.sourceSeq());
-                if(p!=null) {
-                    if(e.commitId()!=null && !Objects.equals(e.commitId(),p.commitId())
-                            || e.pageNumber()!=null && !Objects.equals(e.pageNumber(),p.pageNumber())
-                            || "COMMITTED".equals(e.state()) && (!Objects.equals(e.afterHash(),p.afterHash())
-                            || !Objects.equals(e.afterRevision(),p.afterRevision()))) throw new IOException("source settlement contradicts intent");
-                    pending.remove(e.sourceSeq());
-                }
-            }
-        }
-        return pending;
+    public boolean hasUnresolved(Path dir,String book) throws IOException {
+        synchronized(publicationMonitor(dir)) { return !snapshot(dir,book).full().pending.isEmpty(); }
     }
-    public boolean hasUnresolved(Path dir,String book) throws IOException { return !unresolved(readAll(dir,book)).isEmpty(); }
     /** Only exact page or already committed journal evidence proves publication; higher revisions do not. */
     public void reconcile(Path dir,String book,BookStore store) throws IOException {
         // Caller holds BookStore's directory monitor; do not acquire that monitor after the source monitor.
         synchronized(publicationMonitor(dir)) {
-            for(var intent:unresolved(readAll(dir,book)).values()) {
+            for(var operation:List.copyOf(snapshot(dir,book).full().pending.values())) {
+                var intent=operation.latest();
                 if(!"PAGE".equals(intent.targetKind()) || intent.pageNumber()==null) continue;
                 Page page=store.readPage(book,intent.pageNumber());String state="UNKNOWN";
                 if(page!=null) {
