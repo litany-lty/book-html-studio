@@ -356,9 +356,12 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
     if (!bookId || session) return false;
     const saved = storedSession(bookId);
     if (!saved) return false;
+    const restoreEpoch = epoch;
+    const ownsRestore = () => epoch === restoreEpoch && !session && state.book?.id === bookId;
     try {
       const snapshot = await api.readingWindowStatus(bookId, saved.id);
-      if (snapshot && snapshot.enabled === true && state.book?.id === bookId) {
+      if (!ownsRestore()) return false;
+      if (snapshot && snapshot.enabled === true && snapshot.sessionId === saved.id) {
         session = { id: saved.id, bookId, confirmed: true };
         sequence = Math.max(sequence, Number(snapshot.sequence) || 0);
         onStatus(snapshot);
@@ -366,7 +369,8 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
       }
       clearStoredSession();
     } catch (_) {
-      clearStoredSession();
+      // An old tab/book restoration failure does not own the newer saved session.
+      if (ownsRestore()) clearStoredSession();
     }
     return false;
   }

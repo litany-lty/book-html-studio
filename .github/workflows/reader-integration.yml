@@ -51,7 +51,7 @@ jobs:
         run: |
           python3 scripts/verification/browser_focus_reading.py
           python3 scripts/verification/browser_scan_recovery.py
-          python3 scripts/verification/browser_reader_load.py --identity-only
+          python3 scripts/verification/browser_reader_load.py
       - name: Real server reader and settings smoke (OCR stub, no cloud)
         run: bash scripts/verification/run_reader_browser.sh
       - name: Record exact checkout

@@ -29,6 +29,13 @@ let bookRequest = 0;
 let pageRequest = 0;
 // 阶段2：快速翻页取消过时正文请求
 let pageFetchController = null;
+let bookFetchController = null;
+let metadataController = null;
+let metadataRequest = 0;
+let metadataEpoch = 0;
+let outlineController = null;
+let configurationReady = Promise.resolve();
+let readerSessionPending = false;
 let editVersion = 0;
 let outlineRequest = 0;
 let pendingPageTarget = null;
@@ -153,6 +160,7 @@ function mergeReadingMetadata(snapshot) {
     const changed = !previous || ['pageNumber', 'status', 'blockCount', 'uncertainCount', 'width', 'height', 'title', 'reviewed']
       .some(key => previous[key] !== summary[key]);
     if (changed) {
+      ++metadataEpoch;
       processedDelta += Number(summary.status === 'READY') - Number(previous?.status === 'READY');
       reviewedDelta += Number(Boolean(summary.reviewed)) - Number(Boolean(previous?.reviewed));
       if (index >= 0) state.summaries[index] = summary;
@@ -165,7 +173,7 @@ function mergeReadingMetadata(snapshot) {
       if (incomingProfile < knownProfile) continue;
       readingMetadataProfiles.set(number, incomingProfile);
       const current = state.outline.filter(entry => Number(entry.pageNumber) === number);
-      if (!sameOutline(current, info.outline)) outlineUpdates.set(number, info.outline);
+      if (!sameOutline(current, info.outline)) { ++metadataEpoch; outlineUpdates.set(number, info.outline); }
     }
   }
   if (processedDelta || reviewedDelta) {
@@ -196,6 +204,7 @@ function acceptReadyPage(pageNumber, page) {
     const anchor = recordAnchor($('#reader'));
     if (!state.page) { pageFetchController?.abort(); ++pageRequest; }
     state.pageCache.set(pageNumber, page);
+    ++metadataEpoch;
     state.page = page; state.blocks = cloneBlocks(page.blocks); state.reviewedDraft = Boolean(page.reviewed);
     state.selectedBlockId = null; state.selectedIssueId = null; state.editorEpoch++;
     convertingState.completedAt = Date.now();
@@ -670,11 +679,11 @@ function renderBookMeta() {
   }
   const b = state.book;
   const pct = b.totalPages ? Math.round(((b.processedPages || 0) / b.totalPages) * 100) : 0;
-  $('#book-summary').textContent = `识别进度 ${b.processedPages || 0} / ${b.totalPages} 页（${pct}%） · 校对进度 ${b.reviewedPages || 0} 页`;
+  $('#book-summary').textContent = `${b.countsStatus === 'SNAPSHOT' ? '上次记录 · ' : ''}识别进度 ${b.processedPages || 0} / ${b.totalPages} 页（${pct}%） · 校对进度 ${b.reviewedPages || 0} 页`;
   $('#book-select').title = b.title;
   $('#export-button').disabled = false;
   $('#usage-open').disabled = false;
-  $('#job-form button[type="submit"]').disabled = readingWindow.active();
+  $('#job-form button[type="submit"]').disabled = readingWindow.active() || activeJobs.has(state.job?.status) || jobSyncError;
   $('#page-jump').max = b.totalPages;
   $('#total-pages').textContent = `/ ${b.totalPages} 页`;
   renderReadingProgress();
@@ -730,16 +739,19 @@ function renderReadingProgress(previewPage) {
 
 async function refreshOutline(bookId = state.book?.id) {
   if (!bookId) return false;
-  const requestId = ++outlineRequest;
+  const requestId = ++outlineRequest, bookScope = bookRequest, epoch = metadataEpoch;
+  outlineController?.abort(); outlineController = new AbortController();
+  const signal = outlineController.signal;
   state.outlineStatus = 'loading'; renderToc();
   try {
-    const outline = await api.outline(bookId);
-    if (requestId !== outlineRequest || state.book?.id !== bookId) return false;
+    const outline = await api.outline(bookId, signal);
+    if (signal.aborted || requestId !== outlineRequest || state.book?.id !== bookId || bookScope !== bookRequest) return false;
+    if (epoch !== metadataEpoch) { state.outlineStatus = 'idle'; renderToc(); return false; }
     state.outline = Array.isArray(outline) ? outline : [];
     state.outlineStatus = 'ready'; renderToc();
     return true;
   } catch (_) {
-    if (requestId !== outlineRequest || state.book?.id !== bookId) return false;
+    if (signal.aborted || requestId !== outlineRequest || state.book?.id !== bookId || bookScope !== bookRequest) return false;
     state.outlineStatus = 'error'; renderToc();
     return false;
   }
@@ -1062,6 +1074,7 @@ function scrollToSelectedBlock(id) {
 }
 
 function markDirty() {
+  ++metadataEpoch;
   editVersion++;
   state.dirty = true;
   $('#save-page').disabled = Boolean(state.conflict) || Boolean(currentSaveInFlight());
@@ -1246,6 +1259,36 @@ function syncEvidenceToggle() {
   button.setAttribute('aria-pressed', String(assisted));
 }
 
+// Refresh a visible page without dismantling its DOM or waiting for book-wide derived data.
+async function refreshVisiblePage(n) {
+  const bookId = state.book.id, bookScope = bookRequest, editor = state.editorEpoch;
+  const requestId = ++pageRequest, before = state.page;
+  pageFetchController?.abort(); pageFetchController = new AbortController();
+  const signal = pageFetchController.signal;
+  const current = () => !signal.aborted && requestId === pageRequest && bookScope === bookRequest &&
+    state.book?.id === bookId && state.currentPage === n;
+  try {
+    const fresh = await api.page(bookId, n, signal);
+    if (!current() || olderRevision(fresh, state.page)) return false;
+    if (fresh.revision === before.revision && fresh.status === before.status) return true;
+    if (currentPageProtected() || state.editorEpoch !== editor) {
+      deferredReady = { bookId, page: n, revision: fresh.revision }; renderReadingWindowStatus(); return false;
+    }
+    if (fresh.status === 'READY') acceptReadyPage(n, fresh);
+    else {
+      const scrollTop = $('#reader').scrollTop;
+      state.pageCache.set(n, fresh); state.page = fresh; state.blocks = cloneBlocks(fresh.blocks);
+      state.reviewedDraft = Boolean(fresh.reviewed); state.editorEpoch++; ++metadataEpoch;
+      renderCurrent();
+      requestAnimationFrame(() => { if (current()) $('#reader').scrollTop = scrollTop; });
+    }
+    return true;
+  } catch (error) {
+    if (current() && error?.name !== 'StaleRequest') showError(error);
+    return false;
+  }
+}
+
 async function goToPage(n, options = {}) {
   if (!state.book || !Number.isInteger(n) || n < 1 || n > state.book.totalPages) { renderReadingProgress(); if (state.book) $('#page-jump').value = state.currentPage; return false; }
   if (options.force && n === state.currentPage && currentPageProtected()) {
@@ -1253,6 +1296,7 @@ async function goToPage(n, options = {}) {
     renderReadingWindowStatus();
     return false;
   }
+  if (options.force && n === state.currentPage && state.page) return refreshVisiblePage(n);
   if (!options.force && n === state.currentPage && state.page) {
     const bookId = state.book.id;
     const requestId = pageRequest, editorEpoch = state.editorEpoch;
@@ -1301,6 +1345,7 @@ async function goToPage(n, options = {}) {
     state.pageCache.set(n, page); state.page = page; state.blocks = cloneBlocks(page.blocks); state.reviewedDraft = Boolean(page.reviewed); renderCurrent();
     renderJobHeading();
     if (readingWindow.active()) readingWindow.navigated();
+    else if (readerSessionPending) readingWindow.prefetch();
     else void ensureReadingWindowActive().then(() => {
       if (requestId === pageRequest && state.book?.id === bookId && !readingWindow.active()) readingWindow.prefetch();
     });
@@ -1324,7 +1369,7 @@ async function goToPage(n, options = {}) {
     if (error?.name === 'StaleRequest' || requestId !== pageRequest || !sessionGuard.isValid(sessionToken)) return false;
     Object.assign(state, previous);
     if (pageChanged) readingWindow.navigated();
-    if (state.page) { renderCurrent(); requestAnimationFrame(() => { $('#reader').scrollTop = previousScrollTop; }); }
+    if (state.page) { renderCurrent(); requestAnimationFrame(() => { if (requestId === pageRequest && state.book?.id === bookId) $('#reader').scrollTop = previousScrollTop; }); }
     else {
       renderReadingProgress(); $('#page-jump').value = state.currentPage; $('#paper').replaceChildren();
       const failed = document.createElement('p'); failed.className = 'paper-loading'; failed.textContent = '页面读取失败，请用页码或底部进度条重试。'; $('#paper').append(failed);
@@ -1336,6 +1381,12 @@ async function goToPage(n, options = {}) {
 
 async function selectBook(id) {
   if (hasDirtyChanges()) { $('#book-select').value = state.book?.id || ''; return; }
+  saveReadingPosition(); window.clearTimeout(scrollTimer);
+  bookFetchController?.abort(); bookFetchController = new AbortController();
+  const manifestSignal = bookFetchController.signal;
+  metadataController?.abort(); ++metadataRequest; ++metadataEpoch;
+  outlineController?.abort();
+  readerSessionPending = true;
   ++searchGeneration; searchController?.abort(); searchController = null;
   ++structureGeneration;
   $('#search-status').textContent = ''; $('#search-results').replaceChildren();
@@ -1360,13 +1411,29 @@ async function selectBook(id) {
   state.editorEpoch++; state.conflict = null; state.saveInFlight = null; sessionGuard.invalidate();
   // J08：切书换作用域，辅助推荐映射清空
   state.assistMap = {};
+  // Retire the previous book synchronously. Navigation/edit callbacks must not
+  // address it while a new book manifest is in flight (including failed loads).
+  state.book = null; state.summaries = []; state.selectedBlockId = null;
+  state.focus = false; document.body.classList.remove('focus-reading');
+  cancelDrawing?.(); cancelDrawing = null; state.drawType = null; $('#draw-hint').hidden = true;
+  $('#paper').replaceChildren(); $('#page-jump').disabled = true;
+  $('#prev-page').disabled = true; $('#next-page').disabled = true;
+  $('#reader-shell').setAttribute('aria-busy', String(Boolean(id)));
+  renderReview(); renderBookMeta(); renderToc(); closeDrawers();
   if (!id) {
+    readerSessionPending = false;
     state.book = null; state.summaries = []; state.focus = false; document.body.classList.remove('focus-reading'); $('#workspace').classList.add('is-empty'); $('#empty-state').hidden = false; $('#reader-shell').hidden = true; renderBookMeta(); renderToc(); return;
   }
+  $('#workspace').classList.remove('is-empty'); $('#empty-state').hidden = true; $('#reader-shell').hidden = false;
+  const opening = document.createElement('p'); opening.className = 'paper-loading';
+  opening.textContent = '正在打开书籍…'; opening.setAttribute('role', 'status'); $('#paper').append(opening);
   try {
-    const book = await api.readerBook(id);
-    if (requestId !== bookRequest) return;
-    state.book = book; state.summaries = []; $('#book-select').value = id;
+    const book = await api.readerBook(id, manifestSignal);
+    if (requestId !== bookRequest || manifestSignal.aborted) return;
+    if (!book || book.id !== id || !Number.isSafeInteger(book.totalPages) || book.totalPages < 1)
+      throw new Error('书籍响应与所选书籍不一致，未显示该内容。');
+    state.book = { ...book, countsStatus: 'SNAPSHOT' }; state.summaries = []; $('#book-select').value = id;
+    $('#page-jump').disabled = false;
     // A-03：刷新后尝试认领仍在运行的随读会话，保证"停止随读"始终可达（不再占住整本书）。
     // Restore the existing session only after the current page has painted.
     $('#workspace').classList.remove('is-empty'); $('#empty-state').hidden = true; $('#reader-shell').hidden = false;
@@ -1383,21 +1450,33 @@ async function selectBook(id) {
     state.currentPage = page;
     await goToPage(page, { force: true, restoreScroll: true, scrollTop: prefs.scrollTop, skipSavePosition: true });
     if (requestId !== bookRequest) return;
-    // First paint must not wait for an O(book-size) outline/statistics pass.
-    void api.pages(id).then(summaries => {
-      if (requestId !== bookRequest) return;
-      state.summaries = Array.isArray(summaries) ? summaries : [];
-      renderToc(); renderBookMeta();
-    }).catch(() => { /* Metadata can be refreshed; never replace readable content. */ });
+    $('#reader-shell').setAttribute('aria-busy', 'false');
+    // Current content is already visible; derived book metadata has a separate read owner.
+    void refreshReaderMetadata(id, requestId, false);
     void refreshOutline(id);
     const jobSynced = refreshJob();
     await previousWindowStopped;
     if (requestId !== bookRequest) return;
     await readingWindow.restore(id);
     await jobSynced;
+    await configurationReady;
     if (requestId !== bookRequest) return;
+    readerSessionPending = false;
     await ensureReadingWindowActive();
-  } catch (error) { if (requestId === bookRequest) showError(error); }
+  } catch (error) {
+    if (requestId !== bookRequest || error?.name === 'StaleRequest') return;
+    if (!state.book) {
+      $('#paper').replaceChildren();
+      const failed = document.createElement('p'); failed.className = 'paper-loading';
+      failed.textContent = '书籍暂未打开，请重新选择书籍重试。原有内容未改动。'; $('#paper').append(failed);
+    }
+    showError(error);
+  } finally {
+    if (requestId === bookRequest) {
+      readerSessionPending = false;
+      $('#reader-shell').setAttribute('aria-busy', 'false');
+    }
+  }
 }
 
 function validateRange(value, total) {
@@ -1518,18 +1597,44 @@ async function refreshJob() {
   }
 }
 
+// Optional book-wide reads have their own cancellation and freshness boundary.
+// They never own the displayed page and never clear its cache or editing session.
+async function refreshReaderMetadata(id, requestId, includeCounts = true) {
+  if (!jobSessionMatches(id, requestId)) return;
+  metadataController?.abort(); metadataController = new AbortController();
+  const signal = metadataController.signal, generation = ++metadataRequest, epoch = metadataEpoch;
+  const current = () => !signal.aborted && generation === metadataRequest && epoch === metadataEpoch && jobSessionMatches(id, requestId);
+  const summaryRead = api.pages(id, signal).then(summaries => {
+    if (!current() || !Array.isArray(summaries)) return;
+    const numbers = new Set();
+    for (const summary of summaries) {
+      if (!Number.isSafeInteger(summary?.pageNumber) || summary.pageNumber < 1 ||
+          summary.pageNumber > state.book.totalPages || numbers.has(summary.pageNumber)) return;
+      numbers.add(summary.pageNumber);
+    }
+    state.summaries = summaries; renderBookMeta(); renderToc();
+  }).catch(() => { /* Existing metadata remains available; no repeated cloud or full-book retry. */ });
+  const countsRead = includeCounts ? api.book(id, signal).then(book => {
+    if (!current() || book?.id !== id || book.totalPages !== state.book.totalPages) return;
+    state.book = { ...book, countsStatus: 'CURRENT' };
+    state.books = state.books.map(item => item.id === id ? state.book : item);
+    renderBooks(); renderBookMeta();
+  }).catch(() => { /* Snapshot counts are explicitly marked until a later refresh succeeds. */ }) : Promise.resolve();
+  await Promise.all([summaryRead, countsRead]);
+}
+
 async function refreshBookData(id = state.book?.id, requestId = bookRequest) {
   if (!id || !jobSessionMatches(id, requestId)) return;
-  const [book, summaries] = await Promise.all([api.book(id), api.pages(id)]);
-  if (!jobSessionMatches(id, requestId)) return;
-  const protectedPage = currentPageProtected() && state.page ? state.page : null;
-  state.book = book; state.books = state.books.map(item => item.id === id ? book : item); state.summaries = summaries; state.pageCache.clear();
-  if (protectedPage) state.pageCache.set(state.currentPage, protectedPage);
-  renderBooks(); renderBookMeta(); renderToc();
-  await refreshOutline(id);
-  if (!jobSessionMatches(id, requestId)) return;
-  if (currentPageProtected()) { deferredReady = { bookId: id, page: state.currentPage, revision: null }; renderReadingWindowStatus(); toast('任务状态已更新，保留当前校对内容；保存后可更新本页。'); return; }
-  await goToPage(state.currentPage, { force: true, preserveScroll: true });
+  const protectedPage = currentPageProtected();
+  // Request the visible page first. Metadata and outline requests may finish later or fail.
+  const content = protectedPage ? Promise.resolve(false) : goToPage(state.currentPage, { force: true, preserveScroll: true });
+  void refreshReaderMetadata(id, requestId);
+  void refreshOutline(id);
+  if (protectedPage) {
+    deferredReady = { bookId: id, page: state.currentPage, revision: null };
+    renderReadingWindowStatus(); toast('任务状态已更新，保留当前校对内容；保存后可更新本页。');
+  }
+  await content;
 }
 
 let lastDrawerOpener = null;
@@ -1575,10 +1680,17 @@ async function init() {
     if (!page || page !== state.page || !issueId) return Promise.resolve(null);
     return loadIssueEvidence(issueId);
   });
-  try {
-    const [config, books] = await Promise.all([api.config(), api.books()]);
-    state.config = config; state.books = books; renderProviders(); renderBooks(); renderBookMeta();
-  } catch (error) { showError(error); $('#provider-note').textContent = '无法读取服务端配置，请确认 Java 服务已启动。'; }
+  // The read-only library must be usable even when provider configuration is slow.
+  configurationReady = api.config().then(config => {
+    state.config = config; renderProviders();
+  }).catch(error => {
+    showError(error); $('#provider-note').textContent = '工具配置暂未读取，仍可阅读已有内容；云端处理请稍后重试。';
+  });
+  const libraryReady = api.readerBooks().then(books => {
+    if (!Array.isArray(books)) throw new Error('书架响应无效，请刷新书架重试。');
+    state.books = books; renderBooks(); renderBookMeta();
+  }).catch(error => { showError(error); importStatus('书架暂未读取，请刷新书架重试。', true); });
+  await Promise.all([configurationReady, libraryReady]);
 }
 
 window.refreshProcessingConfig = async () => {
@@ -1707,7 +1819,7 @@ emptyState.addEventListener('drop', event => {
 
 $('#refresh-library').addEventListener('click', async () => {
   const button = $('#refresh-library'); setBusy(button, true, '刷新中…');
-  try { state.books = await api.books(); renderBooks(); library.render(); importStatus('书架已刷新。若找到刚才导入的书，请从书架选择；没有时再重新导入。'); }
+  try { state.books = await api.readerBooks(); renderBooks(); library.render(); importStatus('书架已刷新。若找到刚才导入的书，请从书架选择；没有时再重新导入。'); }
   catch (error) { importStatus(`刷新书架失败：${error?.message || '请检查服务状态后重试。'}`, true); }
   finally { setBusy(button, false); }
 });

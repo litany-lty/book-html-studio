@@ -74,6 +74,7 @@ jobs:
           node --test scripts/verification/probe_final_gaps.mjs scripts/verification/probe_auto_reading_policy.mjs
           node scripts/verification/probe_settings_secrets.mjs
           node --test scripts/verification/probe_job_summary.mjs
+          node --test scripts/verification/probe_reader_restore_scope.mjs
       - name: Python verification tests
         shell: bash
         run: |

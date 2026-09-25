@@ -20,7 +20,7 @@ def page_data(b,n,revision):
             'provider':'fixture','blocks':[block],'sourceRecords':[block],'warnings':[],'issueImages':{}}
 async def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--identity-only',action='store_true',help='Gate only the implemented response-identity contract; default also audits known unfixed navigation cases.')
+    parser.add_argument('--identity-only',action='store_true',help='Gate only the implemented response-identity contract; default verifies the complete navigation and refresh contract.')
     args=parser.parse_args()
     OUT.mkdir(parents=True,exist_ok=True)
     checks=[];errors=[];writes=[];external=[]
@@ -41,14 +41,21 @@ async def main():
                 if path.startswith('/api/'):
                     if mode=='library' and path=='/api/books' and u.query!='view=reader':await gate.wait()
                     if mode=='config' and path=='/api/config':await gate.wait()
-                    if mode=='switch' and path==f'/api/books/{B}/reader':await gate.wait()
+                    if mode in ('switch','switch-race') and path==f'/api/books/{B}/reader':await gate.wait()
                     if mode=='refresh' and state['refreshing'] and (path==f'/api/books/{A}' or path.endswith('/outline')):await gate.wait()
+                    if mode=='page-race' and path==f'/api/books/{A}/reader/pages/2':await gate.wait()
+                    if mode in ('refresh-read','refresh-draft') and state['refreshing'] and path==f'/api/books/{A}/reader/pages/1':await gate.wait()
+                    if mode=='metadata' and (path.endswith('/pages') or path.endswith('/outline')):await gate.wait()
+                    if mode=='config-failure' and path=='/api/config':
+                        await route.fulfill(status=503,json={'message':'synthetic unavailable configuration'});return
+                    if mode=='switch-failure' and path==f'/api/books/{B}/reader':
+                        await route.fulfill(status=503,json={'message':'synthetic unavailable book'});return
                     if path=='/api/config':value={'defaultProvider':'paddle-aistudio','providers':[], 'ocrChannels':[], 'qwenAssist':{},'capabilities':{'schemaVersion':2}}
                     elif path=='/api/books':value=[book(A),book(B)]
                     elif path=='/api/reading-policy':value={}
                     elif path.endswith('/job'):
                         state['jobReads']+=1
-                        if mode=='refresh' and state['jobReads']==1:
+                        if mode in ('refresh','refresh-read','refresh-draft') and state['jobReads']==1:
                             await route.fulfill(status=503,json={'message':'test-only initial status failure'});return
                         value={'status':'IDLE','completed':0,'total':0,'errors':[]}
                     elif path.endswith('/outline'):value=[]
@@ -57,7 +64,8 @@ async def main():
                     elif m:=re.fullmatch(r'/api/books/([^/]+)/(?:reader/)?pages/(\d+)',path):
                         n=int(m[2]);value=page_data(m[1],n,state['revision'])
                         if mode=='wrongpage':value['pageNumber']=39
-                    elif m:=re.fullmatch(r'/api/books/([^/]+)(?:/reader)?',path):value=book(m[1])
+                    elif m:=re.fullmatch(r'/api/books/([^/]+)(?:/reader)?',path):
+                        value=book(A if mode=='switch-mismatch' and m[1]==B else m[1])
                     else:value={}
                     try:await route.fulfill(json=value)
                     except Exception:
@@ -76,6 +84,10 @@ async def main():
             for mode in ([] if args.identity_only else ['library','config']):
                 ctx,page,gate,state,requests=await fixture(mode)
                 check(mode+'_does_not_block_library_options',await wait(page,"document.querySelector('#book-select').options.length>1"))
+                if mode=='config':
+                    await page.select_option('#book-select',A)
+                    check('slow_config_does_not_block_existing_page',await wait(page,"document.querySelector('#paper').textContent.includes('甲书')"))
+                    check('reader_not_busy_after_body_loaded',await page.locator('#reader-shell').get_attribute('aria-busy')=='false')
                 gate.set();await page.wait_for_function("document.querySelector('#book-select').options.length>1")
                 await ctx.close()
             if not args.identity_only:
@@ -97,6 +109,64 @@ async def main():
                 await page.click('#reading-window-open');await page.click('#refresh-job')
                 check('current_page_refresh_does_not_wait_for_book_metadata',await wait(page,"document.querySelector('#paper').textContent.includes('版本2')"))
                 gate.set();await ctx.close()
+                # A second selection supersedes the pending first manifest, including A-B-A.
+                ctx,page,gate,state,requests=await fixture('switch-race')
+                await page.wait_for_function("document.querySelector('#book-select').options.length>1")
+                await page.select_option('#book-select',A);await page.wait_for_selector('#paper .reading-flow')
+                await page.select_option('#book-select',B)
+                await page.select_option('#book-select',A)
+                check('return_to_original_book_does_not_wait_for_other_manifest',await wait(page,"document.querySelector('#paper').textContent.includes('甲书')"))
+                gate.set();await page.wait_for_timeout(120)
+                check('late_other_manifest_cannot_replace_reselected_book',await page.locator('#book-select').input_value()==A and '乙书' not in await page.locator('#paper').inner_text())
+                await ctx.close()
+                for mode in ('switch-failure','switch-mismatch'):
+                    ctx,page,gate,state,requests=await fixture(mode)
+                    await page.wait_for_function("document.querySelector('#book-select').options.length>1")
+                    await page.select_option('#book-select',A);await page.wait_for_selector('#paper .reading-flow')
+                    await page.select_option('#book-select',B)
+                    check(mode+'_retires_old_body',await wait(page,"document.querySelector('#paper').textContent.includes('书籍暂未打开') && !document.querySelector('#paper').textContent.includes('甲书')"))
+                    check(mode+'_cannot_navigate_unloaded_book',await page.locator('#page-jump').is_disabled())
+                    await page.select_option('#book-select',A)
+                    check(mode+'_can_recover_by_reselecting',await wait(page,"document.querySelector('#paper').textContent.includes('甲书')"))
+                    await ctx.close()
+                for mode in ('metadata','config-failure'):
+                    ctx,page,gate,state,requests=await fixture(mode)
+                    await page.wait_for_function("document.querySelector('#book-select').options.length>1")
+                    await page.select_option('#book-select',A)
+                    check(mode+'_cannot_block_current_body',await wait(page,"document.querySelector('#paper').textContent.includes('甲书')"))
+                    await page.locator('#page-jump').fill('3');await page.locator('#page-jump').press('Enter')
+                    check(mode+'_cannot_block_next_page',await wait(page,"document.querySelector('#paper').textContent.includes('第3页')"))
+                    gate.set();await ctx.close()
+                ctx,page,gate,state,requests=await fixture('page-race')
+                await page.wait_for_function("document.querySelector('#book-select').options.length>1")
+                await page.select_option('#book-select',A);await page.wait_for_selector('#paper .reading-flow')
+                await page.locator('#page-jump').fill('2');await page.locator('#page-jump').press('Enter')
+                await page.locator('#page-jump').fill('3');await page.locator('#page-jump').press('Enter')
+                check('fast_page_three_bypasses_slow_page_two',await wait(page,"document.querySelector('#paper').textContent.includes('第3页')"))
+                gate.set();await page.wait_for_timeout(100)
+                check('late_page_two_cannot_replace_page_three','第3页' in await page.locator('#paper').inner_text())
+                await ctx.close()
+                for mode in ('refresh-read','refresh-draft'):
+                    ctx,page,gate,state,requests=await fixture(mode)
+                    await page.wait_for_function("document.querySelector('#book-select').options.length>1")
+                    await page.select_option('#book-select',A);await page.wait_for_selector('#paper .reading-flow')
+                    await page.wait_for_function("!document.querySelector('#job-recovery').hidden")
+                    state['revision']=2;state['refreshing']=True
+                    await page.click('#reading-window-open');await page.click('#refresh-job')
+                    await page.wait_for_timeout(80)
+                    check(mode+'_keeps_visible_body_while_reading','版本1' in await page.locator('#paper').inner_text())
+                    await page.keyboard.press('Escape')
+                    if mode=='refresh-read':
+                        await page.locator('#page-jump').fill('3');await page.locator('#page-jump').press('Enter')
+                        check('navigation_does_not_wait_for_background_refresh',await wait(page,"document.querySelector('#paper').textContent.includes('第3页')"))
+                        gate.set();await page.wait_for_timeout(100)
+                        check('late_refresh_cannot_take_over_navigation','第3页' in await page.locator('#paper').inner_text())
+                    else:
+                        await page.click('#proof-toggle')
+                        await page.locator('#mark-reviewed').evaluate("el=>{el.checked=true;el.dispatchEvent(new Event('change',{bubbles:true}));}")
+                        gate.set();await page.wait_for_timeout(150)
+                        check('late_refresh_keeps_unsaved_review_draft',await page.locator('#mark-reviewed').is_checked() and '版本1' in await page.locator('#paper').inner_text() and await page.locator('#save-page').is_enabled())
+                    await ctx.close()
             ctx,page,gate,state,requests=await fixture('wrongpage')
             await page.wait_for_function("document.querySelector('#book-select').options.length>1")
             await page.select_option('#book-select',A);await page.wait_for_timeout(500)
@@ -105,7 +175,7 @@ async def main():
             check('no_javascript_errors',not errors);check('no_mutating_requests',not writes);check('no_external_requests',not external)
         finally:
             await browser.close()
-            report={'scope':'actual frontend, synthetic APIs, controlled latency','selection':'implemented-response-identity' if args.identity_only else 'full-audit-including-unfixed-navigation','checks':checks,'errors':errors,'writes':writes,'external':external}
+            report={'scope':'actual frontend, synthetic APIs, controlled latency','selection':'implemented-response-identity' if args.identity_only else 'full-navigation-and-refresh-contract','checks':checks,'errors':errors,'writes':writes,'external':external}
             (OUT/'results.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
             print(json.dumps(report,ensure_ascii=False,indent=2))
     if any(not c['pass'] for c in checks):raise SystemExit(1)
