@@ -73,7 +73,8 @@ public class JevDecisionClient {
     public JevDecisionClient(ObjectMapper json, DecisionTransport transport) {
         this.json = json;
         this.strictReader = json.copy().reader()
-                .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
+                .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                .with(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.transport = transport;
     }
 
@@ -88,19 +89,29 @@ public class JevDecisionClient {
                                Map<String, Object> state, Map<String, QuestionSpec> questions,
                                long deadlineNanos, int maxRequestBytes, int maxResponseBytes,
                                BooleanSupplier cancelled) throws JevCallException {
+        if(deadlineNanos<=0 || deadlineNanos>java.util.concurrent.TimeUnit.SECONDS.toNanos(600)
+                || maxRequestBytes<1 || maxRequestBytes>8*1024*1024 || maxResponseBytes<1 || maxResponseBytes>32*1024*1024)
+            throw new JevCallException(Kind.INVALID_REQUEST,"决策期限或响应大小配置无效");
+        long deadline=System.nanoTime()+deadlineNanos;
+        BooleanSupplier stop=cancelled==null?()->false:cancelled;
+        String usageAttempt=null;
+        boolean sent=false,completeResponse=false,success=false;
+        try {
+        checkActive(stop,deadline);
         if (endpoint == null || endpoint.isBlank()) throw new JevCallException(Kind.PROTOCOL, "endpoint 为空");
         URI uri;
         try {
             uri = URI.create(endpoint);
         } catch (IllegalArgumentException e) {
-            throw new JevCallException(Kind.PROTOCOL, "endpoint 非法", e);
+            throw new JevCallException(Kind.PROTOCOL, "endpoint 非法");
         }
         // 固定官方 HTTPS 端点；测试 loopback 仅限测试 profile 的 http 本地地址
         if (!"https".equalsIgnoreCase(uri.getScheme()) && !"http".equalsIgnoreCase(uri.getScheme()))
             throw new JevCallException(Kind.PROTOCOL, "endpoint 非法");
         if (apiKey == null || apiKey.isBlank()) throw new JevCallException(Kind.UNAUTHORIZED, "缺失 API key");
         if (model == null || model.isBlank()) throw new JevCallException(Kind.PROTOCOL, "模型为空");
-        if (questions == null || questions.isEmpty()) throw new JevCallException(Kind.PROTOCOL, "问题为空");
+        if (questions == null || questions.isEmpty() || questions.size()>64) throw new JevCallException(Kind.PROTOCOL, "问题数量无效");
+        questions=Map.copyOf(questions); // Validate against the same question set that was serialized.
         byte[] body;
         try {
             Map<String, Object> request = new LinkedHashMap<>();
@@ -115,9 +126,9 @@ public class JevDecisionClient {
                 questionMap.put(e.getKey(), question);
             }
             request.put("questions", questionMap);
-            body = json.writeValueAsBytes(request);
+            body = boundedRequest(request,maxRequestBytes);
         } catch (IOException e) {
-            throw new JevCallException(Kind.PROTOCOL, "请求序列化失败", e);
+            throw new JevCallException(Kind.PROTOCOL, "请求序列化失败");
         }
         if (body.length > maxRequestBytes)
             throw new JevCallException(Kind.TOO_LARGE, "请求超过最大字节限制");
@@ -126,25 +137,39 @@ public class JevDecisionClient {
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body))
                 .build();
-        String usageAttempt = null;
+        checkActive(stop,deadline);
         if (usageLedger != null) {
-            try { usageAttempt = usageLedger.start("jev", model); }
+            try { usageAttempt = usageLedger.prepare("jev", model); }
             catch (IOException e) { throw new JevCallException(Kind.PROTOCOL, "用量账本不可用，禁止决策外呼"); }
         }
+        checkActive(stop,deadline);
+        if(usageLedger!=null) {
+            try {usageLedger.sending(usageAttempt);}
+            catch(IOException unavailable){throw new JevCallException(Kind.PROTOCOL,"发送回执未确认，未发送决策请求");}
+        }
+        checkActive(stop,deadline);
+        long remaining=deadline-System.nanoTime();
+        HttpRequest timed=HttpRequest.newBuilder(request,(name,value)->true)
+                .timeout(java.time.Duration.ofNanos(remaining)).build();
         BoundedHttp.Response response;
+        sent=true;
         try {
-            response = transport.send(request, deadlineNanos, maxResponseBytes, cancelled);
+            response = transport.send(timed, remaining, maxResponseBytes, stop);
         } catch (BoundedHttp.BoundedHttpException e) {
             throw switch (e.kind()) {
-                case TIMEOUT -> new JevCallException(Kind.TIMEOUT, "决策请求总时限耗尽", e);
-                case CANCELLED -> new JevCallException(Kind.CANCELLED, "决策请求已取消", e);
-                case TOO_LARGE -> new JevCallException(Kind.TOO_LARGE, "决策响应超过最大字节限制", e);
-                case IO -> new JevCallException(Kind.NETWORK, "决策网络读写失败", e);
+                case TIMEOUT -> new JevCallException(Kind.TIMEOUT, "决策请求总时限耗尽");
+                case CANCELLED -> new JevCallException(Kind.CANCELLED, "决策请求已取消");
+                case TOO_LARGE -> new JevCallException(Kind.TOO_LARGE, "决策响应超过最大字节限制");
+                case IO -> new JevCallException(Kind.NETWORK, "决策网络读写失败");
             };
         } catch (IOException e) {
-            throw new JevCallException(Kind.NETWORK, "决策网络读写失败", e);
+            if(Thread.currentThread().isInterrupted() || stop.getAsBoolean())throw new JevCallException(Kind.CANCELLED,"决策请求已取消");
+            throw new JevCallException(Kind.NETWORK, "决策网络读写失败");
         }
-        try {
+        if(response==null)throw new JevCallException(Kind.NETWORK,"决策未返回响应，远端结果未知");
+        completeResponse=true;
+        checkActive(stop,deadline);
+        if(response.body().length>maxResponseBytes)throw new JevCallException(Kind.TOO_LARGE,"决策响应超过最大字节限制");
         int status = response.status();
         if (status == 401) throw new JevCallException(Kind.UNAUTHORIZED, "供应商拒绝授权");
         if (status == 422) throw new JevCallException(Kind.INVALID_REQUEST, "供应商拒绝请求体");
@@ -157,15 +182,15 @@ public class JevDecisionClient {
         String responseHash = DecisionHash.sha256Hex(raw);
         JsonNode root;
         try {
-            root = strictReader.readTree(raw);
+            root = strictReader.readTree(response.body());
         } catch (IOException e) {
-            throw new JevCallException(Kind.PROTOCOL, "决策响应非合法 JSON", e);
+            throw new JevCallException(Kind.PROTOCOL, "决策响应非合法 JSON");
         }
         if (usageAttempt != null) {
             try { usageLedger.captureUsage(usageAttempt, root); }
             catch (IOException e) { throw new JevCallException(Kind.PROTOCOL, "用量账本不可用，决策响应未采用"); }
         }
-        if (root == null || !root.isObject() || !root.has("answers") || !root.get("answers").isObject())
+        if (root == null || !root.isObject() || root.hasNonNull("error") || !root.has("answers") || !root.get("answers").isObject())
             throw new JevCallException(Kind.PROTOCOL, "决策响应缺少 answers");
         JsonNode answers = root.get("answers");
         if (answers.size() != questions.size())
@@ -203,19 +228,57 @@ public class JevDecisionClient {
         String requestId = null;
         for (String key : List.of("requestId", "request_id", "id"))
             if (root.has(key) && root.get(key).isTextual()) { requestId = root.get(key).asText(); break; }
+        checkActive(stop,deadline);
         if (usageAttempt != null) {
             try { usageLedger.succeeded(usageAttempt); }
             catch (IOException e) { throw new JevCallException(Kind.PROTOCOL, "用量账本不可用，决策响应未采用"); }
         }
+        success=true;
+        // The physical result can be durably complete even if its caller cancels during
+        // that final flush. Preserve the receipt, but never return a cancelled recommendation.
+        checkActive(stop,deadline);
         return new CallResult(choice, gap, scores, usage, reportedModel, requestId, responseHash);
-        } catch (JevCallException e) {
-            if (usageAttempt != null) {
-                try { usageLedger.failed(usageAttempt); }
-                catch (IOException ignored) { throw new JevCallException(Kind.PROTOCOL, "用量账本不可用，决策响应未采用"); }
+        } catch(JevCallException classified) {throw classified;}
+        catch(studio.bookhtml.service.CancelledException | java.util.concurrent.CancellationException stopped) {
+            throw new JevCallException(Kind.CANCELLED,"决策请求已取消");
+        } catch(Exception invalid) {throw new JevCallException(Kind.PROTOCOL,"决策请求或响应处理未完成");}
+        finally {
+            if(usageLedger!=null && usageAttempt!=null && !success) {
+                boolean interrupted=Thread.interrupted();
+                try {
+                    if(!sent)usageLedger.notSent(usageAttempt);
+                    else if(completeResponse)usageLedger.failed(usageAttempt);
+                    else usageLedger.unknown(usageAttempt);
+                } catch(Exception unconfirmed) {
+                    System.getLogger(JevDecisionClient.class.getName()).log(System.Logger.Level.WARNING,
+                            "JEV_SETTLEMENT_UNCONFIRMED: no inferred success, refund or resend");
+                } finally {if(interrupted)Thread.currentThread().interrupt();}
             }
-            throw e;
         }
     }
+    private static void checkActive(BooleanSupplier stop,long deadline) throws JevCallException {
+        if(Thread.currentThread().isInterrupted() || stop.getAsBoolean())throw new JevCallException(Kind.CANCELLED,"决策请求已取消");
+        if(deadline-System.nanoTime()<=0)throw new JevCallException(Kind.TIMEOUT,"决策请求总时限耗尽");
+    }
+    private byte[] boundedRequest(Object request,int limit) throws IOException,JevCallException {
+        var bytes=new java.io.ByteArrayOutputStream();
+        java.io.OutputStream bounded=new java.io.OutputStream() {
+            @Override public void write(int value)throws IOException {
+                if(bytes.size()==limit)throw new RequestTooLarge();bytes.write(value);
+            }
+            @Override public void write(byte[] value,int offset,int length)throws IOException {
+                if(length>limit-bytes.size())throw new RequestTooLarge();bytes.write(value,offset,length);
+            }
+        };
+        try {json.writeValue(bounded,request);return bytes.toByteArray();}
+        catch(IOException invalid) {
+            Throwable cause=invalid;
+            for(int depth=0;cause!=null && depth<8;depth++,cause=cause.getCause())
+                if(cause instanceof RequestTooLarge)throw new JevCallException(Kind.TOO_LARGE,"请求超过最大字节限制");
+            throw invalid;
+        }
+    }
+    private static final class RequestTooLarge extends IOException {}
 
     private DecisionModels.NormalizedChoice parseChoice(String id, QuestionSpec spec, JsonNode answer)
             throws JevCallException {
@@ -257,7 +320,7 @@ public class JevDecisionClient {
         try {
             return new DecisionModels.NormalizedChoice(id, selected, distribution, confidence);
         } catch (IllegalArgumentException e) {
-            throw new JevCallException(Kind.PROTOCOL, "答案归一化失败", e);
+            throw new JevCallException(Kind.PROTOCOL, "答案归一化失败");
         }
     }
 
@@ -268,7 +331,7 @@ public class JevDecisionClient {
         try {
             return new DecisionModels.NormalizedNoul(id, pYes);
         } catch (IllegalArgumentException e) {
-            throw new JevCallException(Kind.PROTOCOL, "noul 非法", e);
+            throw new JevCallException(Kind.PROTOCOL, "noul 非法");
         }
     }
 
@@ -278,7 +341,8 @@ public class JevDecisionClient {
         double score = answer.get("score").asDouble();
         Map<String, Double> distribution = new LinkedHashMap<>();
         JsonNode probabilities = answer.get("probabilities");
-        if (probabilities != null && probabilities.isObject())
+        if (probabilities != null && !probabilities.isObject())throw new JevCallException(Kind.PROTOCOL,"score 分布类型非法");
+        if (probabilities != null)
             for (var field : (Iterable<Map.Entry<String, JsonNode>>) probabilities::fields) {
                 if (!field.getValue().isNumber()) throw new JevCallException(Kind.PROTOCOL, "score 分布非法");
                 double probability = field.getValue().asDouble();
@@ -288,7 +352,8 @@ public class JevDecisionClient {
                 distribution.put(field.getKey(), probability);
             }
         Double confidence = null;
-        if (answer.has("confidence") && answer.get("confidence").isNumber()) {
+        if (answer.has("confidence")) {
+            if(!answer.get("confidence").isNumber())throw new JevCallException(Kind.PROTOCOL,"score confidence 非法");
             confidence = answer.get("confidence").asDouble();
             if (Double.isNaN(confidence) || Double.isInfinite(confidence)
                     || confidence < 0 || confidence > 1)
@@ -297,7 +362,7 @@ public class JevDecisionClient {
         try {
             return new ScoreAnswer(id, score, distribution, confidence);
         } catch (IllegalArgumentException e) {
-            throw new JevCallException(Kind.PROTOCOL, "score 归一化失败", e);
+            throw new JevCallException(Kind.PROTOCOL, "score 归一化失败");
         }
     }
 
@@ -308,7 +373,7 @@ public class JevDecisionClient {
         Map<String, Long> result = new LinkedHashMap<>();
         for (String key : List.of("input_tokens", "output_tokens")) {
             if (!usage.has(key)) continue;
-            if (!usage.get(key).isNumber() || usage.get(key).asLong() < 0)
+            if (!usage.get(key).isIntegralNumber() || !usage.get(key).canConvertToLong() || usage.get(key).longValue() < 0)
                 throw new JevCallException(Kind.PROTOCOL, "usage 非法");
             result.put(key, usage.get(key).asLong());
         }

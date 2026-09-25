@@ -102,6 +102,10 @@ jobs:
             for suite in AutomaticComprehensibilityTest HandwritingTranscribeServiceTest PageWorkSchedulerOwnershipTest RemoteJobStaleReclaimTest CurrentAuditReproductionTest ConsentAuthorityRegressionTest RemoteRecoveryQuarantineTest ProgressPlanAuthorityTest EvidenceAndCompletionTest PhysicalBoundaryRegressionTest LegacyModelBoundaryTest; do
               cp "target/surefire-reports/TEST-studio.bookhtml.service.$suite.xml" "test-results/lifecycle-repeat-$round/"
             done
+            mvn --batch-mode -Dtest=JevBoundaryRegressionTest,JevClientTest,CoordinatorTest,AcceptTest test
+            for suite in JevBoundaryRegressionTest JevClientTest CoordinatorTest AcceptTest; do
+              cp "target/surefire-reports/TEST-studio.bookhtml.decision.$suite.xml" "test-results/lifecycle-repeat-$round/"
+            done
           done
       - name: Build manifest
         run: |
