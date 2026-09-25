@@ -123,4 +123,15 @@ class ManuscriptResumeStoreTest {
             System.out.println("REGION_RECOVERED");store.close();
         }
     }
+
+    @Test void nanosecondClockRoundTripsWithoutLosingCacheIntegrity()throws Exception {
+        Instant nano=Instant.parse("2026-09-25T14:49:19.123456789Z");
+        var precise=new ManuscriptResumeStore(store,json,Clock.fixed(nano,ZoneOffset.UTC));
+        var session=precise.open(book,1,source,contract);
+        assertTrue(session.available());
+        assertEquals(nano,precise.read(file(),book,1).startedAt(),"timestamp cannot be rounded via JSON double");
+        session.put(0,input,result);
+        assertTrue(session.available());
+        assertEquals(result,precise.open(book,1,source,contract).get(0,input));
+    }
 }

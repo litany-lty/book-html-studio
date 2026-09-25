@@ -34,6 +34,9 @@ public final class ManuscriptResumeStore {
     ManuscriptResumeStore(BookStore store,ObjectMapper json,Clock clock) {
         this.store=Objects.requireNonNull(store);this.clock=Objects.requireNonNull(clock);
         this.json=Objects.requireNonNull(json).copy().enable(MapperFeature.SORT_PROPERTIES_ALPHABETICALLY)
+                // Numeric Instant values pass through JsonNode; IEEE-754 conversion can
+                // lose Linux clock nanoseconds and invalidate our own checksum on read.
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
                 .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT).disable(MapperFeature.ALLOW_COERCION_OF_SCALARS);
     }
     Path path(String book,int page) {
