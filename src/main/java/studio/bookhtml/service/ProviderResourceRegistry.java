@@ -37,7 +37,7 @@ public class ProviderResourceRegistry {
 
     public static String canonicalCategory(String provider) {
         if (provider == null) return POOL_OCR;
-        String lower = provider.toLowerCase(Locale.ROOT);
+        String lower = provider.strip().toLowerCase(Locale.ROOT);
         if (lower.contains("qwen") || lower.contains("dashscope")) return POOL_QWEN;
         if (lower.contains("minimax")) return POOL_MINIMAX;
         if (lower.contains("paddle") || lower.contains("ppocr") || lower.contains("baidu")) return POOL_OCR;
@@ -94,16 +94,16 @@ public class ProviderResourceRegistry {
 
         PoolState(String name, int maxConcurrent, int maxBackground, int maxQueued) {
             this.name = name;
-            this.maxConcurrent = Math.max(1, maxConcurrent);
+            this.maxConcurrent = Math.max(1, Math.min(3,maxConcurrent));
             this.maxBackground = Math.max(0, Math.min(maxBackground, this.maxConcurrent - 1));
-            this.maxQueued = Math.max(0, maxQueued);
+            this.maxQueued = Math.max(0, Math.min(24,maxQueued));
         }
 
         public void reconfigure(int maxConcurrent, int maxBackground, int maxQueued) {
             synchronized (lock) {
-                this.maxConcurrent = Math.max(1, maxConcurrent);
+                this.maxConcurrent = Math.max(1, Math.min(3,maxConcurrent));
                 this.maxBackground = Math.max(0, Math.min(maxBackground, this.maxConcurrent - 1));
-                this.maxQueued = Math.max(0, maxQueued);
+                this.maxQueued = Math.max(0, Math.min(24,maxQueued));
                 lock.notifyAll();
             }
         }
@@ -134,13 +134,15 @@ public class ProviderResourceRegistry {
                         if (cancelled != null && cancelled.getAsBoolean()) {
                             throw new CancelledException();
                         }
+                        long remaining = deadline - System.nanoTime();
+                        if (remaining <= 0) return null;
                         if (available(foreground) && nextEligible() == entry) {
                             waiting.removeIf(w -> w == entry);
                             return admit(foreground);
                         }
-                        long remaining = deadline - System.nanoTime();
-                        if (remaining <= 0) return null;
-                        TimeUnit.NANOSECONDS.timedWait(lock, remaining);
+                        // Cancellation can be a flag without an interrupt/notify. Observe it
+                        // promptly while preserving the original absolute wait deadline.
+                        TimeUnit.NANOSECONDS.timedWait(lock, Math.min(remaining,TimeUnit.MILLISECONDS.toNanos(100)));
                     }
                 } finally {
                     waiting.removeIf(w -> w == entry);
@@ -176,6 +178,11 @@ public class ProviderResourceRegistry {
             }
         }
 
+        public Map<String,Object> snapshot() {
+            synchronized(lock) { return Map.of("inFlight",activeTotal,"backgroundInFlight",activeBackground,
+                    "queued",waiting.size(),"limit",maxConcurrent,"backgroundLimit",maxBackground,
+                    "queueLimit",maxQueued,"peakInFlight",maxObservedInFlight,"admittedPermits",admittedCalls); }
+        }
         public int inFlight() { synchronized (lock) { return activeTotal; } }
         public int backgroundInFlight() { synchronized (lock) { return activeBackground; } }
         public int queued() { synchronized (lock) { return waiting.size(); } }

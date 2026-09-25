@@ -38,10 +38,14 @@ public final class BoundedHttp implements AutoCloseable {
         public Kind kind() { return kind; }
     }
 
-    public record Response(int status, byte[] body) {
-        public Response {
-            body = body == null ? new byte[0] : body.clone();
-        }
+    public record Response(int status, byte[] body,String retryAfter) {
+        public Response(int status,byte[] body) {this(status,body,null);}
+        public Response {body=body==null?new byte[0]:body.clone();}
+    }
+    private static String retryAfter(HttpResponse<?> response) {
+        if(response.headers()==null)return null;
+        var values=response.headers().allValues("Retry-After");
+        return values.size()==1?values.get(0):values.isEmpty()?null:"AMBIGUOUS_RETRY_AFTER";
     }
 
     private static final AtomicInteger POOL_SEQ = new AtomicInteger();
@@ -114,13 +118,13 @@ public final class BoundedHttp implements AutoCloseable {
                              BooleanSupplier cancelled) throws BoundedHttpException {
         int status = response.statusCode();
         InputStream stream = response.body();
-        if (stream == null) return new Response(status, new byte[0]);
+        if (stream == null) return new Response(status, new byte[0],retryAfter(response));
         openBodies.add(stream);
         try {
             // Submission is inside the close scope: a saturated executor owns no leaked stream.
             CompletableFuture<byte[]> bodyFuture = CompletableFuture.supplyAsync(
                     () -> readBounded(stream, maxBytes), bodyReaders);
-            return new Response(status, awaitFuture(bodyFuture, stream, deadline, cancelled, "响应体读取超时"));
+            return new Response(status, awaitFuture(bodyFuture, stream, deadline, cancelled, "响应体读取超时"),retryAfter(response));
         } catch (RejectedExecutionException rejected) {
             throw new BoundedHttpException(Kind.IO, "响应体读取队列已满或已关闭");
         } finally {

@@ -118,10 +118,14 @@ def main():
                 height:s.height,display:s.display,position:s.position,left:s.left,right:s.right,flex:s.flex,padding:s.padding,inline:el.getAttribute('style'),
                 matches:el.matches('body.focus-reading *')};}),sheets:[...document.styleSheets].map(s=>({href:s.href,rules:s.cssRules.length}))})""")
             (OUT/'layout-details.json').write_text(json.dumps(details,indent=2)+'\n',encoding='utf-8')
-            check('full_viewport_and_bottom_progress', page.evaluate('''() => {
+            # Native dialog close and focus-mode class updates settle on rendering frames.
+            # Await the exact geometry contract, not a sleep or a weaker assertion.
+            focus_geometry = '''() => {
               const r=document.querySelector('#reader').getBoundingClientRect(), p=document.querySelector('#reading-progress').getBoundingClientRect();
-              return r.top===0 && Math.abs(r.height-innerHeight)<=1 && Math.abs(p.bottom-innerHeight)<=1 && p.width===innerWidth;
-            }'''))
+              return r.top===0 && Math.abs(r.height-innerHeight)<=1 && Math.abs(p.bottom-innerHeight)<=1 && p.left===0 && p.right===innerWidth && p.width===innerWidth;
+            }'''
+            page.wait_for_function(focus_geometry, polling='raf', timeout=3000)
+            check('full_viewport_and_bottom_progress', page.evaluate(focus_geometry))
             check('no_visible_arrows_or_side_overlay', page.evaluate("""() => [...document.querySelectorAll('.focus-page-zone')].every(el=>{
               const r=el.getBoundingClientRect(); return r.width<=1 && r.height<=1 && getComputedStyle(el).pointerEvents==='none' && !/[‹›]/.test(el.textContent);
             })"""))

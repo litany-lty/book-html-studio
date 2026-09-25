@@ -60,10 +60,15 @@ public class DiagnosticsController {
         result.put("renderAvailablePermits", budget == null ? 0 : budget.availablePermits());
         result.put("tmpUsableBytes", tmpUsable);
         if (providerRegistry != null) {
-            Map<String, Object> providers = new LinkedHashMap<>();
-            providers.put("qwenInFlight", providerRegistry.inFlight("qwen"));
-            providers.put("ocrInFlight", providerRegistry.inFlight("ocr"));
-            providers.put("minimaxInFlight", providerRegistry.inFlight("minimax"));
+            Map<String,Object> qwen=providerRegistry.pool("qwen").snapshot();
+            Map<String,Object> ocr=providerRegistry.pool("ocr").snapshot();
+            Map<String,Object> minimax=providerRegistry.pool("minimax").snapshot();
+            Map<String,Object> providers=new LinkedHashMap<>();
+            providers.put("qwenInFlight",qwen.get("inFlight"));
+            providers.put("ocrInFlight",ocr.get("inFlight"));
+            providers.put("minimaxInFlight",minimax.get("inFlight"));
+            providers.put("qwen",qwen);providers.put("ocr",ocr);providers.put("minimax",minimax);
+            providers.put("scope","PROCESS_WIDE");
             result.put("providerResources", providers);
         }
         if (lanPairingService != null) {

@@ -51,26 +51,22 @@ public class DelayedCallQueue implements AutoCloseable {
         this.scheduler = Objects.requireNonNull(scheduler);
     }
 
+    /** Values beyond the local retry window defer the call, never shorten the provider's wait. */
     public static int parseRetryAfter(String headerValue) {
-        if (headerValue == null || headerValue.isBlank()) {
-            return DEFAULT_BACKOFF_SECONDS;
+        if(headerValue==null || headerValue.isBlank())return DEFAULT_BACKOFF_SECONDS;
+        String value=headerValue.strip();
+        if(value.length()>256 || "AMBIGUOUS_RETRY_AFTER".equals(value))return Integer.MAX_VALUE;
+        if(value.matches("[0-9]+")) {
+            try {long seconds=Long.parseLong(value);return seconds>MAX_BACKOFF_SECONDS?Integer.MAX_VALUE:(int)seconds;}
+            catch(NumberFormatException tooLarge){return Integer.MAX_VALUE;}
         }
-        String stripped = headerValue.strip();
         try {
-            int seconds = Integer.parseInt(stripped);
-            if (seconds <= 0) return DEFAULT_BACKOFF_SECONDS;
-            return Math.min(seconds, MAX_BACKOFF_SECONDS);
-        } catch (NumberFormatException notNumber) {
-            try {
-                TemporalAccessor accessor = DateTimeFormatter.RFC_1123_DATE_TIME.parse(stripped);
-                Instant target = Instant.from(accessor);
-                long diffSeconds = Duration.between(Instant.now(), target).toSeconds();
-                if (diffSeconds <= 0) return DEFAULT_BACKOFF_SECONDS;
-                return (int) Math.min(diffSeconds, MAX_BACKOFF_SECONDS);
-            } catch (Exception notDate) {
-                return DEFAULT_BACKOFF_SECONDS;
-            }
-        }
+            Instant target=Instant.from(DateTimeFormatter.RFC_1123_DATE_TIME.parse(value));
+            Duration delta=Duration.between(Instant.now(),target);
+            if(delta.isNegative() || delta.isZero())return DEFAULT_BACKOFF_SECONDS;
+            long seconds=delta.getSeconds()+(delta.getNano()==0?0:1);
+            return seconds>MAX_BACKOFF_SECONDS?Integer.MAX_VALUE:(int)seconds;
+        } catch(Exception invalid){return DEFAULT_BACKOFF_SECONDS;}
     }
 
     public boolean schedule(DelayedCallDescriptor descriptor, Runnable onReady) {
