@@ -1091,7 +1091,7 @@ public class UsageLedger {
                 || !e.model().matches("[A-Za-z0-9][A-Za-z0-9._-]{0,119}")
                 || !e.operation().matches("[A-Z][A-Z0-9_]{0,39}")
                 || e.pageNumber() != null && e.pageNumber() < 1
-                || !Set.of("paddle-aistudio", "ppocr", "qwen", "jev").contains(e.provider())
+                || !Set.of("paddle-aistudio", "ppocr", "qwen", "jev", "minimax").contains(e.provider())
                 || !Set.of("PREPARED", "SENT_UNKNOWN", "PENDING", "OUTCOME_UNKNOWN", "NOT_SENT", "SUCCEEDED", "FAILED", "CACHE_REUSED").contains(e.status())
                 || !Set.of("UNKNOWN", "ESTIMATED", "CACHE_REUSE").contains(e.feeKind())
                 || e.inputTokens() != null && e.inputTokens() < 0

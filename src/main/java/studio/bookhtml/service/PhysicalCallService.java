@@ -24,6 +24,7 @@ public class PhysicalCallService implements AutoCloseable {
     private CloudConsentService consentService;
     private boolean runtimeManaged;
     private volatile boolean closed;
+    private BoundedHttp synchronousHttp;
     private studio.bookhtml.config.OutboundDestinationPolicy outboundPolicy=new studio.bookhtml.config.OutboundDestinationPolicy();
     /** Explicit isolated constructor used by transport-contract tests. */
     public PhysicalCallService(ProviderResourceRegistry resources,AttemptCallBudgetStore budgets,DelayedCallQueue delayed,ObjectMapper json) {
@@ -150,6 +151,72 @@ public class PhysicalCallService implements AutoCloseable {
             return new CallOutcome.NotSent(failure instanceof AdmissionDenied?failure.getMessage():"调用准备未完成，未发送请求");
         } finally {if(call!=null)call.close();}
     }
+    /** Purpose determines provider, budget class and enhancement authorization, never caller-supplied text. */
+    enum SynchronousPurpose {
+        QWEN_OCR("qwen",false), QWEN_CROP_OCR("qwen",true), MINIMAX_ASSIST("minimax",true);
+        final String provider;final boolean enhancement;
+        SynchronousPurpose(String provider,boolean enhancement){this.provider=provider;this.enhancement=enhancement;}
+    }
+    @FunctionalInterface interface ModelParser<T> {T parse(JsonNode root) throws Exception;}
+    ManagedTransport synchronousTransport() { return (request,remaining,maxBytes,stop)->http().send(request,remaining,maxBytes,stop); }
+    private synchronized BoundedHttp http() throws java.io.IOException {
+        if(closed)throw new java.io.IOException("shared transport closed");
+        if(synchronousHttp==null)synchronousHttp=new BoundedHttp(6,Duration.ofSeconds(10));
+        return synchronousHttp;
+    }
+    /** One network attempt. Provider-specific parsing finishes before a successful receipt. */
+    <T> T invokeSynchronous(SynchronousPurpose purpose,String model,long timeoutNanos,int maxBytes,
+                           RequestFactory factory,ManagedTransport transport,BooleanSupplier cancelled,ModelParser<T> parser) throws OcrException {
+        Objects.requireNonNull(purpose);Objects.requireNonNull(factory);Objects.requireNonNull(transport);Objects.requireNonNull(parser);
+        if(timeoutNanos<=0 || timeoutNanos>TimeUnit.SECONDS.toNanos(600) || maxBytes<1 || maxBytes>MAX_RESPONSE_BYTES)
+            throw new AdmissionDenied("调用期限或响应上限无效，未发送请求");
+        long started=System.nanoTime();var parent=UsageContext.current();var execution=QwenExecutionScope.current();
+        if(runtimeManaged && (parent==null || execution==null))throw new AdmissionDenied("调用缺少页级执行身份，未发送请求");
+        if(execution!=null && (parent==null || !execution.bookId().equals(parent.bookId())
+                || !Objects.equals(execution.pageNumber(),parent.pageNumber())))throw new AdmissionDenied("执行与账本书页不一致，未发送请求");
+        QwenRequestGate.Budget budget=execution==null?new QwenRequestGate.Budget(purpose.enhancement?8:5):
+                purpose.enhancement?execution.budget():execution.ocrBudget();
+        long deadline=budget.constrainDeadline(started+timeoutNanos);
+        boolean foreground=execution==null || execution.foreground();
+        try(UsageContext.Scope operation=parent==null?null:UsageContext.open(parent.bookId(),parent.pageNumber(),purpose.name(),parent.taskId())) {
+            PhysicalCallSession.RequestGuard guard=request->{
+                if(closed)throw new AdmissionDenied("调用服务正在关闭");
+                if(parent!=null && (parent.pageNumber()==null || parent.pageNumber()<1))throw new AdmissionDenied("调用缺少有效页码");
+                authorize(parent==null?null:parent.bookId(),purpose.provider,purpose.enhancement,!foreground,null);
+                if(request!=null)validateDestination(request);
+            };
+            guard.check(null);
+            try(PhysicalCallSession call=openOwned(
+                    ()->resources.acquire(purpose.provider,foreground,Duration.ofNanos(Math.max(0,deadline-System.nanoTime())),cancelled),
+                    budget::claim,ledger,purpose.provider,model,deadline,cancelled,guard)) {
+                var response=call.sendBuffered(factory.buildRequest(),transport,maxBytes);
+                if(response.status()==429) {
+                    int delay=DelayedCallQueue.parseRetryAfter(response.retryAfter());
+                    throw new AdmissionDenied(delay==Integer.MAX_VALUE?"模型限流等待超出当前任务期限，保留原文，未自动重发":
+                            "模型请求频率受限，请至少等待 "+delay+" 秒后重新处理；未自动重发");
+                }
+                if(response.status()<200 || response.status()>=300)throw new AdmissionDenied("模型请求失败（HTTP "+response.status()+"）");
+                JsonNode root;
+                try {root=strict(response.body());}catch(Exception invalid){throw new AdmissionDenied("模型响应格式无效，保留原文");}
+                call.captureUsage(root);
+                try {
+                    T result=Objects.requireNonNull(parser.parse(root),"model result missing");
+                    check(cancelled,deadline);call.succeeded();return result;
+                } catch(OcrNoTextException noText) {
+                    // Valid empty OCR is a completed request, not proof that the physical page is blank.
+                    check(cancelled,deadline);call.succeeded();throw noText;
+                } catch(CancelledException | InterruptedException cancelledParse) {throw cancelledParse;}
+                catch(Exception invalid){throw new AdmissionDenied("模型内容或引用未通过完整性校验，保留原文");}
+            }
+        } catch(CancelledException | OcrNoTextException expected){throw expected;}
+        catch(InterruptedException stopped){Thread.currentThread().interrupt();throw new CancelledException();}
+        catch(AdmissionDenied safe){throw safe;}
+        catch(BoundedHttp.BoundedHttpException transportFailure) {
+            if(transportFailure.kind()==BoundedHttp.Kind.CANCELLED)throw new CancelledException();
+            throw new OcrException("模型响应读取未完成，未自动重发，保留原文");
+        } catch(Exception unknown){throw new OcrException("模型调用未完成，未自动重发，保留原文");}
+    }
+
     private JsonNode strict(byte[] bytes) throws java.io.IOException {
         try(var parser=json.getFactory().createParser(bytes)) {
             parser.enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
@@ -162,5 +229,5 @@ public class PhysicalCallService implements AutoCloseable {
         JsonNode root=strict(response.body());
         if(!root.isObject() || root.hasNonNull("error"))throw new AdmissionDenied("服务返回业务错误或非对象响应");
     }
-    @Override @jakarta.annotation.PreDestroy public void close(){closed=true;delayedQueue.close();}
+    @Override @jakarta.annotation.PreDestroy public synchronized void close(){closed=true;delayedQueue.close();if(synchronousHttp!=null)synchronousHttp.close();}
 }

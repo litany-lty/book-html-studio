@@ -22,7 +22,7 @@ const count = value => value != null && Number.isFinite(Number(value)) ? Number(
 const amounts = (items, empty) => Array.isArray(items) && items.length
   ? items.map(item => `${item.amount ?? '未知'} ${item.currency || '币种未知'}`).join('、') : empty;
 const operationLabel = { OCR: '文字识别', OCR_PAGE: '页面解析', QWEN: 'Qwen 结构辅助', JEV: 'JEV 候选比较', JEV_DECISION: 'JEV 候选比较', LOCAL_OCR: '局部识别' };
-const providerLabel = { 'paddle-aistudio': '飞桨 AI Studio', ppocr: '百度智能云 PP-OCRv6', qwen: '百炼 Qwen', jev: 'JEV' };
+const providerLabel = { 'paddle-aistudio': '飞桨 AI Studio', ppocr: '百度智能云 PP-OCRv6', qwen: '百炼 Qwen', minimax: 'MiniMax', jev: 'JEV' };
 const statusLabel = { PREPARED: '已准备，未进入发送', SENT_UNKNOWN: '发送结果待确认', OUTCOME_UNKNOWN: '远端结果未知', NOT_SENT: '未发送', SUCCEEDED: '成功', FAILED: '失败', CACHE_REUSED: '缓存复用', PENDING: '远端处理中' };
 const feeLabel = { UNKNOWN: '费用未知', ESTIMATED: '按自填单价估算', REPORTED: '供应商回传', CACHE_REUSE: '缓存复用，未新增外呼' };
 

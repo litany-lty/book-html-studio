@@ -59,6 +59,11 @@ public class QwenRequestGate {
             if (deadlineNanos == null || candidate - deadlineNanos < 0) deadlineNanos = candidate;
             return deadlineNanos;
         }
+        /** Clamp a caller's absolute deadline; a later region never refreshes the clock. */
+        public synchronized long constrainDeadline(long absolute) {
+            if(deadlineNanos==null || absolute-deadlineNanos<0) deadlineNanos=absolute;
+            return deadlineNanos;
+        }
         public int limit() { return total; }
         Budget(int total) {
             if (total < 1) throw new IllegalArgumentException("invalid call budget");
