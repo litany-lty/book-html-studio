@@ -56,6 +56,13 @@ public class ApiController {
     }
     private static String safeEndpoint(String value){try{java.net.URI uri=java.net.URI.create(value);if(uri.getHost()==null||!("https".equalsIgnoreCase(uri.getScheme())||"http".equalsIgnoreCase(uri.getScheme())))return "";return new java.net.URI(uri.getScheme(),null,uri.getHost(),uri.getPort(),uri.getPath(),null,null).toString();}catch(Exception ignored){return "";}}
     @GetMapping("/books") public List<Book> list(){return books.list();}
+    @GetMapping(value="/books",params="view=reader")
+    public List<Map<String,Object>> readerLibrary(){
+        return books.listForReading().stream().map(book->{
+            Map<String,Object> item=json.convertValue(book,new TypeReference<LinkedHashMap<String,Object>>(){});
+            item.put("countsStatus","SNAPSHOT");return item;
+        }).toList();
+    }
     @PostMapping(value="/books",consumes=MediaType.MULTIPART_FORM_DATA_VALUE) public Book upload(@RequestPart("file")MultipartFile file){return books.upload(file);}
     @GetMapping("/books/{id}") public Book book(@PathVariable String id){return books.get(id);}
     @PatchMapping("/books/{id}/library") public Book updateLibrary(@PathVariable String id,@RequestBody LibraryUpdateRequest request){return jobs.updateLibrary(id,request.title(),request.archived());}

@@ -69,6 +69,7 @@ jobs:
           node scripts/verification/probe_display.js
           node scripts/verification/probe_job_scope.js
           node scripts/verification/probe_api_lifecycle.mjs
+          node --test scripts/verification/probe_reader_cache.mjs scripts/verification/probe_ready_window_bounds.mjs scripts/verification/probe_reader_api.mjs
           node scripts/verification/probe_page_progress.mjs
           node --test scripts/verification/probe_final_gaps.mjs scripts/verification/probe_auto_reading_policy.mjs
           node scripts/verification/probe_settings_secrets.mjs

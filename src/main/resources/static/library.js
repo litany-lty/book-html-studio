@@ -72,7 +72,7 @@ export function createLibrary({ books, currentBookId, openBook, openUsage, chang
       const meta = document.createElement('p');
       meta.className = 'library-book-meta';
       const created = Date.parse(book.createdAt);
-      meta.textContent = `${book.totalPages} 页 · 已处理 ${book.processedPages} 页 · 已校对 ${book.reviewedPages} 页${Number.isFinite(created) ? ` · 导入于 ${new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium' }).format(created)}` : ''}`;
+      meta.textContent = `${book.totalPages} 页${book.countsStatus === 'SNAPSHOT' ? ' · 记录进度（可刷新）' : ''} · 已处理 ${book.processedPages} 页 · 已校对 ${book.reviewedPages} 页${Number.isFinite(created) ? ` · 导入于 ${new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium' }).format(created)}` : ''}`;
       const filename = document.createElement('p');
       filename.className = 'library-book-file';
       filename.textContent = book.filename;
