@@ -189,7 +189,7 @@ export function createLibrary({ books, currentBookId, openBook, openUsage, chang
     const control = $('#library-refresh');
     control.disabled = true;
     try {
-      const latest = await api.books();
+      const latest = await api.readerBooks();
       await changed(null, null, latest);
       say('书架已刷新。');
       display();
