@@ -148,6 +148,12 @@ public class OutboundDestinationPolicy {
         }
 
         // 8. 默认云服务白名单匹配
+        // This is the exact HTTPS endpoint already shipped in application.properties;
+        // do not allow arbitrary *.minimax.cn hosts or downgrade its credentials to HTTP.
+        if ("api.minimax.cn".equals(normalizedHost)) {
+            return "https".equalsIgnoreCase(scheme) && (uri.getPort()==-1 || uri.getPort()==443)
+                    ? ValidationResult.allow() : ValidationResult.block("MiniMax默认端点需要HTTPS标准端口");
+        }
         if (isDefaultWhitelistedDomain(normalizedHost)) {
             return ValidationResult.allow();
         }

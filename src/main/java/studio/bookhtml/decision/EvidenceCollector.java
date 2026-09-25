@@ -185,15 +185,18 @@ public class EvidenceCollector {
             attempts++;
             freshCalls.incrementAndGet();
             // JR-04-T04：JEV 视觉走单次有界 recognizeBounded，无隐藏重试；429 立即受限。
-            // 旧 recognize() 的 3 次重试仅限既有 OCR 业务，JEV 路径禁用。
+            // 普通OCR和JEV裁图均使用单次物理尝试，均不在适配器内部隐藏重试。
             if (visionTransport == null) {
                 throw new IllegalStateException("VISION_TRANSPORT_NOT_CONFIGURED");
             }
             long visionNanos = java.time.Duration.ofSeconds(
                     Math.max(1, config.getVisionAttemptDeadlineSeconds())).toNanos();
-            List<studio.bookhtml.domain.Block> reread =
-                    qwen.recognizeBounded(snippet.png(), width, height, layout,
-                            visionNanos, config.getMaxResponseBytes(), cancelled, visionTransport);
+            List<studio.bookhtml.domain.Block> reread;
+            try(var usage=studio.bookhtml.service.UsageContext.open(bookId,page.pageNumber(),"QWEN_CROP_OCR",attemptId);
+                var scope=studio.bookhtml.service.QwenExecutionScope.open(bookId,page.pageNumber(),null,true)) {
+                reread=qwen.recognizeBounded(snippet.png(),width,height,layout,
+                        visionNanos,config.getMaxResponseBytes(),cancelled,visionTransport);
+            }
             try {
                 budget.settleReported(bookId, attemptId, RESERVE_PER_VISION_CALL_MINOR);
             } catch (IOException ignored) {}

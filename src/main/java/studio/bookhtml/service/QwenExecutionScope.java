@@ -6,7 +6,14 @@ import java.util.UUID;
 /** One enhancement budget, explicitly propagated to child workers. No image or text retained. */
 public final class QwenExecutionScope implements AutoCloseable {
     public record Value(String bookId, int pageNumber, UUID executionId,
-                        QwenRequestGate.Budget budget, boolean foreground, long attemptSeq, FrozenContext context) {}
+                        QwenRequestGate.Budget budget, boolean foreground, long attemptSeq, FrozenContext context,
+                        QwenRequestGate.Budget ocrBudget) {
+        public Value(String bookId,int pageNumber,UUID executionId,QwenRequestGate.Budget budget,
+                     boolean foreground,long attemptSeq,FrozenContext context) {
+            this(bookId,pageNumber,executionId,budget,foreground,attemptSeq,context,
+                    new QwenRequestGate.Budget(AttemptCallBudgetStore.DEFAULT_OCR_BUDGET));
+        }
+    }
     /** The shared holder is propagated with the attempt, including regrouped child tasks. */
     public static final class FrozenContext {
         private String payload;
