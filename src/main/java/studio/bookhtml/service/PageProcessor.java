@@ -471,6 +471,9 @@ public class PageProcessor {
         String status=checked.complete()?ParagraphComprehensibilityService.COMPLETE:ParagraphComprehensibilityService.DEFERRED;
         String detail=checked.complete()?" 自动语义自检已结束，疑点仅为未确认建议；未发现疑点不代表文字完全正确"
                 :" 自动语义自检部分未完成，保留原文；已结束 "+checked.completed()+"/"+checked.planned()+" 组";
+        if(checked.reused()>0)detail+="；已复用 "+checked.reused()+" 组有效记录，未重复调用";
+        if(checked.coverageLimited())detail+="；后续内容超过本轮有界计划，尚未全部检查";
+        if(!checked.resumeAvailable())detail+="；本地续检查记录暂不可用，已取得结果仍保留";
         return new EnrichResult(checked.blocks(),page.provider(),List.of(status+detail),checked.complete());
     }
 
