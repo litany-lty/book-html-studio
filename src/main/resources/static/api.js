@@ -45,6 +45,10 @@ async function request(path, options = {}, timeout = 30000) {
 }
 
 export const api = {
+  lanStatus: () => request('/lan/status'),
+  pairReader: pin => request('/lan/browser-pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin }) }),
+  unpairReader: () => request('/lan/browser-logout', { method: 'POST' }),
+  lanPin: () => request('/lan/pin', { method: 'POST' }),
   readingPolicy: () => request('/reading-policy'),
   config: () => request('/config'),
   settings: () => request('/settings'),

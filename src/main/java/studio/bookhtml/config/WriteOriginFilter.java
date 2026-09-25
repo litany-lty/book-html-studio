@@ -53,21 +53,14 @@ public class WriteOriginFilter implements Filter {
             // LAN pairing capability enforcement
             if (lanPairingService != null && !loopback(req.getRemoteAddr())) {
                 String uri = req.getRequestURI();
-                if (!uri.equals("/api/lan/pair") && !uri.equals("/api/lan/status")) {
+                if (!Set.of("/api/lan/pair","/api/lan/browser-pair","/api/lan/browser-logout","/api/lan/status").contains(uri)) {
                     if (SAFE.contains(req.getMethod())) {
                         if (lanPairingService.isLanReadRequiresPairing()
                                 && !lanPairingService.isAllowed(req, LanPairingService.LanCapability.READ)) {
                             reject(res, 401, "局域网只读访问需先配对"); return;
                         }
                     } else {
-                        LanPairingService.LanCapability required;
-                        if (uri.startsWith("/api/settings") || (uri.startsWith("/api/books") && "DELETE".equalsIgnoreCase(req.getMethod()))) {
-                            required = LanPairingService.LanCapability.MANAGE;
-                        } else if (uri.startsWith("/api/jobs") || uri.contains("/dispatch")) {
-                            required = LanPairingService.LanCapability.PAID;
-                        } else {
-                            required = LanPairingService.LanCapability.EDIT;
-                        }
+                        LanPairingService.LanCapability required=requiredCapability(req.getMethod(),uri);
                         if (!lanPairingService.isAllowed(req, required)) {
                             String token = LanPairingService.extractToken(req);
                             if (token == null || token.isBlank() || !lanPairingService.isValidToken(token)) {
@@ -82,6 +75,12 @@ public class WriteOriginFilter implements Filter {
             }
         }
         String origin = req.getHeader("Origin");
+        boolean browserCookie=req.getCookies()!=null && Arrays.stream(req.getCookies())
+                .anyMatch(c->LanPairingService.BROWSER_COOKIE.equals(c.getName()));
+        if(!SAFE.contains(req.getMethod()) && (browserCookie || req.getRequestURI().equals("/api/lan/browser-pair"))
+                && origin==null && req.getHeader("Referer")==null) {
+            reject(res,403,"浏览器写操作缺少同源证明");return;
+        }
         if ((api || !SAFE.contains(req.getMethod())) && origin != null && !sameOrigin(req, origin)) {
             reject(res, 403, "拒绝非同源请求"); return;
         }
@@ -92,6 +91,24 @@ public class WriteOriginFilter implements Filter {
             }
         }
         chain.doFilter(request, response);
+    }
+
+    /** Match real production routes, not only the unused top-level /api/jobs prefix. */
+    static LanPairingService.LanCapability requiredCapability(String method,String path) {
+        if(path.equals("/api/books") && "POST".equals(method))return LanPairingService.LanCapability.UPLOAD;
+        if(path.startsWith("/api/settings") || path.equals("/api/reading-policy") || path.startsWith("/api/cloud-consents")
+                || path.equals("/api/lan/pin") || path.equals("/api/lan/revoke")
+                || path.matches("/api/books/[^/]+/library") || "DELETE".equals(method))return LanPairingService.LanCapability.MANAGE;
+        if(path.startsWith("/api/jobs") || path.contains("/dispatch") || path.matches("/api/books/[^/]+/jobs")
+                || path.matches("/api/books/[^/]+/reading-window(?:/stop)?")
+                || path.matches("/api/books/[^/]+/job/cancel")
+                || path.matches("/api/books/[^/]+/pages/[0-9]+/issues/[^/]+/decision-jobs")
+                || path.matches("/api/books/[^/]+/decision-jobs/[^/]+/cancel"))return LanPairingService.LanCapability.PAID;
+        if(path.matches("/api/books/[^/]+/pages/[0-9]+(?:/(?:revert|comprehensibility-check|presentation-overrides))?")
+                || path.matches("/api/books/[^/]+/pages/[0-9]+/issues/[^/]+/decisions/[^/]+/accept"))
+            return LanPairingService.LanCapability.EDIT;
+        // An unknown or ambiguously encoded mutating route cannot inherit edit authority.
+        return LanPairingService.LanCapability.MANAGE;
     }
 
     private boolean allowedRequestHost(HttpServletRequest req) {

@@ -10,6 +10,8 @@ import { createReadingWindow } from './reading-window.js';
 import { settledJobSummary } from './job-summary.js';
 import { allowsAutomaticReading } from './auto-reading-policy.js';
 import { createLibrary } from './library.js';
+import { createBookshelf } from './bookshelf.js';
+import { createLanReader } from './lan-reader.js';
 import { initReaderMode, enterProofMode, closeProofMode, isProofMode } from './reader-mode.js';
 import { recordAnchor, restoreAnchor } from './reading-anchor.js';
 import { createPageProgress } from './page-progress.js';
@@ -21,10 +23,16 @@ const pageProgress = createPageProgress({
   onPublished: (n, page) => acceptReadyPage(n, page),
   onRetry: () => retryCurrentPage()
 });
+const lanReader = createLanReader({ changed: status => {
+  if (status?.accessMode) document.body.dataset.lanRole = status.capabilities.includes('MANAGE') ? 'owner'
+    : status.capabilities.includes('PAID') ? 'operator' : 'reader';
+} });
+let lanReady = Promise.resolve();
 const activeJobs = new Set(['QUEUED', 'RUNNING', 'CANCELLING']);
 const readerNavigation = globalThis.BookReaderNavigation;
 let cancelDrawing = null;
 let scrollTimer = null;
+let uploadInFlight = false;
 let bookRequest = 0;
 let pageRequest = 0;
 // 阶段2：快速翻页取消过时正文请求
@@ -308,6 +316,10 @@ try {
 async function ensureReadingWindowActive() {
   if (!state.book || readingWindow.active()) return;
   if (!isAutoReadEnabled() || jobSyncError || activeJobs.has(state.job?.status)) return;
+  const permissionBook = state.book.id, permissionScope = bookRequest;
+  await lanReady;
+  if (permissionBook !== state.book?.id || permissionScope !== bookRequest || readingWindow.active()) return;
+  if (lanReader.known() && !lanReader.can('PAID')) return;
   const provider = selectedProvider();
   // 逐页自动派发的随读窗口只支持印刷体通道；手写转写需整页手动处理。
   const providerConfig = state.config?.providers?.find(p => p.id === provider && p.available && !p.handwritingOnly)
@@ -426,9 +438,7 @@ function renderBooks() {
   select.replaceChildren(new Option('选择书籍', ''));
   state.books.filter(book => !book.archived).forEach(book => select.append(new Option(`${book.title}（${book.totalPages} 页）`, book.id)));
   select.value = previous;
-  $('#empty-state p').textContent = state.books.some(book => !book.archived)
-    ? '从上方书架选择已有书籍，或导入新的 PDF。先浏览原稿，再在“处理设置”中选择少量页面识别。'
-    : '导入后先查看原稿，再挑选少量页面识别。没有识别结果的页面仍会诚实地显示原图。';
+  bookshelf.render();
 }
 
 function importStatus(message, canRefresh = false) {
@@ -513,7 +523,7 @@ function renderJobHeading() {
   const readerReloadBtn = $('#reader-reload-page');
   if (!headingEl) return;
   if (!state.book) {
-    headingEl.textContent = '开始转换';
+    headingEl.textContent = '阅读书架';
     titleContainer?.classList.remove('is-converting');
     readerReloadBtn?.setAttribute('hidden', '');
     return;
@@ -1265,8 +1275,8 @@ function renderCurrent(full = true) {
 }
 
 function saveReadingPosition() {
-  if (!state.book) return;
-  savePreferences(state.book.id, { page: state.currentPage, view: state.view, script: state.script, evidenceMode: state.evidenceMode, fontSize: state.fontSize, lineHeight: state.lineHeight, focus: state.focus, scrollTop: $('#reader').scrollTop });
+  if (!state.book || !state.page || state.page.pageNumber !== state.currentPage) return;
+  savePreferences(state.book.id, { visitedAt: Date.now(), page: state.currentPage, view: state.view, script: state.script, evidenceMode: state.evidenceMode, fontSize: state.fontSize, lineHeight: state.lineHeight, focus: state.focus, scrollTop: $('#reader').scrollTop });
 }
 
 // J08：阅读依据切换（语言脚本与证据状态分离）。默认保真阅读；辅助阅读显式开启并带标记。
@@ -1440,9 +1450,11 @@ async function selectBook(id) {
   $('#reader-shell').setAttribute('aria-busy', String(Boolean(id)));
   renderReview(); renderBookMeta(); renderToc(); closeDrawers();
   if (!id) {
+    document.body.classList.add('library-home'); bookshelf.render();
     readerSessionPending = false;
     state.book = null; state.summaries = []; state.focus = false; document.body.classList.remove('focus-reading'); $('#workspace').classList.add('is-empty'); $('#empty-state').hidden = false; $('#reader-shell').hidden = true; renderBookMeta(); renderToc(); return;
   }
+  document.body.classList.remove('library-home');
   $('#workspace').classList.remove('is-empty'); $('#empty-state').hidden = true; $('#reader-shell').hidden = false;
   const opening = document.createElement('p'); opening.className = 'paper-loading';
   opening.textContent = '正在打开书籍…'; opening.setAttribute('role', 'status'); $('#paper').append(opening);
@@ -1706,6 +1718,7 @@ async function init() {
     return loadIssueEvidence(issueId);
   });
   // The read-only library must be usable even when provider configuration is slow.
+  lanReady = lanReader.refresh().catch(() => null);
   configurationReady = api.config().then(config => {
     state.config = config; renderProviders();
   }).catch(error => {
@@ -1714,7 +1727,7 @@ async function init() {
   const libraryReady = api.readerBooks().then(books => {
     if (!Array.isArray(books)) throw new Error('书架响应无效，请刷新书架重试。');
     state.books = books; renderBooks(); renderBookMeta();
-  }).catch(error => { showError(error); importStatus('书架暂未读取，请刷新书架重试。', true); });
+  }).catch(error => { showError(error); bookshelf.failed('书架暂未读取，请刷新；需要授权时可从“设备授权”输入配对码。'); importStatus('书架暂未读取，请刷新书架重试。', true); });
   await Promise.all([configurationReady, libraryReady]);
 }
 
@@ -1727,7 +1740,18 @@ window.refreshProcessingConfig = async () => {
   await decisionPanel.refresh();
 };
 
+const bookshelf = createBookshelf({
+  books: () => state.books,
+  openBook: id => selectBook(id),
+  refresh: async () => { const latest = await api.readerBooks(); if (!Array.isArray(latest)) throw new Error('书架响应无效'); state.books = latest; renderBooks(); }
+});
+$('#shelf-home').addEventListener('click', async () => {
+  await selectBook('');
+  if (!state.book && $('#empty-state').hidden === false) { renderBooks(); $('#shelf-search').focus({ preventScroll: true }); }
+});
+
 const library = createLibrary({
+  can: capability => !lanReader.known() || lanReader.can(capability),
   books: () => state.books,
   currentBookId: () => state.book?.id,
   canArchiveCurrent: () => !currentPageProtected(),
@@ -1794,27 +1818,31 @@ moreTools.addEventListener('click', event => {
   if (button && button.id !== 'usage-open' && button.id !== 'settings-open') closeMore();
 });
 $('#pdf-upload').addEventListener('change', async event => {
+  if (uploadInFlight) { toast('已有 PDF 正在上传或等待配对，请先完成当前操作。'); return; }
   closeMore(true);
   const file = event.target.files[0]; if (!file) return;
   if (file.type && file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) { toast('请选择 PDF 文件。', 'error'); event.target.value = ''; return; }
   const max = Number(state.config?.maxUploadMb || 0); if (max && file.size > max * 1024 * 1024) { toast(`文件超过 ${max} MB 上传上限。`, 'error'); event.target.value = ''; return; }
+  uploadInFlight = true;
   const labels = $$('[for="pdf-upload"]');
   labels.forEach(label => label.classList.add('busy'));
   event.target.disabled = true;
   importStatus(`正在导入《${file.name}》；大文件可能需要稍等，请勿重复选择。`);
   try {
+    if (!await lanReader.ensureUpload()) { importStatus('已取消上传，书架未改动。'); return; }
+    importStatus(`正在上传《${file.name}》，完成后保存在服务器…`);
     const book = await api.upload(file);
     state.books = [book, ...state.books.filter(item => item.id !== book.id)]; renderBooks();
     library.render();
     importStatus('导入成功，正在打开原稿…');
     await selectBook(book.id);
-    importStatus(''); toast('PDF 已导入，可以先浏览原稿。', 'success');
+    importStatus(''); toast('PDF 已保存到共享书架，可以随时回来阅读。', 'success');
   } catch (error) {
     const uncertain = error?.name === 'TimeoutError' || error?.name === 'TypeError';
     importStatus(uncertain
       ? '连接中断，导入结果尚不确定。先刷新书架检查是否已导入，确认没有后再试，避免重复。'
       : (error?.message || '导入失败，请检查文件后重试。'), uncertain);
-  } finally { labels.forEach(label => label.classList.remove('busy')); event.target.disabled = false; event.target.value = ''; }
+  } finally { uploadInFlight = false; labels.forEach(label => label.classList.remove('busy')); event.target.disabled = false; event.target.value = ''; }
 });
 
 const emptyState = $('#empty-state');
