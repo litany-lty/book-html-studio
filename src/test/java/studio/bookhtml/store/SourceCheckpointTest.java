@@ -24,10 +24,11 @@ class SourceCheckpointTest {
         return new SourceChange(seq,"PAGE",book,(int)seq,new UUID(0,seq),null,0,1,
                 "a".repeat(64),"b".repeat(64),"MANUAL_SAVE",state,Instant.parse("2026-01-01T00:00:00Z"));
     }
-    void seed(int operations) throws Exception {
+    void seed(int operations) throws Exception { seed(operations,true); }
+    void seed(int operations,boolean completed) throws Exception {
         var wal=new DurableEventJournal();Path events=Files.createDirectory(SourceChangeJournal.eventsDir(dir));
         Path active=null;int frames=0,segment=0;
-        for(int seq=1;seq<=operations;seq++) for(String state:List.of("PREPARED","COMMITTED")) {
+        for(int seq=1;seq<=operations;seq++) for(String state:completed?List.of("PREPARED","COMMITTED"):List.of("PREPARED")) {
             if(active==null || frames==DurableEventJournal.MAX_SEGMENT_RECORDS) {
                 String previous=active==null?"0".repeat(64):DurableEventJournal.sha256Hex(active);
                 active=events.resolve(String.format("segment-%06d.wal",++segment));
@@ -247,5 +248,18 @@ class SourceCheckpointTest {
         assertThrows(java.io.IOException.class,()->journal.hasUnresolved(dir,book));
         assertTrue(changed.get());
         assertEquals(140,journal.currentSourceSeq(dir,book),"a subsequent stable verification may succeed");
+    }
+
+    @Test void legacyPendingBacklogBeyondCacheCapacityCanStillBeSettledWithoutDroppingDebt() throws Exception {
+        seed(SourceReplayState.MAX_PENDING+1,false);
+        assertEquals(SourceReplayState.MAX_PENDING+1,journal.currentSourceSeq(dir,book));
+        assertTrue(journal.hasUnresolved(dir,book));
+        assertThrows(java.io.IOException.class,()->journal.prepare(dir,book,"PAGE",1,UUID.randomUUID(),null,0,1,"a","b","TEST"));
+        journal.commit(dir,book,1,1,new UUID(0,1),1,"b".repeat(64));
+        journal.commit(dir,book,2,2,new UUID(0,2),1,"b".repeat(64));
+        assertTrue(journal.hasUnresolved(dir,book));
+        var next=journal.prepare(dir,book,"PAGE",3,UUID.randomUUID(),null,0,1,"a","b","TEST");
+        assertEquals(SourceReplayState.MAX_PENDING+2,next.sourceSeq());
+        assertEquals(SourceReplayState.MAX_PENDING+4,journal.readAll(dir,book).size());
     }
 }

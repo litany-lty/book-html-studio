@@ -34,7 +34,14 @@ final class SourceReplayState {
                 || "COMMITTED".equals(result.state()) && (!Objects.equals(result.afterRevision(),prepared.afterRevision())
                 || !Objects.equals(result.afterHash(),prepared.afterHash()))) throw new IOException("source settlement contradicts intent");
     }
-    void apply(SourceChange event) throws IOException {
+    void apply(SourceChange event) throws IOException { reduce(event,true); }
+    // Previously persisted backlogs remain recoverable even when they cannot fit
+    // the optional hot cache. Never discard their unknown operations to make room.
+    void replay(SourceChange event) throws IOException { reduce(event,false); }
+    boolean cacheable() {
+        try { checkBounds();return true; } catch(IOException capacity) { return false; }
+    }
+    private void reduce(SourceChange event,boolean enforceCapacity) throws IOException {
         long seq=event.sourceSeq();var old=operation(seq);Operation next;
         if("PREPARED".equals(event.state())) {
             if(old==null && seq<=maxSeq) throw new IOException("source preparation reused an earlier sequence");
@@ -54,7 +61,7 @@ final class SourceReplayState {
             recent.put(seq,next);
             while(recent.size()>MAX_RECENT) recent.remove(recent.keySet().iterator().next());
         } else pending.put(seq,next);
-        maxSeq=Math.max(maxSeq,seq);last=event;checkBounds();
+        maxSeq=Math.max(maxSeq,seq);last=event;if(enforceCapacity) checkBounds();
     }
     void checkBounds() throws IOException {
         if(pending.size()>MAX_PENDING || recent.size()>MAX_RECENT) throw new IOException("source recovery state capacity exceeded");

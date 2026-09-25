@@ -140,6 +140,7 @@ public final class SourceChangeJournal {
     }
     private static void rememberSnapshot(Key key,Snapshot value) {
         synchronized(SNAPSHOTS) {
+            if(!value.full().cacheable() || !value.sealed().cacheable()) { SNAPSHOTS.remove(key);return; }
             SNAPSHOTS.put(key,value);
             while(SNAPSHOTS.size()>8) SNAPSHOTS.remove(SNAPSHOTS.keySet().iterator().next());
         }
@@ -189,7 +190,7 @@ public final class SourceChangeJournal {
                 String previous=scan.header().prevSegmentSha256();
                 if(i>0 && !"chained".equals(previous) && !previous.equals(seals.get(i-1).sha256()))
                     throw new IOException("source journal segment chain mismatch");
-                for(var frame:scan.frames()) full.apply(decode(frame,book));
+                for(var frame:scan.frames()) full.replay(decode(frame,book));
                 if(active) { frames=scan.frames().size();activeLength=scan.validLength();tailRepaired=scan.tailTruncated(); }
                 else seals.add(new SourceJournalCheckpoint.Seal(path.getFileName().toString(),scan.validLength(),DurableEventJournal.sha256Hex(path)));
             }
@@ -213,7 +214,9 @@ public final class SourceChangeJournal {
         byte[] payload=json.writeValueAsBytes(event);
         if(payload.length>DurableEventJournal.MAX_FRAME_PAYLOAD_BYTES) throw new IOException("source event too large");
         Snapshot verified=snapshot(dir,book);
-        SourceReplayState next=verified.full().copy();next.apply(event); // Capacity and conflicts fail before disk dispatch.
+        SourceReplayState next=verified.full().copy();
+        if(!verified.full().cacheable() && !"PREPARED".equals(event.state())) next.replay(event);
+        else next.apply(event); // New admissions obey the cache budget; old debt may still be settled.
         Path events=eventsDir(dir);DurableJson.rejectLinks(events);Files.createDirectories(events);
         List<SourceJournalCheckpoint.Seal> seals=new ArrayList<>(verified.seals());
         SourceReplayState sealed=verified.sealed();int frames=verified.activeFrames();
