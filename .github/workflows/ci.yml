@@ -98,8 +98,8 @@ jobs:
             mvn --batch-mode -Dtest=IndexReadIntegrityTest,SourcePublicationIntegrityTest,AutomaticComprehensibilityTest,HandwritingTranscribeServiceTest,PageWorkSchedulerOwnershipTest,RemoteJobStaleReclaimTest test
             cp target/surefire-reports/TEST-studio.bookhtml.service.IndexReadIntegrityTest.xml "test-results/lifecycle-repeat-$round/"
             cp target/surefire-reports/TEST-studio.bookhtml.store.SourcePublicationIntegrityTest.xml "test-results/lifecycle-repeat-$round/"
-            mvn --batch-mode -Dtest=CurrentAuditReproductionTest,ConsentAuthorityRegressionTest,RemoteRecoveryQuarantineTest,ProgressPlanAuthorityTest,EvidenceAndCompletionTest test
-            for suite in AutomaticComprehensibilityTest HandwritingTranscribeServiceTest PageWorkSchedulerOwnershipTest RemoteJobStaleReclaimTest CurrentAuditReproductionTest ConsentAuthorityRegressionTest RemoteRecoveryQuarantineTest ProgressPlanAuthorityTest EvidenceAndCompletionTest; do
+            mvn --batch-mode -Dtest=CurrentAuditReproductionTest,ConsentAuthorityRegressionTest,RemoteRecoveryQuarantineTest,ProgressPlanAuthorityTest,EvidenceAndCompletionTest,PhysicalBoundaryRegressionTest test
+            for suite in AutomaticComprehensibilityTest HandwritingTranscribeServiceTest PageWorkSchedulerOwnershipTest RemoteJobStaleReclaimTest CurrentAuditReproductionTest ConsentAuthorityRegressionTest RemoteRecoveryQuarantineTest ProgressPlanAuthorityTest EvidenceAndCompletionTest PhysicalBoundaryRegressionTest; do
               cp "target/surefire-reports/TEST-studio.bookhtml.service.$suite.xml" "test-results/lifecycle-repeat-$round/"
             done
           done

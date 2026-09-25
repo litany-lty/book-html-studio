@@ -74,7 +74,7 @@ public class AttemptCallBudgetStore {
         }
     }
 
-    public static final class Reservation implements AutoCloseable {
+    public static final class Reservation implements PhysicalCallSession.Reservation {
         private final BudgetTracker tracker;
         private final AtomicBoolean sent = new AtomicBoolean();
         private final AtomicBoolean closed = new AtomicBoolean();
@@ -83,7 +83,7 @@ public class AttemptCallBudgetStore {
             this.tracker = Objects.requireNonNull(tracker);
         }
 
-        public void markSent() {
+        public synchronized void markSent() {
             if (closed.get()) throw new IllegalStateException("reservation already closed");
             if (sent.compareAndSet(false, true)) {
                 tracker.recordSent();
@@ -95,7 +95,7 @@ public class AttemptCallBudgetStore {
         }
 
         @Override
-        public void close() {
+        public synchronized void close() {
             if (closed.compareAndSet(false, true)) {
                 if (!sent.get()) {
                     tracker.refund();

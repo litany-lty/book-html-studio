@@ -46,7 +46,7 @@ class DelayedRetryOwnershipTest {
     @Test
     void retryAfterParsingHandlesIntegersDatesAndMalformedValuesConservatively() {
         assertEquals(15, DelayedCallQueue.parseRetryAfter("15"));
-        assertEquals(300, DelayedCallQueue.parseRetryAfter("99999"), "超大值截断至 300 秒");
+        assertEquals(Integer.MAX_VALUE, DelayedCallQueue.parseRetryAfter("99999"), "超出本地等待预算时延期，不能提前重试");
         assertEquals(5, DelayedCallQueue.parseRetryAfter("-10"), "负值保守使用 5 秒默认值");
         assertEquals(5, DelayedCallQueue.parseRetryAfter("invalid-date-string"), "非格式化字符串默认 5 秒");
         assertEquals(5, DelayedCallQueue.parseRetryAfter(null));

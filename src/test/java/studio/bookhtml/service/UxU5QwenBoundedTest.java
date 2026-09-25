@@ -61,7 +61,10 @@ class UxU5QwenBoundedTest {
 
     @Test void u5_meteringWithoutForgedTokens() throws Exception {
         String review = read("src/main/java/studio/bookhtml/service/QwenTextReviewClient.java");
-        String boundary = read("src/main/java/studio/bookhtml/service/QwenPhysicalCall.java");
+        String adapter = read("src/main/java/studio/bookhtml/service/QwenPhysicalCall.java");
+        String boundary = read("src/main/java/studio/bookhtml/service/PhysicalCallSession.java");
+        assertTrue(adapter.contains("physicalService().openQwen"),"生产Qwen适配器进入真实共享服务");
+        assertTrue(adapter.contains("session.send"),"兼容适配器不另建物理发送状态机");
         assertTrue(review.contains("QwenPhysicalCall.open"), "核对使用统一物理发送入口");
         assertTrue(boundary.contains("ledger.prepare"), "U5：发送前审计意图落盘");
         assertTrue(boundary.indexOf("ledger.prepare") < boundary.indexOf("transport.send"), "准备先于物理发送");
