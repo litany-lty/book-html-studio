@@ -1,7 +1,7 @@
 """Real loopback Spring service, real PDF upload/restart, simulated LAN peer; no cloud keys."""
 import asyncio, hashlib, json, os, re, shutil, socket, subprocess, tempfile, time, xml.etree.ElementTree as ET
 from pathlib import Path
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, expect
 ROOT=Path(__file__).resolve().parents[2]
 OUT=ROOT/'test-results/lan-library-browser'
 
@@ -51,7 +51,7 @@ async def main():
                     await ctx.route('**/*',guard)
                     p=await ctx.new_page();p.on('pageerror',lambda e:errors.append(str(e)))
                     await p.goto(base,wait_until='domcontentloaded')
-                    await p.wait_for_function("() => document.querySelector('#shelf-books').getAttribute('aria-busy')==='false'")
+                    await expect(p.locator('#shelf-books')).to_have_attribute('aria-busy','false')
                     return ctx,p
                 owner,admin=await context(False)
                 reader,page=await context()
@@ -63,12 +63,13 @@ async def main():
                 check('duplicate_file_event_keeps_active_upload_owned',await page.locator('#pdf-upload').is_disabled())
                 check('upload_waits_for_reader_pairing',not any(r['url']=='/api/books' and r['method']=='POST' for r in requests))
                 await admin.click('#lan-reader-open');await admin.click('#lan-generate-pin')
-                await admin.wait_for_function("() => /上传码 [0-9]{6}/.test(document.querySelector('#lan-pin-output').textContent)")
+                await expect(admin.locator('#lan-pin-output')).to_contain_text(re.compile(r'上传码 [0-9]{6}'))
                 pin=re.search(r'上传码 ([0-9]{6})',await admin.locator('#lan-pin-output').inner_text())[1]
                 await page.fill('#lan-pin',pin);pin=None
                 await page.click('#lan-pair-submit')
                 await page.wait_for_selector('#reader-shell:not([hidden])')
-                await page.wait_for_function("() => document.querySelector('#book-select').value && document.querySelector('#page-jump').value==='1'")
+                await expect(page.locator('#book-select')).to_have_value(re.compile(r'.+'))
+                await expect(page.locator('#page-jump')).to_have_value('1')
                 book=await page.locator('#book-select').input_value()
                 check('real_pdf_saved_on_server',(data/'books'/book/'source.pdf').is_file())
                 check('original_pdf_bytes_unchanged',hashlib.sha256((data/'books'/book/'source.pdf').read_bytes()).digest()==hashlib.sha256((temp/'sample.pdf').read_bytes()).digest())
@@ -78,7 +79,8 @@ async def main():
                 check('credential_not_exposed_to_script', 'BOOK_LAN_SESSION' not in await page.evaluate('document.cookie'))
                 check('credential_not_in_web_storage',not await page.evaluate("Object.keys(localStorage).some(k=>/token|pairing|pin/i.test(k))"))
                 await page.fill('#page-jump','2');await page.locator('#jump-form').evaluate('(f)=>f.requestSubmit()')
-                await page.wait_for_function("() => document.querySelector('#page-jump').value==='2' && document.querySelector('#paper img')")
+                await expect(page.locator('#page-jump')).to_have_value('2')
+                await page.locator('#paper img').first.wait_for(state='attached')
                 await page.click('#shelf-home');await page.wait_for_selector('.shelf-book button')
                 check('shelf_offers_continue_not_conversion', '第 2 页' in await page.locator('.shelf-book button').inner_text())
                 await page.reload();await page.wait_for_selector('.shelf-book button')
@@ -101,7 +103,7 @@ async def main():
                 status=await (await reader.request.get(base+'/api/lan/status')).json()
                 check('server_restart_does_not_resurrect_upload_grant',not status['isPaired'])
                 await page.set_input_files('#pdf-upload',str(temp/'sample.pdf'));await page.wait_for_selector('#lan-reader-dialog[open]')
-                await page.click('#lan-reader-close');await page.wait_for_function("() => !document.querySelector('#pdf-upload').disabled")
+                await page.click('#lan-reader-close');await expect(page.locator('#pdf-upload')).to_be_enabled()
                 check('cancel_pairing_does_not_upload',len(list((data/'books').glob('*/book.json')))==1)
                 check('no_browser_errors',not errors);check('no_external_requests',not external)
                 await page.screenshot(path=str(OUT/'desktop-shared-shelf.png'),full_page=True)
