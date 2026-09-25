@@ -1,31 +1,35 @@
 export const PAGE_CACHE_LIMIT = 12;
 export const PAGE_CACHE_BYTES_LIMIT = 32 * 1024 * 1024; // 32 MiB
 
+// Conservative retained-object estimate, not an exact browser heap measurement.
+// Count every JSON field (including sourceRecords, simplified text and evidence),
+// visit aliased objects once, and stop oversized/untrusted graphs without recursion.
 export function estimatePageBytes(page) {
   if (!page) return 0;
-  let bytes = 256;
-  if (typeof page.text === 'string') bytes += page.text.length * 2;
-  if (Array.isArray(page.blocks)) {
-    for (const b of page.blocks) {
-      bytes += 128;
-      if (typeof b.original === 'string') bytes += b.original.length * 2;
-      if (typeof b.target === 'string') bytes += b.target.length * 2;
-      if (Array.isArray(b.issues)) {
-        for (const iss of b.issues) {
-          bytes += 96;
-          if (typeof iss.context === 'string') bytes += iss.context.length * 2;
-          if (typeof iss.expected === 'string') bytes += iss.expected.length * 2;
-          if (typeof iss.replacement === 'string') bytes += iss.replacement.length * 2;
-        }
+  let bytes = 0, visited = 0;
+  const stack = [page], seen = new WeakSet();
+  while (stack.length) {
+    const value = stack.pop();
+    if (typeof value === 'string') bytes += 24 + value.length * 2;
+    else if (value === null || typeof value === 'number' || typeof value === 'boolean' || value === undefined) bytes += 8;
+    else if (typeof value === 'object') {
+      if (seen.has(value)) continue;
+      seen.add(value);
+      if (++visited > 100000) return Number.MAX_SAFE_INTEGER;
+      const array = Array.isArray(value);
+      if (!array && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+        return Number.MAX_SAFE_INTEGER;
+      bytes += array ? 40 + value.length * 8 : 64;
+      if (bytes > PAGE_CACHE_BYTES_LIMIT) return Number.MAX_SAFE_INTEGER;
+      for (const key of Object.keys(value)) {
+        bytes += 32 + key.length * 2;
+        const property = Object.getOwnPropertyDescriptor(value, key);
+        if (!property || !Object.hasOwn(property, 'value')) return Number.MAX_SAFE_INTEGER;
+        stack.push(property.value);
+        if (stack.length > 100000 || bytes > PAGE_CACHE_BYTES_LIMIT) return Number.MAX_SAFE_INTEGER;
       }
-    }
-  }
-  if (page.issueImages && typeof page.issueImages === 'object') {
-    for (const k in page.issueImages) {
-      const img = page.issueImages[k];
-      if (typeof img?.dataUrl === 'string') bytes += img.dataUrl.length;
-      if (typeof img?.bytes === 'number') bytes += img.bytes;
-    }
+    } else return Number.MAX_SAFE_INTEGER;
+    if (!Number.isSafeInteger(bytes) || bytes > PAGE_CACHE_BYTES_LIMIT) return Number.MAX_SAFE_INTEGER;
   }
   return Math.max(bytes, 512);
 }
@@ -53,23 +57,26 @@ export class LruPageCache extends Map {
     return value;
   }
   set(key, value) {
-    const prevBytes = this.byteSizes.get(key) || 0;
     const nextBytes = estimatePageBytes(value);
+    // A speculative oversized page must not evict every useful neighbor before
+    // being evicted itself. The visible page/draft remains an explicit exception.
+    if (nextBytes > this.maxBytes && !(typeof this.isProtected === 'function' && this.isProtected(key))) {
+      this.delete(key); return this;
+    }
 
     super.delete(key);
     super.set(key, value);
     this.byteSizes.set(key, nextBytes);
-    this.totalBytes = Math.max(0, this.totalBytes - prevBytes + nextBytes);
+    this.recountBytes();
 
     // G11: 12页 / 32MiB 缓存双上限，淘汰最久未使用页，当前页与未保存草稿所在页不得淘汰
     while (super.size > this.limit || this.totalBytes > this.maxBytes) {
       let evicted = false;
       for (const oldest of super.keys()) {
         if (typeof this.isProtected === 'function' && this.isProtected(oldest)) continue;
-        const b = this.byteSizes.get(oldest) || 0;
         this.byteSizes.delete(oldest);
         super.delete(oldest);
-        this.totalBytes = Math.max(0, this.totalBytes - b);
+        this.recountBytes();
         evicted = true;
         break;
       }
@@ -79,15 +86,19 @@ export class LruPageCache extends Map {
   }
   delete(key) {
     if (!super.has(key)) return false;
-    const b = this.byteSizes.get(key) || 0;
     this.byteSizes.delete(key);
-    this.totalBytes = Math.max(0, this.totalBytes - b);
+    this.recountBytes();
     return super.delete(key);
   }
   clear() {
     this.byteSizes.clear();
     this.totalBytes = 0;
     super.clear();
+  }
+  recountBytes() {
+    this.totalBytes = 0;
+    for (const bytes of this.byteSizes.values())
+      this.totalBytes = Math.min(Number.MAX_SAFE_INTEGER, this.totalBytes + bytes);
   }
   get currentBytes() {
     return this.totalBytes;

@@ -57,6 +57,8 @@ public class BookService {
             return book;
         }catch(ApiException e){cleanup(dir);throw e;}catch(Exception e){cleanup(dir);throw new ApiException(HttpStatus.BAD_REQUEST,"PDF 文件无法读取或已损坏");}
     }
+    /** Reader discovery only: stored counters are snapshots, not a trigger for all-book scans. */
+    public List<Book> listForReading(){return store.listBooks();}
     public List<Book> list(){return store.listBooks().stream().map(this::refresh).toList();}
     public Book get(String id){return refresh(store.readBook(id));}
     /** Called under JobService's task lock when archiving, to serialize task admission with the metadata write. */

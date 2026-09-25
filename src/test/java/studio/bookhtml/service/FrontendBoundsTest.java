@@ -33,7 +33,11 @@ class FrontendBoundsTest {
         assertTrue(storeJs.contains("function estimatePageBytes("), "G11: 必须提供 estimatePageBytes 估算每页字节占用");
         assertTrue(storeJs.contains("super.size > this.limit || this.totalBytes > this.maxBytes"), "G11: 必须在页数或字节数任一超限时执行淘汰");
         assertTrue(storeJs.contains("this.isProtected(oldest)"), "G11: 淘汰时必须保护当前页与未保存草稿");
-        assertTrue(storeJs.contains("this.totalBytes = Math.max(0, this.totalBytes"), "G11: 必须准确更新总字节计数");
+        // Accounting now recomputes the bounded cache after mutations instead of
+        // subtracting from a saturated estimate. Actual JS behavior is tested by probe_reader_cache.mjs.
+        assertTrue(storeJs.contains("this.recountBytes();"), "G11: 缓存变更后必须重新结算字节计数");
+        assertTrue(storeJs.contains("for (const bytes of this.byteSizes.values())"), "G11: 重算必须包含所有保留项");
+        assertTrue(storeJs.contains("Math.min(Number.MAX_SAFE_INTEGER, this.totalBytes + bytes)"), "G11: 大对象计数必须防溢出");
     }
 
     @Test

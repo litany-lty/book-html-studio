@@ -112,6 +112,9 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
       const controller = new AbortController();
       readyControllers.push(controller);
       api.page(item.bookId, item.pageNumber, controller.signal).then(page => {
+        if (page?.pageNumber !== item.pageNumber || page.status !== 'READY' ||
+            !Number.isSafeInteger(page.revision) || page.revision < item.revision)
+          throw new Error('就绪页响应与请求版本不一致，保留当前内容并稍后重新读取。');
         if (!valid(item.bookId, item.sequence, item.epoch) || cacheIsNewer(state.pageCache.get(item.pageNumber), page)) {
           if (readyInFlight.get(item.pageNumber) === item) readyInFlight.delete(item.pageNumber);
           return;
@@ -144,17 +147,31 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
       if (pageNum < center && pageNum >= center - 5) return 10 + (center - pageNum);
       return 100 + Math.abs(pageNum - center);
     }
-    const sorted = [...(snapshot.pages || [])].sort((left, right) => pagePriority(left) - pagePriority(right));
+    // A whole-book job may report thousands of READY pages. Only fetch the
+    // current page and the ten nearby pages; do not churn the 12-page cache.
+    const candidates = new Map();
+    for (const info of Array.isArray(snapshot.pages) ? snapshot.pages : []) {
+      const n = Number(info?.pageNumber);
+      if (!Number.isSafeInteger(n) || n < 1 || n > state.book.totalPages || Math.abs(n - center) > 5 ||
+          info.status !== 'READY' || !Number.isSafeInteger(info.revision) || info.revision < 0) continue;
+      if (!candidates.has(n) || candidates.get(n).revision < info.revision) candidates.set(n, info);
+    }
+    const sorted = [...candidates.values()].sort((left, right) => pagePriority(left) - pagePriority(right));
     for (const info of sorted) {
       if (info.status !== 'READY' || info.revision == null) continue;
       const pageNumber = Number(info.pageNumber);
       const key = `${pageNumber}:${info.revision}`;
       if (seenReady.get(pageNumber) === key) continue;
       // U2：在途页不重复入队；成功标记只在 GET 成功后写，失败清理在途后可重 GET。
-      if (readyInFlight.get(pageNumber)?.key === key) continue;
+      if (readyInFlight.has(pageNumber)) {
+        const pending = readyInFlight.get(pageNumber);
+        pending.revision = Math.max(pending.revision, info.revision);
+        pending.key = key;
+        continue;
+      }
       const cached = state.pageCache.get(pageNumber);
       if (cached?.revision === info.revision && cached?.status === 'READY') { seenReady.set(pageNumber, key); continue; }
-      const item = { bookId: session.bookId, sequence: sequenceAtStart, epoch: epochAtStart, pageNumber, key };
+      const item = { bookId: session.bookId, sequence: sequenceAtStart, epoch: epochAtStart, pageNumber, revision: info.revision, key };
       readyInFlight.set(pageNumber, item);
       readyQueue.push(item);
     }

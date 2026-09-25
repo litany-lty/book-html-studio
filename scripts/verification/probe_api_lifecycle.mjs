@@ -34,8 +34,8 @@ function pendingBody() {
   const pending = api.page('book', 1);
   await fixture.entered;
   assert.equal(timers.size, 1, 'timer must cover the pending JSON body');
-  fixture.body.resolve({ revision: 4 });
-  assert.deepEqual(await pending, { revision: 4 });
+  fixture.body.resolve({ pageNumber: 1, blocks: [], revision: 4 });
+  assert.deepEqual(await pending, { pageNumber: 1, blocks: [], revision: 4 });
   assert.equal(timers.size, 0);
 }
 {
@@ -64,7 +64,8 @@ function pendingBody() {
 }
 {
   globalThis.fetch = async () => ({ ok: true, status: 204, json() { throw new Error('204 has no body'); } });
-  assert.equal(await api.page('book', 1), null);
+  await assert.rejects(api.page('book', 1), /页面响应与请求页/);
+  assert.equal(await api.settings(), null, 'generic 204 still has no JSON body');
   assert.equal(timers.size, 0);
 }
 console.log('PASS: 5 API full-body lifecycle cases; no real network calls');
