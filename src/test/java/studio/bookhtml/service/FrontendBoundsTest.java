@@ -115,7 +115,7 @@ class FrontendBoundsTest {
         assertTrue(editorJs.contains("container.hidden = true"), "G11: 卸载时必须隐藏容器");
 
         assertTrue(appJs.contains("unmountIssueWorkbench("), "G11: app.js 必须引入并调用 unmountIssueWorkbench");
-        assertTrue(appJs.contains("const isReviewVisible = state.view === 'original'"), "G11: 必须校验 review 视图或抽屉的可见性");
+        assertTrue(appJs.contains("const isReviewVisible = isProofMode() && !state.focus"), "G11: 工作台必须绑定可见校对模式，原稿阅读本身不挂载隐藏编辑器");
         assertTrue(appJs.contains("unmountIssueWorkbench($('#issue-workbench'))"), "G11: 非可见时必须执行卸载");
     }
 

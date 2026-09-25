@@ -10,7 +10,7 @@ import { createReadingWindow } from './reading-window.js';
 import { settledJobSummary } from './job-summary.js';
 import { allowsAutomaticReading } from './auto-reading-policy.js';
 import { createLibrary } from './library.js';
-import { initReaderMode } from './reader-mode.js';
+import { initReaderMode, enterProofMode, closeProofMode, isProofMode } from './reader-mode.js';
 import { recordAnchor, restoreAnchor } from './reading-anchor.js';
 import { createPageProgress } from './page-progress.js';
 
@@ -36,6 +36,7 @@ let metadataEpoch = 0;
 let outlineController = null;
 let configurationReady = Promise.resolve();
 let readerSessionPending = false;
+let reviewEvidenceController = null;
 let editVersion = 0;
 let outlineRequest = 0;
 let pendingPageTarget = null;
@@ -860,32 +861,48 @@ function renderPageMessage(rawMessage) {
   node.textContent = node.hidden ? '' : msg;
 }
 
+function releaseReviewResources() {
+  reviewEvidenceController?.abort(); reviewEvidenceController = null;
+  decisionPanel.dispose(); // Stop this panel's reads, not the server-side decision job.
+  unmountIssueWorkbench($('#issue-workbench'));
+  $('#review-list').replaceChildren();
+  $('#page-structure-list').replaceChildren();
+  $('#review-original').removeAttribute('src');
+}
+
+function refreshReviewReference() {
+  const image = $('#review-original');
+  if (!state.page || !state.book || state.focus || !isProofMode() || !$('.review-reference').open) {
+    image.removeAttribute('src'); return;
+  }
+  const url = api.pageImage(state.book.id, state.currentPage, 900);
+  if (image.getAttribute('src') !== url) image.src = url;
+}
+
 function renderReview() {
-  const available = Boolean(state.page);
+  const available = Boolean(state.book && state.page);
+  const isReviewVisible = isProofMode() && !state.focus;
   $('#review-empty').hidden = available;
-  $('#review-content').hidden = !available;
+  $('#review-content').hidden = !available || !isReviewVisible;
   updateSaveStatus();
-  if (!available) {
-    unmountIssueWorkbench($('#issue-workbench'));
-    return;
+  if (!available || !isReviewVisible) {
+    releaseReviewResources(); return;
   }
-  const isReviewVisible = state.view === 'original' || $('#review-panel')?.classList.contains('open');
-  if (!isReviewVisible) {
-    unmountIssueWorkbench($('#issue-workbench'));
-    return;
-  }
+  reviewEvidenceController?.abort(); reviewEvidenceController = new AbortController();
+  const evidenceSignal = reviewEvidenceController.signal;
   renderConflictBar();
-  const reviewImage = $('#review-original');
   const imageUrl = api.pageImage(state.book.id, state.currentPage, 900);
-  if (reviewImage.getAttribute('src') !== imageUrl) reviewImage.src = imageUrl;
+  refreshReviewReference();
   const refs = issueReferences(state.blocks);
   if (!refs.some(ref => ref.issue.id === state.selectedIssueId)) {
     state.selectedIssueId = (refs.find(ref => !ref.synthetic && !ref.issue.resolved) || refs[0])?.issue.id || null;
   }
+  const selectedReference = refs.find(ref => ref.issue.id === state.selectedIssueId);
+  if (selectedReference && !state.selectedBlockId) state.selectedBlockId = selectedReference.block.id;
   renderIssueWorkbench($('#issue-workbench'), state.blocks, {
     selectedIssueId: state.selectedIssueId,
     page: state.page,
-    loadIssueEvidence: loadIssueEvidence,
+    loadIssueEvidence: issueId => loadIssueEvidence(issueId, evidenceSignal),
     imageUrl,
     pageWidth: state.page.width,
     pageHeight: state.page.height,
@@ -1102,12 +1119,14 @@ function updateSaveStatus() {
   reviewStatus.dataset.state = tone;
 }
 
-async function loadIssueEvidence(issueId) {
+async function loadIssueEvidence(issueId, signal) {
   const token = sessionGuard.token;
   const bookId = state.book?.id, pageNumber = state.currentPage, page = state.page, epoch = state.editorEpoch;
-  if (!bookId || !page || !issueId) return null;
-  const precise = await api.issueMetadata(bookId, pageNumber, issueId);
-  if (!sessionGuard.isValid(token) || state.book?.id !== bookId || state.currentPage !== pageNumber || state.page !== page || state.editorEpoch !== epoch) return null;
+  if (!bookId || !page || !issueId || signal?.aborted) return null;
+  const known = page.issueImages?.[issueId];
+  if (known && !known.pending) return known;
+  const precise = await api.issueMetadata(bookId, pageNumber, issueId, signal);
+  if (signal?.aborted || !sessionGuard.isValid(token) || state.book?.id !== bookId || state.currentPage !== pageNumber || state.page !== page || state.editorEpoch !== epoch) return null;
   if (!(state.blocks || []).some(block => (block.issues || []).some(issue => issue.id === issueId))) return null;
   page.issueImages ||= {};
   page.issueImages[issueId] = precise;
@@ -1186,7 +1205,7 @@ function syncOverlays() {
   const stage = imageStage();
   if (!stage || !state.page) return;
   createOverlay(stage, state.blocks, state.selectedBlockId, {
-    canMove: () => !state.drawType,
+    canMove: () => isProofMode() && !state.focus && !state.drawType,
     onSelect(id) { state.selectedBlockId = id; renderReview(); syncOverlays(); scrollToSelectedBlock(id); },
     onMove(block, finished) { markDirty(); if (finished) renderReview(); }
   });
@@ -1640,21 +1659,27 @@ async function refreshBookData(id = state.book?.id, requestId = bookRequest) {
 let lastDrawerOpener = null;
 function openDrawer(type) {
   const opener = document.activeElement;
-  if (opener && (opener.id === 'toc-toggle' || opener.id === 'review-toggle')) lastDrawerOpener = opener;
-  const panel = type === 'toc' ? $('#toc-panel') : $('#review-panel');
-  const other = type === 'toc' ? $('#review-panel') : $('#toc-panel');
-  other.classList.remove('open'); panel.classList.add('open'); $('#drawer-scrim').hidden = false;
-  $('#toc-toggle').setAttribute('aria-expanded', String(type === 'toc')); $('#review-toggle').setAttribute('aria-expanded', String(type === 'review'));
-  if (type === 'review') renderReview();
+  if (type === 'review') {
+    enterProofMode(opener?.id === 'review-toggle' || opener?.id === 'proof-toggle' ? opener : null);
+    return;
+  }
+  if (opener?.id === 'toc-toggle') lastDrawerOpener = opener;
+  const mobile = window.matchMedia('(max-width: 1050px)').matches;
+  if (mobile) closeProofMode();
+  $('#toc-panel').classList.add('open');
+  $('#toc-toggle').setAttribute('aria-expanded', 'true');
+  $('#drawer-scrim').hidden = !mobile;
 }
 
 function closeDrawers(restoreFocus = false) {
-  $('#toc-panel').classList.remove('open'); $('#review-panel').classList.remove('open'); $('#drawer-scrim').hidden = true;
-  $('#toc-toggle').setAttribute('aria-expanded', 'false'); $('#review-toggle').setAttribute('aria-expanded', 'false');
-  if (state.view !== 'original') unmountIssueWorkbench($('#issue-workbench'));
-  // A1-06：显式关闭抽屉时焦点回到触发按钮；程序化关闭（翻页/切书）不抢焦点
-  if (restoreFocus && lastDrawerOpener && document.contains(lastDrawerOpener)) {
-    try { lastDrawerOpener.focus({ preventScroll: true }); } catch (_) { /* 忽略 */ }
+  $('#toc-panel').classList.remove('open');
+  $('#toc-toggle').setAttribute('aria-expanded', 'false');
+  $('#drawer-scrim').hidden = true;
+  // Desktop proof is a visible column, not a transient drawer. Navigation keeps
+  // that chosen mode; mobile navigation dismisses its overlay coherently.
+  if (restoreFocus || window.matchMedia('(max-width: 1050px)').matches) closeProofMode(restoreFocus);
+  if (restoreFocus && lastDrawerOpener?.isConnected && lastDrawerOpener.getClientRects().length) {
+    lastDrawerOpener.focus({ preventScroll: true });
   }
   lastDrawerOpener = null;
 }
@@ -1883,7 +1908,7 @@ $('#cancel-job').addEventListener('click', async () => {
 });
 
 $$('[data-view]').forEach(button => button.addEventListener('click', () => { state.view = button.dataset.view; renderCurrent(); saveReadingPosition(); }));
-$('#focus-toggle').addEventListener('click', () => { state.focus = !state.focus; closeDrawers(); renderCurrent(false); saveReadingPosition(); });
+$('#focus-toggle').addEventListener('click', () => { state.focus = !state.focus; closeDrawers(); renderCurrent(); saveReadingPosition(); });
 $('#script-toggle').addEventListener('click', () => { state.script = state.script === 'simplified' ? 'original' : 'simplified'; renderCurrent(); saveReadingPosition(); });
 $('#evidence-toggle').addEventListener('click', () => { state.evidenceMode = state.evidenceMode === 'assisted' ? 'confirmed' : 'assisted'; renderCurrent(); saveReadingPosition(); });
 // J08/12.3：默认复制/检索不冒充推荐为原文；辅助推荐复制时带未确认提示
@@ -1931,7 +1956,7 @@ $('#reading-progress-range').addEventListener('input', event => renderReadingPro
 $('#reading-progress-range').addEventListener('change', commitProgressRange);
 $('#reading-progress-range').addEventListener('pointerup', commitProgressRange);
 $('#reading-progress')?.addEventListener('click', event => {
-  if (event.target === $('#reading-progress-range')) return;
+  if (event.defaultPrevented || event.target.closest?.('button, a, input, select, textarea, summary, [role=button], [contenteditable]')) return;
   const range = $('#reading-progress-range');
   if (!range || range.disabled || !state.book || !state.book.totalPages) return;
   const rect = range.getBoundingClientRect();
@@ -1953,7 +1978,8 @@ document.querySelector('#quality-diagnostics-toggle')?.addEventListener('click',
   if (diag && diag.textContent) diag.hidden = !open;
 });
 // U1：阅读模式默认进入，校对按需进入；后台任务不得自动打开面板。
-initReaderMode();
+initReaderMode({ onChange: () => renderReview() });
+$('.review-reference').addEventListener('toggle', refreshReviewReference);
 // One task surface, opened deliberately; no task card consumes reading space while work runs.
 $('#reading-window-dialog').append($('#job-panel'));
 $('#job-panel').setAttribute('data-task-surface', 'dialog');
@@ -2206,7 +2232,8 @@ $('#export-button').addEventListener('click', () => {
 });
 $('#usage-open').addEventListener('click', () => openBookUsage(state.book));
 
-$('#toc-toggle').addEventListener('click', () => openDrawer('toc')); $('#review-toggle').addEventListener('click', () => openDrawer('review')); $('#close-review').addEventListener('click', () => closeDrawers(true)); $('#drawer-scrim').addEventListener('click', () => closeDrawers(true));
+$('#toc-toggle').addEventListener('click', () => openDrawer('toc'));
+$('#drawer-scrim').addEventListener('click', () => closeDrawers(true));
 const readingOptions = $('#reading-options');
 globalThis.BookReaderFonts?.init?.('#reader-font', { noteElement: '#reader-font-note' });
 $('#reading-options-controls').append($('.reader-settings'));
@@ -2253,6 +2280,6 @@ document.addEventListener('visibilitychange', () => {
     void ensureReadingWindowActive();
   }
 });
-window.addEventListener('keydown', event => { if (event.key === 'Escape') { closeMore(true); closeDrawers(true); } if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && state.page) { event.preventDefault(); $('#save-page').click(); } });
+window.addEventListener('keydown', event => { if (event.key === 'Escape' && !event.defaultPrevented && !event.isComposing && !document.querySelector('dialog[open]')) { closeMore(true); closeDrawers(true); } if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && state.page) { event.preventDefault(); $('#save-page').click(); } });
 
 init();
