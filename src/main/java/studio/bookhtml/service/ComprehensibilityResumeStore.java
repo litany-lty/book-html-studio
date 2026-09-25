@@ -21,6 +21,10 @@ public final class ComprehensibilityResumeStore {
     public record Group(int index,String inputHash,String result) {}
     public record Snapshot(int schemaVersion,String bookId,int pageNumber,String inputHash,int planned,
                            UUID ownerId,Instant startedAt,Instant updatedAt,List<Group> groups,String integrityHash) {}
+    // Shared across handles but bounded independently of the number of books ever opened.
+    // This is only a maintenance hint; it never grants permission or proves completion.
+    private static final int MAX_CURSORS=128, MAINTENANCE_BATCH=4;
+    private static final Map<Path,String> MAINTENANCE_CURSORS=new LinkedHashMap<>(16,.75f,true);
     private final BookStore store;
     private final ObjectMapper json;
     private final Clock clock;
@@ -69,13 +73,31 @@ public final class ComprehensibilityResumeStore {
         try(var stream=Files.list(directory)){candidates=stream.limit(MAX_PAGES+1L).sorted().toList();}
         if(candidates.size()<MAX_PAGES)return;
         if(candidates.size()>MAX_PAGES)throw new IOException("review cache directory exceeds capacity");
-        int inspected=0;
-        for(Path candidate:candidates){
-            if(inspected++>=4)break;
+        Path directoryKey=directory.toAbsolutePath().normalize();
+        String after;
+        synchronized(MAINTENANCE_CURSORS){after=MAINTENANCE_CURSORS.get(directoryKey);}
+        int start=0;
+        if(after!=null){
+            while(start<candidates.size()&&candidates.get(start).getFileName().toString().compareTo(after)<=0)start++;
+            if(start==candidates.size())start=0;
+        }
+        for(int inspected=0;inspected<Math.min(MAINTENANCE_BATCH,candidates.size());inspected++){
+            Path candidate=candidates.get((start+inspected)%candidates.size());
+            // Advance even past damaged, foreign or non-reclaimable entries. The next
+            // bounded pass must not get stuck on the same unfinished prefix.
+            synchronized(MAINTENANCE_CURSORS){
+                MAINTENANCE_CURSORS.put(directoryKey,candidate.getFileName().toString());
+                while(MAINTENANCE_CURSORS.size()>MAX_CURSORS)
+                    MAINTENANCE_CURSORS.remove(MAINTENANCE_CURSORS.keySet().iterator().next());
+            }
             String name=candidate.getFileName().toString();if(!name.matches("[1-9][0-9]{0,9}\\.json"))continue;
             try {
                 int page=Integer.parseInt(name.substring(0,name.length()-5));Snapshot old=read(candidate,book,page);
-                if(old!=null&&!old.startedAt().plus(RETENTION).isAfter(now)){
+                // read() already verified unique, in-range group indices and integrity.
+                // Complete plans have no missing group to resume, so their optional
+                // cached result may be reclaimed. Recent partial evidence stays intact.
+                if(old!=null&&!old.startedAt().isAfter(now)&&!old.updatedAt().isAfter(now)
+                        &&(!old.startedAt().plus(RETENTION).isAfter(now)||old.groups().size()==old.planned())){
                     Files.delete(candidate);return;
                 }
             }catch(Exception invalid){/* Never delete damaged or still-live partial evidence to make room. */}

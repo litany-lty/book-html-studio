@@ -136,4 +136,58 @@ class ComprehensibilityResumeStoreTest {
         assertTrue(admitted,"bounded successive maintenance must eventually visit every candidate");
         assertTrue(Files.exists(cache.path(book,1)),"uncompleted source evidence is retained");
     }
+
+    @Test void successiveStoreHandlesShareBoundedMaintenanceProgress() throws Exception {
+        for(int page=1;page<=ComprehensibilityResumeStore.MAX_PAGES;page++)cache.open(book,page,input,2).put(0,group,body());
+        cache.open(book,32,input,2).put(1,group,body());
+        boolean admitted=false;
+        for(int tries=0;tries<8&&!admitted;tries++)admitted=at(instant).open(book,33,input,1).available();
+        assertTrue(admitted,"changing service handles must not reset a full-directory scan");
+        for(int page=1;page<32;page++)assertNotNull(cache.read(cache.path(book,page),book,page));
+    }
+    @Test void oneMaintenancePassReadsAtMostFourCandidateRecords() throws Exception {
+        for(int page=1;page<=ComprehensibilityResumeStore.MAX_PAGES;page++)cache.open(book,page,input,2).put(0,group,body());
+        var counting=org.mockito.Mockito.spy(cache);
+        assertFalse(counting.open(book,33,input,1).available());
+        org.mockito.Mockito.verify(counting,org.mockito.Mockito.times(5)).read(
+                org.mockito.ArgumentMatchers.any(Path.class),org.mockito.ArgumentMatchers.eq(book),org.mockito.ArgumentMatchers.anyInt());
+        assertFalse(Files.exists(cache.path(book,33)));
+    }
+    @Test void corruptCompletedRecordIsNotDeletedAsReclaimableEvidence() throws Exception {
+        for(int page=1;page<=ComprehensibilityResumeStore.MAX_PAGES;page++)cache.open(book,page,input,2).put(0,group,body());
+        Path bad=cache.path(book,1);String damaged=Files.readString(bad).replace("findings","changed");Files.writeString(bad,damaged);
+        cache.open(book,32,input,2).put(1,group,body());
+        boolean admitted=false;
+        for(int tries=0;tries<8&&!admitted;tries++)admitted=cache.open(book,33,input,1).available();
+        assertTrue(admitted);assertEquals(damaged,Files.readString(bad));
+        assertFalse(cache.open(book,1,input,2).available());
+    }
+    @Test void clockRollbackDoesNotEvictFutureCompletedEvidence() throws Exception {
+        for(int page=1;page<=ComprehensibilityResumeStore.MAX_PAGES;page++)cache.open(book,page,input,1).put(0,group,body());
+        for(int tries=0;tries<8;tries++)assertFalse(at(instant.minusSeconds(1)).open(book,33,input,1).available());
+        try(var files=Files.list(cache.path(book,1).getParent())){assertEquals(ComprehensibilityResumeStore.MAX_PAGES,files.count());}
+    }
+    @Test void evictedOldWriterCannotReplaceNewEvidenceForTheSamePage() throws Exception {
+        var old=cache.open(book,1,input,1);old.put(0,group,body());
+        for(int page=2;page<=ComprehensibilityResumeStore.MAX_PAGES;page++)cache.open(book,page,input,2).put(0,group,body());
+        assertTrue(cache.open(book,33,input,1).available());assertFalse(Files.exists(cache.path(book,1)));
+        cache.open(book,33,input,1).put(0,group,body());
+        ComprehensibilityResumeStore.Session replacement=null;
+        for(int tries=0;tries<8;tries++){replacement=cache.open(book,1,"c".repeat(64),1);if(replacement.available())break;}
+        assertTrue(replacement.available());replacement.put(0,"d".repeat(64),body());
+        old.put(0,group,body());assertFalse(old.available());
+        var saved=cache.read(cache.path(book,1),book,1);
+        assertEquals("c".repeat(64),saved.inputHash());assertEquals("d".repeat(64),saved.groups().get(0).inputHash());
+    }
+    @Test void fullDirectoryConcurrentAdmissionDoesNotExceedTheBound() throws Exception {
+        for(int page=1;page<=ComprehensibilityResumeStore.MAX_PAGES;page++)cache.open(book,page,input,1).put(0,group,body());
+        var executor=java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var start=new java.util.concurrent.CountDownLatch(1);
+            var a=executor.submit(()->{start.await();return at(instant).open(book,33,input,1).available();});
+            var b=executor.submit(()->{start.await();return at(instant).open(book,34,input,1).available();});
+            start.countDown();assertTrue(a.get(10,TimeUnit.SECONDS));assertTrue(b.get(10,TimeUnit.SECONDS));
+            try(var files=Files.list(cache.path(book,1).getParent())){assertEquals(ComprehensibilityResumeStore.MAX_PAGES,files.count());}
+        } finally {executor.shutdownNow();assertTrue(executor.awaitTermination(5,TimeUnit.SECONDS));}
+    }
 }
