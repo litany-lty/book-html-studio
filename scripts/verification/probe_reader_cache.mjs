@@ -46,3 +46,19 @@ test('accessor fields are not executed while estimating retained data', () => {
   let calls=0;const page={get text(){calls++;return 'private';}};
   assert.equal(estimatePageBytes(page),Number.MAX_SAFE_INTEGER);assert.equal(calls,0);
 });
+
+test('actual LRU preserves the current page and twelve-entry bound', () => {
+  const cache=new LruPageCache(12,32*1024*1024,key=>key===1);
+  for(let n=1;n<=15;n++)cache.set(n,{pageNumber:n,blocks:[]});
+  assert.equal(cache.size,12);assert.equal(cache.has(1),true);assert.equal(cache.has(2),false);assert.equal(cache.has(15),true);
+});
+test('byte eviction and replacement recount actual retained records', () => {
+  const current={pageNumber:1,blocks:[]}, large=n=>({pageNumber:n,sourceRecords:[{original:'字'.repeat(800)}]});
+  const budget=estimatePageBytes(current)+estimatePageBytes(large(2))*2+1;
+  const cache=new LruPageCache(12,budget,key=>key===1);
+  cache.set(1,current);cache.set(2,large(2));cache.set(3,large(3));cache.set(4,large(4));
+  assert.equal(cache.has(1),true);assert.equal(cache.has(2),false);assert.equal(cache.has(4),true);
+  assert.ok(cache.currentBytes<=budget);
+  cache.set(3,{pageNumber:3,blocks:[]});
+  assert.equal(cache.currentBytes,[...cache.values()].reduce((sum,page)=>sum+estimatePageBytes(page),0));
+});
