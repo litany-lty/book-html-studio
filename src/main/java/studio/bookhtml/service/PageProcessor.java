@@ -179,11 +179,13 @@ public class PageProcessor {
         try(ImageArtifact artifact=renderForOcrArtifact(store.pdf(bookId),pageNumber)){
             if(artifact==null||artifact.image()==null)throw new OcrException("渲染页面图像为空");
             BufferedImage image=artifact.image();
-            List<Block> transcribed=handwriting.transcribe(image,layout,cancelled);
+            var transcription=handwriting.transcribeDetailed(image,layout,cancelled);
+            List<Block> transcribed=transcription.blocks();
             List<Block> blocks=simplify(transcribed);
             if(comprehensibilityService!=null)blocks=comprehensibilityService.checkLocal(blocks);
             List<String> warnings=new ArrayList<>();
             warnings.add(HandwritingTranscribeService.WARNING);
+            warnings.addAll(transcription.diagnostics());
             warnings.add(traceWarning(store.pdf(bookId),pageNumber,HandwritingTranscribeService.SOURCE,layout));
             double width=previous==null||previous.width()<=0?image.getWidth():previous.width();
             double height=previous==null||previous.height()<=0?image.getHeight():previous.height();

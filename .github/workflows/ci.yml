@@ -97,10 +97,12 @@ jobs:
             for suite in FinalGapRegressionTest PriorityTaskSchedulerTest QwenAssistCoordinatorTest ReadingWindowServiceTest PageAttemptLifecycleTest RemediationLifecycleTest ProgressReducerRegressionTest QwenRequestGateTest DurableReprocessTest PageStatisticsCacheTest PagePublicationAuthorityTest PublicationProcessCrashTest UnifiedPageEngineTest QwenPhysicalCallTest QwenLedgerIntegrationTest; do
               cp "target/surefire-reports/TEST-studio.bookhtml.service.$suite.xml" "test-results/lifecycle-repeat-$round/"
             done
-            mvn --batch-mode -Dtest=IndexReadIntegrityTest,SourcePublicationIntegrityTest,SourceCheckpointTest,AutomaticComprehensibilityTest,HandwritingTranscribeServiceTest,PageWorkSchedulerOwnershipTest,RemoteJobStaleReclaimTest test
+            mvn --batch-mode -Dtest=IndexReadIntegrityTest,SourcePublicationIntegrityTest,SourceCheckpointTest,AutomaticComprehensibilityTest,HandwritingTranscribeServiceTest,ManuscriptResumeTest,ManuscriptResumeStoreTest,PageWorkSchedulerOwnershipTest,RemoteJobStaleReclaimTest test
             cp target/surefire-reports/TEST-studio.bookhtml.service.IndexReadIntegrityTest.xml "test-results/lifecycle-repeat-$round/"
             cp target/surefire-reports/TEST-studio.bookhtml.store.SourcePublicationIntegrityTest.xml "test-results/lifecycle-repeat-$round/"
             cp target/surefire-reports/TEST-studio.bookhtml.store.SourceCheckpointTest.xml "test-results/lifecycle-repeat-$round/"
+            cp target/surefire-reports/TEST-studio.bookhtml.service.ManuscriptResumeTest.xml "test-results/lifecycle-repeat-$round/"
+            cp target/surefire-reports/TEST-studio.bookhtml.service.ManuscriptResumeStoreTest.xml "test-results/lifecycle-repeat-$round/"
             mvn --batch-mode -Dtest=CurrentAuditReproductionTest,ConsentAuthorityRegressionTest,RemoteRecoveryQuarantineTest,ProgressPlanAuthorityTest,EvidenceAndCompletionTest,PhysicalBoundaryRegressionTest,LegacyModelBoundaryTest test
             for suite in AutomaticComprehensibilityTest HandwritingTranscribeServiceTest PageWorkSchedulerOwnershipTest RemoteJobStaleReclaimTest CurrentAuditReproductionTest ConsentAuthorityRegressionTest RemoteRecoveryQuarantineTest ProgressPlanAuthorityTest EvidenceAndCompletionTest PhysicalBoundaryRegressionTest LegacyModelBoundaryTest; do
               cp "target/surefire-reports/TEST-studio.bookhtml.service.$suite.xml" "test-results/lifecycle-repeat-$round/"
