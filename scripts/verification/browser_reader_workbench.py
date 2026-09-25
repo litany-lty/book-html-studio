@@ -120,6 +120,17 @@ async def main():
             await page.locator('#close-review').click();await settle(page)
             check('mobile_close_restores_visible_opener',await page.evaluate("document.activeElement?.id==='review-toggle'"))
             await context.close()
+            context,page,requests=await fixture()
+            await page.click('[data-view="original"]');await page.wait_for_selector('#paper .edit-overlay')
+            async def drag_overlay():
+                box=await page.locator('#paper .edit-overlay').first.bounding_box()
+                x=box['x']+box['width']/2;y=box['y']+box['height']/2
+                await page.mouse.move(x,y);await page.mouse.down();await page.mouse.move(x+18,y+15,steps=4);await page.mouse.up();await settle(page)
+            await drag_overlay()
+            check('original_reading_drag_does_not_silently_edit_layout',await page.locator('#page-save-status').inner_text()=='已保存')
+            await page.click('#proof-toggle');await settle(page);await drag_overlay()
+            check('explicit_proof_retains_layout_drag_editing',await page.locator('#page-save-status').inner_text()=='未保存')
+            await context.close()
             check('no_page_script_errors',not errors);check('no_mutating_requests',not writes);check('no_external_requests',not external)
         finally:
             await browser.close()

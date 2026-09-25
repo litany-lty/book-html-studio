@@ -1205,7 +1205,7 @@ function syncOverlays() {
   const stage = imageStage();
   if (!stage || !state.page) return;
   createOverlay(stage, state.blocks, state.selectedBlockId, {
-    canMove: () => !state.drawType,
+    canMove: () => isProofMode() && !state.focus && !state.drawType,
     onSelect(id) { state.selectedBlockId = id; renderReview(); syncOverlays(); scrollToSelectedBlock(id); },
     onMove(block, finished) { markDirty(); if (finished) renderReview(); }
   });
