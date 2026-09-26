@@ -64,8 +64,9 @@ class LanReaderAccessTest {
     @Test void unrelatedDevicesReadTheSameShelfWithoutSharingWritePermission()throws Exception{
         assertTrue(passes(request("GET","/api/books?view=reader"),new MockHttpServletResponse()));
         assertTrue(passes(request("GET","/api/books/id/reader/pages/1"),new MockHttpServletResponse()));
-        assertFalse(passes(request("POST","/api/books"),new MockHttpServletResponse()));
+        assertTrue(passes(request("POST","/api/books"),new MockHttpServletResponse()),"default shared LAN upload is not an edit grant");
         pairing.setLanReadRequiresPairing(true);
+        assertFalse(passes(request("POST","/api/books"),new MockHttpServletResponse()));
         assertFalse(passes(request("GET","/api/books"),new MockHttpServletResponse()));
     }
     @Test void browserPairRejectsMissingOrCrossOriginBeforeIssuingCredential()throws Exception{

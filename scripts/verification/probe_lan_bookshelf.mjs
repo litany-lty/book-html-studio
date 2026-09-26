@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readingEntry, shelfEntries, SHELF_PAGE_SIZE } from '../../src/main/resources/static/bookshelf.js';
-import { hasReaderCapability } from '../../src/main/resources/static/lan-reader.js';
+import { readingEntry, shelfEntries, SHELF_PAGE_SIZE, createShelfRefresh } from '../../src/main/resources/static/bookshelf.js';
+import { hasReaderCapability, needsAccessControl } from '../../src/main/resources/static/lan-reader.js';
 const books=[{id:'a',title:'甲书',filename:'alpha.pdf',totalPages:30,createdAt:'2026-01-01'},
   {id:'b',title:'乙书',filename:'beta.pdf',totalPages:20,createdAt:'2026-02-01'},
   {id:'c',title:'已归档',filename:'c.pdf',archived:true,totalPages:1}];
@@ -25,4 +25,31 @@ test('upload authority does not imply paid, edit or administrator authority',()=
   assert.equal(hasReaderCapability(null,'UPLOAD'),false);
   assert.equal(hasReaderCapability({capabilities:'MANAGE'},'UPLOAD'),false);
   assert.equal(hasReaderCapability({capabilities:['MANAGE']},'UPLOAD'),true);
+});
+
+test('default shared readers and owners do not see a pairing setting',()=>{
+  assert.equal(needsAccessControl({capabilities:['READ','UPLOAD'],accessMode:'LAN_SHARED'}),false);
+  assert.equal(needsAccessControl({capabilities:['MANAGE'],accessMode:'LOOPBACK'}),false);
+  assert.equal(needsAccessControl(null),false);
+  assert.equal(needsAccessControl({capabilities:['READ'],readRequiresPairing:true}),true);
+  assert.equal(needsAccessControl({capabilities:['READ'],accessMode:'LAN_PAIRED'}),true);
+});
+test('simultaneous shelf returns coalesce into one metadata read',async()=>{
+  let state=books,calls=0,release;
+  const sync=createShelfRefresh({load:()=>{calls++;return new Promise(r=>release=r);},current:()=>state,apply:x=>state=x});
+  const a=sync(),b=sync();assert.equal(a,b);await Promise.resolve();assert.equal(calls,1);
+  release([]);assert.equal(await a,true);assert.deepEqual(state,[]);
+});
+test('delayed shelf read cannot erase an intervening upload',async()=>{
+  let state=books,release;
+  const sync=createShelfRefresh({load:()=>new Promise(r=>release=r),current:()=>state,apply:x=>state=x});
+  const loading=sync();await Promise.resolve();state=[...books,{id:'new'}];release(books);
+  assert.equal(await loading,false);assert.equal(state.at(-1).id,'new');
+});
+test('failed or malformed refresh preserves shelf and permits the next explicit read',async()=>{
+  let state=books,calls=0;
+  const sync=createShelfRefresh({load:async()=>{if(++calls===1)throw new Error('offline');if(calls===2)return {};return [];},current:()=>state,apply:x=>state=x});
+  await assert.rejects(sync(),/offline/);assert.equal(state,books);
+  await assert.rejects(sync(),/书架响应无效/);assert.equal(state,books);
+  assert.equal(await sync(),true);assert.deepEqual(state,[]);
 });

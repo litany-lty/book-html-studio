@@ -5,23 +5,28 @@ export function hasReaderCapability(status, capability) {
   return Boolean(status && Array.isArray(status.capabilities) &&
     (status.capabilities.includes('MANAGE') || status.capabilities.includes(capability)));
 }
+export function needsAccessControl(status) {
+  return Boolean(status && (status.readRequiresPairing ||
+    (!hasReaderCapability(status, 'UPLOAD') && !hasReaderCapability(status, 'MANAGE'))));
+}
 export function createLanReader({ changed = () => {} } = {}) {
   const $ = s => document.querySelector(s), dialog = $('#lan-reader-dialog');
   let current = null, pending = null, busy = false, resolveUpload = null, scope = 0;
   function render() {
     const manager = hasReaderCapability(current, 'MANAGE');
-    $('#lan-manager').hidden = !manager; $('#lan-pair-form').hidden = manager;
+    $('#lan-reader-open').hidden = !needsAccessControl(current);
+    $('#lan-manager').hidden = !manager; $('#lan-pair-form').hidden = manager || hasReaderCapability(current, 'UPLOAD');
     $('#lan-reader-logout').hidden = !current?.isPaired || current?.isLoopback || manager;
-    $('#lan-access-description').textContent = manager ? '本机可上传和管理。为局域网读者生成上传码，不会授予校对、管理或付费识别权限。'
-      : hasReaderCapability(current, 'UPLOAD') ? '本设备已获准上传。书架与原稿由服务器保存；阅读位置和书签只记录在本浏览器。'
-      : '已有书籍可以直接阅读。上传前，请向部署者索取十分钟内有效的配对码。';
+    $('#lan-access-description').textContent = manager ? '这是部署者已限制访问的共享书架。配对码只授予阅读和上传，不授予管理或付费调用。'
+      : hasReaderCapability(current, 'UPLOAD') ? '可直接上传到共享书架。书籍保存在服务器，阅读位置留在本浏览器。'
+      : '当前连接不是默认的直连可信局域网，或部署者限制了访问。请使用局域网地址，或联系部署者。';
     if (current?.readRequiresPairing && !current?.isPaired) $('#lan-access-description').textContent = '部署者要求配对后访问书架。请输入部署者提供的配对码。';
     changed(current);
   }
   async function refresh() {
     if (pending) return pending;
     pending = api.lanStatus().then(value => {
-      if (!value || !['LOOPBACK', 'LAN_PAIRED', 'TRUSTED_PROXY'].includes(value.accessMode) || !Array.isArray(value.capabilities))
+      if (!value || !['LOOPBACK', 'LAN_SHARED', 'LAN_PAIRED', 'TRUSTED_PROXY'].includes(value.accessMode) || !Array.isArray(value.capabilities))
         throw new Error('设备权限暂不可用，请稍后重试。');
       current = value; render(); return value;
     }).finally(() => { pending = null; });
@@ -34,7 +39,9 @@ export function createLanReader({ changed = () => {} } = {}) {
     void refresh().catch(error => { $('#lan-reader-status').textContent = error.message; });
   }
   async function ensureUpload() {
-    const value = await refresh();
+    // No per-upload status round trip once the page has a valid projection.
+    // The POST remains authoritative and never retries a denied/uncertain upload automatically.
+    const value = current || await refresh();
     if (hasReaderCapability(value, 'UPLOAD')) return true;
     if (resolveUpload) return false;
     open(); return new Promise(resolve => { resolveUpload = resolve; });

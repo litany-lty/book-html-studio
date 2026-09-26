@@ -10,7 +10,7 @@ import { createReadingWindow } from './reading-window.js';
 import { settledJobSummary } from './job-summary.js';
 import { allowsAutomaticReading } from './auto-reading-policy.js';
 import { createLibrary } from './library.js';
-import { createBookshelf } from './bookshelf.js';
+import { createBookshelf, createShelfRefresh } from './bookshelf.js';
 import { createLanReader } from './lan-reader.js';
 import { initReaderMode, enterProofMode, closeProofMode, isProofMode } from './reader-mode.js';
 import { recordAnchor, restoreAnchor } from './reading-anchor.js';
@@ -1724,10 +1724,8 @@ async function init() {
   }).catch(error => {
     showError(error); $('#provider-note').textContent = '工具配置暂未读取，仍可阅读已有内容；云端处理请稍后重试。';
   });
-  const libraryReady = api.readerBooks().then(books => {
-    if (!Array.isArray(books)) throw new Error('书架响应无效，请刷新书架重试。');
-    state.books = books; renderBooks(); renderBookMeta();
-  }).catch(error => { showError(error); bookshelf.failed('书架暂未读取，请刷新；需要授权时可从“设备授权”输入配对码。'); importStatus('书架暂未读取，请刷新书架重试。', true); });
+  const libraryReady = refreshSharedShelf().then(() => renderBookMeta())
+    .catch(error => { showError(error); bookshelf.failed('书架暂未读取，请刷新；已限制的部署可从“访问授权”进入。'); importStatus('书架暂未读取，请刷新书架重试。', true); });
   await Promise.all([configurationReady, libraryReady]);
 }
 
@@ -1740,14 +1738,26 @@ window.refreshProcessingConfig = async () => {
   await decisionPanel.refresh();
 };
 
+const refreshSharedShelf = createShelfRefresh({
+  load: () => api.readerBooks(), current: () => state.books,
+  apply: books => { state.books = books; renderBooks(); library.render(); }
+});
 const bookshelf = createBookshelf({
   books: () => state.books,
   openBook: id => selectBook(id),
-  refresh: async () => { const latest = await api.readerBooks(); if (!Array.isArray(latest)) throw new Error('书架响应无效'); state.books = latest; renderBooks(); }
+  refresh: refreshSharedShelf
 });
 $('#shelf-home').addEventListener('click', async () => {
   await selectBook('');
-  if (!state.book && $('#empty-state').hidden === false) { renderBooks(); $('#shelf-search').focus({ preventScroll: true }); }
+  if (!state.book && $('#empty-state').hidden === false) {
+    renderBooks(); $('#shelf-search').focus({ preventScroll: true });
+    void refreshSharedShelf().catch(error => bookshelf.failed(error.message));
+  }
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && !state.book && !$('#empty-state').hidden)
+    void refreshSharedShelf().catch(error => bookshelf.failed(error.message));
 });
 
 const library = createLibrary({
@@ -1838,6 +1848,7 @@ $('#pdf-upload').addEventListener('change', async event => {
     await selectBook(book.id);
     importStatus(''); toast('PDF 已保存到共享书架，可以随时回来阅读。', 'success');
   } catch (error) {
+    if (error?.status === 401 || error?.status === 403) void lanReader.refresh().catch(() => {});
     const uncertain = error?.name === 'TimeoutError' || error?.name === 'TypeError';
     importStatus(uncertain
       ? '连接中断，导入结果尚不确定。先刷新书架检查是否已导入，确认没有后再试，避免重复。'
@@ -1872,7 +1883,7 @@ emptyState.addEventListener('drop', event => {
 
 $('#refresh-library').addEventListener('click', async () => {
   const button = $('#refresh-library'); setBusy(button, true, '刷新中…');
-  try { state.books = await api.readerBooks(); renderBooks(); library.render(); importStatus('书架已刷新。若找到刚才导入的书，请从书架选择；没有时再重新导入。'); }
+  try { await refreshSharedShelf(); importStatus('书架已刷新。若找到刚才导入的书，请从书架选择；没有时再重新导入。'); }
   catch (error) { importStatus(`刷新书架失败：${error?.message || '请检查服务状态后重试。'}`, true); }
   finally { setBusy(button, false); }
 });

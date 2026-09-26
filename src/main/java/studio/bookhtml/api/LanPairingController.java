@@ -73,9 +73,7 @@ public class LanPairingController {
         LanPairingService.AccessMode mode = pairingService.determineAccessMode(request);
         String token = LanPairingService.extractToken(request);
         boolean paired = token != null && pairingService.isValidToken(token);
-        Set<LanPairingService.LanCapability> capabilities = mode != LanPairingService.AccessMode.LAN_PAIRED
-                ? Set.of(LanPairingService.LanCapability.values())
-                : pairingService.getCapabilities(token);
+        Set<LanPairingService.LanCapability> capabilities = pairingService.effectiveCapabilities(request);
 
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("accessMode", mode.name());
@@ -84,6 +82,7 @@ public class LanPairingController {
         resp.put("capabilities", capabilities);
         resp.put("readRequiresPairing",pairingService.isLanReadRequiresPairing());
         resp.put("libraryScope","SHARED");
+        resp.put("directUpload", mode == LanPairingService.AccessMode.LAN_SHARED || mode == LanPairingService.AccessMode.LOOPBACK);
         return ResponseEntity.ok(resp);
     }
 

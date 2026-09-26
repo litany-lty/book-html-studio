@@ -217,6 +217,7 @@ class LanCapabilityTest {
 
     @Test
     void lanPairingControllerFlow() {
+        pairingService.setLanReadRequiresPairing(true); // Explicit legacy restricted mode still pairs.
         pairingService.setPin("654321");
 
         // 1. 配对

@@ -61,5 +61,21 @@ export function createBookshelf({ books, openBook, refresh }) {
     try { await refresh(); } catch (failure) { error = failure.message || '书架暂不可用，已有书籍未被删除。'; }
     finally { button.disabled = false; render(); }
   });
-  return { render, failed: message => { error = message; render(); } };
+  return { render: () => { error = ''; render(); }, failed: message => { error = message; render(); } };
+}
+
+// Coalesce only lightweight metadata reads. A delayed read cannot erase an upload,
+// rename or archive that already replaced the local list while it was in flight.
+export function createShelfRefresh({ load, current, apply }) {
+  let pending = null;
+  return () => {
+    if (pending) return pending;
+    const before = current();
+    pending = Promise.resolve().then(load).then(latest => {
+      if (!Array.isArray(latest)) throw new Error('书架响应无效，已有书籍未改动。');
+      if (current() !== before) return false;
+      apply(latest); return true;
+    }).finally(() => { pending = null; });
+    return pending;
+  };
 }

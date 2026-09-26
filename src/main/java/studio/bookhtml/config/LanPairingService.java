@@ -15,7 +15,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * G13 / B11: 局域网访问授权与动态配对机制。
  * 支持三种访问模式：
  *  - LOOPBACK: 本地访问，全能力直接放行
- *  - LAN_PAIRED: 局域网访问，根据配对令牌进行能力分级（READ / EDIT / PAID / MANAGE）
+ *  - LAN_SHARED: 默认可信私网共享阅读/上传，不发放管理或收费能力
+ *  - LAN_PAIRED: 已限制的部署或非直连私网，按现有令牌能力处理
  *  - TRUSTED_PROXY: 受信任反向代理访问
  * 提供动态配对 PIN、防暴力破解锁定、令牌生命周期管理与细粒度权限校验。
  */
@@ -24,6 +25,7 @@ public class LanPairingService {
     public enum AccessMode {
         LOOPBACK,
         LAN_PAIRED,
+        LAN_SHARED,
         TRUSTED_PROXY
     }
 
@@ -264,29 +266,73 @@ public class LanPairingService {
      */
     public AccessMode determineAccessMode(HttpServletRequest req) {
         String remoteAddr = req.getRemoteAddr();
-        if (WriteOriginFilter.loopback(remoteAddr)) {
+        if (WriteOriginFilter.loopbackPeer(remoteAddr)) {
             return AccessMode.LOOPBACK;
         }
         if (isTrustedProxy(remoteAddr)) {
             return AccessMode.TRUSTED_PROXY;
         }
-        return AccessMode.LAN_PAIRED;
+        return sharesWithoutPairing(req) ? AccessMode.LAN_SHARED : AccessMode.LAN_PAIRED;
     }
 
     /**
      * 检查请求是否有权执行需要指定能力的操作。
      */
     public boolean isAllowed(HttpServletRequest req, LanCapability required) {
-        AccessMode mode = determineAccessMode(req);
-        if (mode == AccessMode.LOOPBACK) {
-            return true;
+        Set<LanCapability> capabilities=effectiveCapabilities(req);
+        return required!=null && (capabilities.contains(required) || capabilities.contains(LanCapability.MANAGE));
+    }
+
+    /** Single capability projection shared by enforcement and UI; a shared shelf is not shared admin. */
+    public Set<LanCapability> effectiveCapabilities(HttpServletRequest req) {
+        AccessMode mode=determineAccessMode(req);
+        if(mode==AccessMode.LOOPBACK || mode==AccessMode.TRUSTED_PROXY) return Set.of(LanCapability.values());
+        Set<LanCapability> capabilities=EnumSet.noneOf(LanCapability.class);
+        capabilities.addAll(getCapabilities(extractToken(req)));
+        if(!lanReadRequiresPairing) capabilities.add(LanCapability.READ);
+        if(mode==AccessMode.LAN_SHARED) capabilities.add(LanCapability.UPLOAD);
+        return Set.copyOf(capabilities);
+    }
+
+    private boolean sharesWithoutPairing(HttpServletRequest req) {
+        // Preserve an operator's explicit restricted deployment. Do not trust forwarding
+        // headers to manufacture a LAN peer, or treat a private reverse proxy as a reader.
+        return !lanReadRequiresPairing && privatePeer(req.getRemoteAddr())
+                && req.getHeader("Forwarded")==null && req.getHeader("X-Forwarded-For")==null
+                && req.getHeader("X-Real-IP")==null;
+    }
+
+    static boolean privatePeer(String value) {
+        if(value==null || value.isEmpty() || value.length()>96) return false;
+        byte[] bytes;
+        if(value.indexOf(':')<0) {
+            bytes=ipv4(value);if(bytes==null)return false;
+        } else {
+            String literal=value;
+            int zone=literal.indexOf('%');
+            if(zone>=0) {
+                if(!literal.substring(zone+1).matches("[A-Za-z0-9_.-]{1,32}"))return false;
+                literal=literal.substring(0,zone);
+            }
+            if(!literal.matches("[0-9A-Fa-f:.]+"))return false;
+            if(literal.indexOf('.')>=0 && ipv4(literal.substring(literal.lastIndexOf(':')+1))==null)return false;
+            // Only a validated numeric IPv6 literal reaches this API: never a DNS name.
+            try { bytes=java.net.InetAddress.getByName(literal).getAddress(); }
+            catch(java.net.UnknownHostException invalid) { return false; }
         }
-        if (mode == AccessMode.TRUSTED_PROXY) {
-            return true;
+        if(bytes.length==16)return (bytes[0]&0xfe)==0xfc || (bytes[0]&0xff)==0xfe && (bytes[1]&0xc0)==0x80;
+        int first=bytes[0]&0xff,second=bytes[1]&0xff;
+        return first==10 || first==172 && second>=16 && second<=31 || first==192 && second==168
+                || first==169 && second==254;
+    }
+    private static byte[] ipv4(String value) {
+        String[] parts=value.split("\\.",-1);if(parts.length!=4)return null;
+        byte[] bytes=new byte[4];
+        for(int i=0;i<4;i++) {
+            if(!parts[i].matches("0|[1-9][0-9]{0,2}"))return null;
+            int part=Integer.parseInt(parts[i]);if(part>255)return null;bytes[i]=(byte)part;
         }
-        // LAN_PAIRED
-        String token = extractToken(req);
-        return hasCapability(token, required);
+        return bytes;
     }
 
     /**

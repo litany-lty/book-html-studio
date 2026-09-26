@@ -1437,3 +1437,6 @@ body.library-home[data-reader-mode]:not(.focus-reading) #workspace.is-empty { gr
 body.library-home #workspace > .reader { grid-column: 1 / -1; }
 .library-home #shelf-home, .library-home #export-button, .library-home .more-tools .upload-button,
 body[data-lan-role="reader"] #library-open { display: none; }
+
+/* Ordinary shared readers do not configure conversion; keep only inline page status. */
+body[data-lan-role="reader"] #reading-window-open { display: none; }
