@@ -51,7 +51,7 @@ public class WriteOriginFilter implements Filter {
                 reject(res, 403, "拒绝非本站来源或未授权主机的请求"); return;
             }
             // LAN pairing capability enforcement
-            if (lanPairingService != null && !loopback(req.getRemoteAddr())) {
+            if (lanPairingService != null && !loopbackPeer(req.getRemoteAddr())) {
                 String uri = req.getRequestURI();
                 if (!Set.of("/api/lan/pair","/api/lan/browser-pair","/api/lan/browser-logout","/api/lan/status").contains(uri)) {
                     if (SAFE.contains(req.getMethod())) {
@@ -77,7 +77,8 @@ public class WriteOriginFilter implements Filter {
         String origin = req.getHeader("Origin");
         boolean browserCookie=req.getCookies()!=null && Arrays.stream(req.getCookies())
                 .anyMatch(c->LanPairingService.BROWSER_COOKIE.equals(c.getName()));
-        if(!SAFE.contains(req.getMethod()) && (browserCookie || req.getRequestURI().equals("/api/lan/browser-pair"))
+        if(!SAFE.contains(req.getMethod()) && (browserCookie || req.getRequestURI().equals("/api/lan/browser-pair")
+                || req.getRequestURI().equals("/api/books") && !loopbackPeer(req.getRemoteAddr()))
                 && origin==null && req.getHeader("Referer")==null) {
             reject(res,403,"浏览器写操作缺少同源证明");return;
         }
@@ -113,12 +114,12 @@ public class WriteOriginFilter implements Filter {
 
     private boolean allowedRequestHost(HttpServletRequest req) {
         String host = normalize(req.getServerName());
-        if (loopback(bindAddress)) return loopback(host) && loopback(req.getRemoteAddr());
+        if (loopback(bindAddress)) return loopback(host) && loopbackPeer(req.getRemoteAddr());
         // LAN access was explicitly selected by BIND. Accept the actual destination
         // interface (no DNS lookup), or an operator-provided hostname, not arbitrary Host.
         if (host.isEmpty()) return false;
         if (host.equals(normalize(req.getLocalAddr())) || host.equals(normalize(bindAddress))) return true;
-        if (loopback(host)) return loopback(req.getRemoteAddr());
+        if (loopback(host)) return loopbackPeer(req.getRemoteAddr());
         return Arrays.stream(allowedHosts.split(",", -1)).limit(32)
                 .map(String::strip).map(WriteOriginFilter::normalize)
                 .filter(s -> !s.isEmpty() && !s.equals("*"))
@@ -132,6 +133,9 @@ public class WriteOriginFilter implements Filter {
     private static void reject(HttpServletResponse res, int status, String message) throws IOException {
         res.setStatus(status); res.setContentType("application/json;charset=UTF-8");
         res.getWriter().write("{\"message\":\"" + message + "\"}");
+    }
+    static boolean loopbackPeer(String value) {
+        return value!=null && Set.of("127.0.0.1","::1","0:0:0:0:0:0:0:1").contains(value);
     }
     static boolean loopback(String host) {
         return Set.of("127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1").contains(normalize(host));

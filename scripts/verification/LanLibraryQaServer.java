@@ -44,8 +44,9 @@ public final class LanLibraryQaServer {
                 return new WriteOriginFilter(){
                     @Override public void doFilter(ServletRequest req,ServletResponse res,FilterChain chain)throws IOException,ServletException{
                         HttpServletRequest request=(HttpServletRequest)req;
-                        if("lan-test".equals(request.getHeader("X-QA-Reader")))request=new HttpServletRequestWrapper(request){
-                            @Override public String getRemoteAddr(){return "192.0.2.50";}
+                        String simulated=request.getHeader("X-QA-Reader");
+                        if("lan-test".equals(simulated) || "lan-direct".equals(simulated))request=new HttpServletRequestWrapper(request){
+                            @Override public String getRemoteAddr(){return "lan-direct".equals(simulated)?"192.168.1.50":"192.0.2.50";}
                         };
                         delegate.doFilter(request,res,chain);
                     }

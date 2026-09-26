@@ -44,6 +44,7 @@ async def main():
                     if mode in ('switch','switch-race') and path==f'/api/books/{B}/reader':await gate.wait()
                     if mode=='refresh' and state['refreshing'] and (path==f'/api/books/{A}' or path.endswith('/outline')):await gate.wait()
                     if mode=='page-race' and path==f'/api/books/{A}/reader/pages/2':await gate.wait()
+                    if mode=='jump-draft' and path==f'/api/books/{A}/reader/pages/1':await gate.wait()
                     if mode in ('refresh-read','refresh-draft') and state['refreshing'] and path==f'/api/books/{A}/reader/pages/1':await gate.wait()
                     if mode=='metadata' and (path.endswith('/pages') or path.endswith('/outline')):await gate.wait()
                     if mode=='config-failure' and path=='/api/config':
@@ -137,6 +138,20 @@ async def main():
                     await page.locator('#page-jump').fill('3');await page.locator('#page-jump').press('Enter')
                     check(mode+'_cannot_block_next_page',await wait(page,"document.querySelector('#paper').textContent.includes('第3页')"))
                     gate.set();await ctx.close()
+                # Deterministic version of a real upload/first-paint race: enter a page
+                # while the first page is in flight, release it, then submit the intent.
+                ctx,page,gate,state,requests=await fixture('jump-draft')
+                await page.wait_for_function("document.querySelector('#book-select').options.length>1")
+                await page.select_option('#book-select',A)
+                await page.wait_for_function("!document.querySelector('#page-jump').disabled")
+                await page.locator('#page-jump').fill('2')
+                gate.set();await page.wait_for_selector('#paper .reading-flow')
+                check('first_page_paint_preserves_unsubmitted_jump',await page.locator('#page-jump').input_value()=='2')
+                await page.locator('#page-jump').press('Enter')
+                check('unsubmitted_jump_remains_usable_after_first_paint',await wait(page,"document.querySelector('#paper').textContent.includes('第2页')"))
+                await page.locator('#page-jump').fill('30');await page.select_option('#book-select',B)
+                check('typed_jump_does_not_cross_book_selection',await wait(page,"document.querySelector('#book-select').value==='"+B+"' && document.querySelector('#page-jump').value==='1'"))
+                await ctx.close()
                 ctx,page,gate,state,requests=await fixture('page-race')
                 await page.wait_for_function("document.querySelector('#book-select').options.length>1")
                 await page.select_option('#book-select',A);await page.wait_for_selector('#paper .reading-flow')

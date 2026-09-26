@@ -56,7 +56,9 @@ jobs:
       - name: Real server reader and settings smoke (OCR stub, no cloud)
         run: bash scripts/verification/run_reader_browser.sh
       - name: Shared LAN library, real upload and server restart (isolated, no cloud)
-        run: python3 scripts/verification/browser_lan_library.py
+        run: |
+          python3 scripts/verification/browser_lan_library.py
+          python3 scripts/verification/browser_lan_library.py --direct
       - name: Record exact checkout
         if: always()
         run: |

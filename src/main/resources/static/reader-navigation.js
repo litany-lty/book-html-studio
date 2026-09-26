@@ -32,5 +32,18 @@
     return active;
   }
 
-  globalThis.BookReaderNavigation = Object.freeze({ activeIndex, progress });
+  // A number field being edited is a navigation intent, not another render target.
+  // Page/network refreshes may update status without replacing the unsubmitted value.
+  function createPageInput() {
+    let editingBook = null;
+    return Object.freeze({
+      edit: bookId => { editingBook = bookId || null; },
+      reset: () => { editingBook = null; },
+      project: (input, page, bookId) => {
+        if (!bookId || editingBook !== bookId) input.value = String(page);
+      }
+    });
+  }
+
+  globalThis.BookReaderNavigation = Object.freeze({ activeIndex, progress, createPageInput });
 })();

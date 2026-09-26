@@ -113,7 +113,8 @@ jobs:
             for suite in JevBoundaryRegressionTest JevClientTest CoordinatorTest AcceptTest; do
               cp "target/surefire-reports/TEST-studio.bookhtml.decision.$suite.xml" "test-results/lifecycle-repeat-$round/"
             done
-            mvn --batch-mode -Dtest=LanReaderAccessTest,UploadedLibraryPersistenceTest test
+            mvn --batch-mode -Dtest=LanReaderAccessTest,SharedLanDefaultsTest,UploadedLibraryPersistenceTest test
+            cp target/surefire-reports/TEST-studio.bookhtml.config.SharedLanDefaultsTest.xml "test-results/lifecycle-repeat-$round/"
             cp target/surefire-reports/TEST-studio.bookhtml.config.LanReaderAccessTest.xml "test-results/lifecycle-repeat-$round/"
             cp target/surefire-reports/TEST-studio.bookhtml.service.UploadedLibraryPersistenceTest.xml "test-results/lifecycle-repeat-$round/"
           done
