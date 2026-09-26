@@ -30,6 +30,7 @@ const lanReader = createLanReader({ changed: status => {
 let lanReady = Promise.resolve();
 const activeJobs = new Set(['QUEUED', 'RUNNING', 'CANCELLING']);
 const readerNavigation = globalThis.BookReaderNavigation;
+const pageInput = readerNavigation.createPageInput();
 let cancelDrawing = null;
 let scrollTimer = null;
 let uploadInFlight = false;
@@ -1258,7 +1259,7 @@ function renderCurrent(full = true) {
     }
   });
   renderPageMessage(message);
-  $('#page-jump').value = state.currentPage;
+  pageInput.project($('#page-jump'), state.currentPage, state.book.id);
   renderReadingProgress();
   $('#prev-page').disabled = state.currentPage <= 1;
   $('#next-page').disabled = state.currentPage >= state.book.totalPages;
@@ -1319,6 +1320,7 @@ async function refreshVisiblePage(n) {
 }
 
 async function goToPage(n, options = {}) {
+  if (!options.force) pageInput.reset();
   if (!state.book || !Number.isInteger(n) || n < 1 || n > state.book.totalPages) { renderReadingProgress(); if (state.book) $('#page-jump').value = state.currentPage; return false; }
   if (options.force && n === state.currentPage && currentPageProtected()) {
     deferredReady = { bookId: state.book.id, page: n, revision: null };
@@ -1410,6 +1412,7 @@ async function goToPage(n, options = {}) {
 
 async function selectBook(id) {
   if (hasDirtyChanges()) { $('#book-select').value = state.book?.id || ''; return; }
+  pageInput.reset();
   saveReadingPosition(); window.clearTimeout(scrollTimer);
   bookFetchController?.abort(); bookFetchController = new AbortController();
   const manifestSignal = bookFetchController.signal;
@@ -1987,6 +1990,7 @@ $('#line-height').addEventListener('input', event => { state.lineHeight = Number
 $('#line-height').addEventListener('change', () => { renderCurrent(false); saveReadingPosition(); });
 $('#prev-page').addEventListener('click', () => goToPage(state.currentPage - 1)); $('#next-page').addEventListener('click', () => goToPage(state.currentPage + 1));
 $('#jump-form').addEventListener('submit', event => { event.preventDefault(); commitPageInput(); }); $('#page-jump').addEventListener('change', commitPageInput);
+$('#page-jump').addEventListener('input', () => pageInput.edit(state.book?.id));
 const commitProgressRange = () => {
   const val = Number($('#reading-progress-range').value);
   if (Number.isInteger(val) && val >= 1) goToPage(val);

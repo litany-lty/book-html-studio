@@ -53,3 +53,16 @@ test('failed or malformed refresh preserves shelf and permits the next explicit 
   await assert.rejects(sync(),/书架响应无效/);assert.equal(state,books);
   assert.equal(await sync(),true);assert.deepEqual(state,[]);
 });
+
+await import('../../src/main/resources/static/reader-navigation.js');
+test('a late first paint or refresh cannot replace a typed page number',()=>{
+  const field={value:'1'},input=globalThis.BookReaderNavigation.createPageInput();
+  field.value='2';input.edit('a');input.project(field,1,'a');assert.equal(field.value,'2');
+  field.value='';input.project(field,1,'a');assert.equal(field.value,'','partial editing is preserved too');
+  input.reset();input.project(field,3,'a');assert.equal(field.value,'3','explicit navigation owns the new value');
+});
+test('page input draft never crosses a book boundary',()=>{
+  const field={value:'22'},input=globalThis.BookReaderNavigation.createPageInput();
+  input.edit('a');input.project(field,1,'b');assert.equal(field.value,'1');
+  input.reset();input.project(field,5,'a');assert.equal(field.value,'5');
+});
