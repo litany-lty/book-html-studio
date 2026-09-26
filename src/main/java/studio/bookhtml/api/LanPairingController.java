@@ -46,12 +46,34 @@ public class LanPairingController {
         }
     }
 
+    /** Reader pairing grants upload only, never shared edits, cloud billing or administration. */
+    @PostMapping("/browser-pair")
+    public ResponseEntity<Map<String,Object>> browserPair(HttpServletRequest request,@RequestBody PairRequest body) {
+        var result=pairingService.pair(body==null?null:body.pin(),request.getRemoteAddr(),
+                Set.of(LanPairingService.LanCapability.READ,LanPairingService.LanCapability.UPLOAD));
+        if(!result.success())return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                .body(Map.of("success",false,"message",result.message()));
+        String cookie=org.springframework.http.ResponseCookie.from(LanPairingService.BROWSER_COOKIE,result.token())
+                .httpOnly(true).secure(request.isSecure()).sameSite("Strict").path("/api")
+                .maxAge(java.time.Duration.ofHours(24)).build().toString();
+        return ResponseEntity.ok().header("Set-Cookie",cookie)
+                .body(Map.of("success",true,"capabilities",result.capabilities(),"message","已允许本设备上传；阅读和原稿查看不会因此启动收费任务。"));
+    }
+    @PostMapping("/browser-logout")
+    public ResponseEntity<Map<String,Object>> browserLogout(HttpServletRequest request) {
+        // A reader may revoke its own credential, never somebody else's or every device.
+        pairingService.revokeToken(LanPairingService.extractToken(request));
+        String cookie=org.springframework.http.ResponseCookie.from(LanPairingService.BROWSER_COOKIE,"")
+                .httpOnly(true).secure(request.isSecure()).sameSite("Strict").path("/api").maxAge(0).build().toString();
+        return ResponseEntity.ok().header("Set-Cookie",cookie).body(Map.of("success",true));
+    }
+
     @GetMapping("/status")
     public ResponseEntity<Map<String, Object>> status(HttpServletRequest request) {
         LanPairingService.AccessMode mode = pairingService.determineAccessMode(request);
         String token = LanPairingService.extractToken(request);
         boolean paired = token != null && pairingService.isValidToken(token);
-        Set<LanPairingService.LanCapability> capabilities = mode == LanPairingService.AccessMode.LOOPBACK
+        Set<LanPairingService.LanCapability> capabilities = mode != LanPairingService.AccessMode.LAN_PAIRED
                 ? Set.of(LanPairingService.LanCapability.values())
                 : pairingService.getCapabilities(token);
 
@@ -60,6 +82,8 @@ public class LanPairingController {
         resp.put("isLoopback", mode == LanPairingService.AccessMode.LOOPBACK);
         resp.put("isPaired", paired || mode == LanPairingService.AccessMode.LOOPBACK);
         resp.put("capabilities", capabilities);
+        resp.put("readRequiresPairing",pairingService.isLanReadRequiresPairing());
+        resp.put("libraryScope","SHARED");
         return ResponseEntity.ok(resp);
     }
 

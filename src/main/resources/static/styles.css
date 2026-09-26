@@ -1389,3 +1389,51 @@ progress::-moz-progress-bar { border-radius: 999px; }
   padding: max(12px,env(safe-area-inset-top,0px)) max(clamp(12px,2vw,28px),env(safe-area-inset-right,0px))
     calc(var(--focus-footer-height,64px) + 28px) max(clamp(12px,2vw,28px),env(safe-area-inset-left,0px)); }
 #reading-progress.focus-layout { left: 0 !important; right: 0 !important; width: 100%; grid-template-columns: auto minmax(0,1fr) auto; }
+
+/* Shared-library home: reading actions first; no eager cover rendering or page scans. */
+body[data-reader-mode] .workspace.is-empty { grid-template-columns: minmax(0, 1fr); }
+.workspace.is-empty #toc-panel, .workspace.is-empty #review-panel { display: none; }
+.empty-state.bookshelf-home { display: block; min-height: 100%; max-width: 1280px; margin: auto; padding: 32px clamp(16px, 4vw, 48px); text-align: left; }
+.empty-state.bookshelf-home > div:last-child { max-width: none; }
+.shelf-heading { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.shelf-eyebrow { display: block; color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+.shelf-heading p { max-width: 660px; margin: 10px 0 18px; }
+.shelf-heading .upload-button { flex-shrink: 0; }
+.shelf-controls { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(130px, 200px) auto; align-items: end; gap: 12px; padding: 16px 0; }
+.shelf-controls .field input, .shelf-controls .field select { width: 100%; min-height: 44px; }
+.shelf-status { font-size: 13px; min-height: 20px; }
+.shelf-books { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
+.shelf-book { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; padding: 20px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); }
+.shelf-spine { font: 12px var(--serif); letter-spacing: .1em; color: var(--muted); border-left: 3px solid var(--blue); padding-left: 9px; }
+.shelf-book h3 { font: 600 20px/1.6 var(--serif); overflow-wrap: anywhere; margin: 14px 0 4px; }
+.shelf-book .shelf-book-meta { font-size: 12px; margin: 8px 0 18px; }
+.shelf-book .button { margin-top: auto; min-height: 44px; }
+.shelf-pagination { display: flex; justify-content: center; gap: 16px; padding-top: 24px; }
+.bookshelf-home .empty-hint { margin-top: 28px; font-size: 12px; }
+.lan-reader-dialog { width: min(520px, calc(100vw - 32px)); max-height: 90dvh; overflow: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); color: var(--ink); padding: 24px; }
+.lan-reader-dialog::backdrop { background: rgb(0 0 0 / .35); }
+.lan-reader-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.lan-reader-dialog h2 { font: 600 24px var(--serif); margin: 0; }
+.lan-reader-dialog p { line-height: 1.7; }
+#lan-pair-form { display: grid; gap: 16px; }
+#lan-pin { min-height: 44px; font-size: 20px; letter-spacing: .25em; }
+#lan-reader-status { min-height: 1.7em; }
+#shelf-home { min-height: 44px; flex-shrink: 0; }
+@media (max-width: 760px) {
+  .shelf-heading { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .shelf-controls { grid-template-columns: minmax(0, 1fr) minmax(100px, 150px); }
+  .shelf-controls > button { justify-self: start; }
+  .shelf-books { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+  .library-tools #shelf-home { padding-inline: 8px; }
+}
+
+.library-home .mobile-bar { display: none; }
+body[data-lan-role="reader"] #settings-open, body[data-lan-role="reader"] #usage-open,
+body[data-lan-role="reader"] #proof-toggle, body[data-lan-role="reader"] #review-toggle,
+body[data-lan-role="reader"] #reader-reload-page, body[data-lan-role="reader"] #reading-window-enable { display: none; }
+
+/* Home owns the entire workspace; legacy proof/TOC columns must not reserve blank space. */
+body.library-home[data-reader-mode]:not(.focus-reading) #workspace.is-empty { grid-template-columns: minmax(0, 1fr); }
+body.library-home #workspace > .reader { grid-column: 1 / -1; }
+.library-home #shelf-home, .library-home #export-button, .library-home .more-tools .upload-button,
+body[data-lan-role="reader"] #library-open { display: none; }

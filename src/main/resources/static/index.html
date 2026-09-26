@@ -23,17 +23,19 @@
   <noscript><link rel="stylesheet" href="/fonts/reader-fonts.css"></noscript>
   <link rel="stylesheet" href="/reader-status.css">
 </head>
-<body data-reader-mode="reading">
+<body data-reader-mode="reading" class="library-home">
   <a class="skip-link" href="#reader">跳到正文</a>
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">页</span>
-      <div><strong>纸页工坊</strong><small>PDF 转可校对 HTML</small></div>
+      <div><strong>纸页工坊</strong><small>局域网 PDF 书架</small></div>
     </div>
     <div class="library-tools">
+      <button id="shelf-home" class="button quiet" type="button">书架</button>
       <label class="field compact"><span>书架</span><select id="book-select" aria-label="选择已导入书籍"><option value="">选择书籍</option></select></label>
       <button id="more-toggle" class="button quiet more-toggle" type="button" aria-expanded="false" aria-controls="more-tools">更多</button>
       <div id="more-tools" class="more-tools">
+        <button id="lan-reader-open" class="button quiet" type="button" aria-haspopup="dialog" aria-controls="lan-reader-dialog">设备授权</button>
         <button id="library-open" class="button quiet" type="button" aria-haspopup="dialog" aria-controls="library-dialog">管理书架</button>
         <label class="upload-button" for="pdf-upload" tabindex="0">导入 PDF<input id="pdf-upload" type="file" accept="application/pdf,.pdf" aria-describedby="import-status"></label>
         <button id="export-button" class="button primary" type="button" disabled>导出离线书</button>
@@ -85,7 +87,14 @@
     </aside>
 
     <section id="reader" class="reader" tabindex="-1">
-      <div id="empty-state" class="empty-state"><div class="empty-sheet"><span aria-hidden="true">原</span></div><div><h2>从一份 PDF 开始</h2><p>导入后先查看原稿，再挑选少量页面识别。没有识别结果的页面仍会诚实地显示原图。</p><label class="upload-button large" for="pdf-upload">选择 PDF</label><p class="empty-hint">也可以将 PDF 拖放到此处；导入不会自动开始识别。</p></div></div>
+      <section id="empty-state" class="empty-state bookshelf-home" aria-labelledby="shelf-heading">
+        <div class="shelf-heading"><div><span class="shelf-eyebrow">纸页工坊 · 共享书架</span><h2 id="shelf-heading">选择一本书，继续阅读</h2><p>PDF 保存在这台服务器。同一局域网再次打开此地址，就能回到书架。</p></div><label class="upload-button large" for="pdf-upload">上传 PDF</label></div>
+        <div class="shelf-controls"><label class="field"><span>查找书籍</span><input id="shelf-search" type="search" placeholder="书名或 PDF 文件名" autocomplete="off"></label><label class="field"><span>排序</span><select id="shelf-sort"><option value="reading">最近阅读（本设备）</option><option value="recent">最近上传</option><option value="title">书名</option></select></label><button id="shelf-refresh" class="button quiet" type="button">刷新</button></div>
+        <p id="shelf-status" class="shelf-status" role="status" aria-live="polite">正在读取书架…</p>
+        <div id="shelf-books" class="shelf-books" aria-busy="true"></div>
+        <div id="shelf-pagination" class="shelf-pagination" hidden><button id="shelf-previous" class="button" type="button">上一页书架</button><button id="shelf-next" class="button" type="button">下一页书架</button></div>
+        <p class="empty-hint">支持拖放一份 PDF。书籍与原稿由大家共享；阅读位置和书签只记在本浏览器，不会被其他设备翻页覆盖。上传与收费识别分别授权。</p>
+      </section>
       <div id="reader-shell" hidden>
         <div class="reader-toolbar" aria-label="阅读工具">
           <div class="view-switch" role="group" aria-label="显示方式"><button class="segmented" data-view="original" type="button">原稿</button><button class="segmented" data-view="facsimile" type="button">原版排布</button><button class="segmented active" data-view="reading" type="button">阅读</button></div>
@@ -142,7 +151,7 @@
   </footer>
   <div id="drawer-scrim" class="drawer-scrim" hidden></div>
   <dialog id="library-dialog" class="library-dialog" aria-labelledby="library-title">
-    <div class="library-head"><div><span class="library-eyebrow">我的藏书</span><h2 id="library-title">管理书架</h2><p>整理书名与归档状态。归档后可随时恢复，原稿、校对内容和用量记录都会保留。</p></div><button id="library-close" class="button quiet" type="button" aria-label="关闭书架管理">关闭</button></div>
+    <div class="library-head"><div><span class="library-eyebrow">共享藏书</span><h2 id="library-title">管理书架</h2><p>整理书名与归档状态。归档后可随时恢复，原稿、校对内容和用量记录都会保留。</p></div><button id="library-close" class="button quiet" type="button" aria-label="关闭书架管理">关闭</button></div>
     <div class="library-controls"><label class="field"><span>查找书籍</span><input id="library-search" type="search" placeholder="搜索书名或 PDF 文件名" autocomplete="off"></label><label class="field"><span>排序</span><select id="library-sort"><option value="recent">最近导入</option><option value="title">书名</option><option value="progress">处理进度</option></select></label></div>
     <div class="library-tabs" role="group" aria-label="书架范围"><button id="library-active" class="button active" type="button" aria-pressed="true">书架 <span id="library-active-count">0</span></button><button id="library-archived" class="button" type="button" aria-pressed="false">已归档 <span id="library-archived-count">0</span></button><button id="library-refresh" class="button quiet" type="button">刷新</button><button id="library-import" class="button" type="button">导入 PDF</button></div>
     <p id="library-status" class="library-status" role="status" aria-live="polite"></p>
@@ -236,6 +245,15 @@
   </dialog>
   <dialog id="reading-window-dialog" class="reading-window-dialog" aria-labelledby="reading-window-heading"><form method="dialog"><div class="reading-window-dialog-head"><div><h2 id="reading-window-heading">随读识别</h2><p>只准备当前页、前 3 页和后 5 页；翻页后停留约 1 秒才送识。阅读不等待识别，未完成时照常显示原稿。</p></div><button class="button quiet" value="cancel" aria-label="关闭">关闭</button></div><p id="reading-window-choice"></p><label class="checkbox"><input id="reading-window-auto-start" type="checkbox" checked>打开书籍时自动随读处理（使用已配置通道，可能计费）</label>
       <label class="check" style="margin: 12px 0 6px;"><input id="reading-window-auto-all" type="checkbox"><span>随读就绪后自动处理全书其他页</span></label><p class="reading-window-caution">开启后可能产生云服务用量。已识别并缓存的页面不会重复送识；本次选择固定到停止为止。关闭页面或切换书籍将停止新任务，已送出的当前页可能完成。</p><div class="reading-window-dialog-actions"><button id="reading-window-enable" class="button primary" type="button">确认开启随读识别</button></div></form></dialog>
+  <dialog id="lan-reader-dialog" class="lan-reader-dialog" aria-labelledby="lan-reader-heading">
+    <header><h2 id="lan-reader-heading">设备授权</h2><button id="lan-reader-close" class="button quiet" type="button">关闭</button></header>
+    <p id="lan-access-description"></p>
+    <form id="lan-pair-form"><label class="field"><span>六位上传配对码</span><input id="lan-pin" type="password" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="off" required></label><button id="lan-pair-submit" class="button primary" type="submit">允许本设备上传</button></form>
+    <div id="lan-manager" hidden><button id="lan-generate-pin" class="button" type="button">生成上传配对码</button><p id="lan-pin-output" role="status"></p></div>
+    <p id="lan-reader-status" role="status" aria-live="polite"></p>
+    <button id="lan-reader-logout" class="button quiet" type="button" hidden>退出本设备上传授权</button>
+    <p class="muted">仅限受信任局域网。上传授权约 24 小时有效，服务重启后需重新配对；书籍不受影响。此处不是个人账号或私密书架。</p>
+  </dialog>
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
   <script src="/reader-navigation.js"></script>
   <script src="/reading-layout.js"></script>

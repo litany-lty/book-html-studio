@@ -29,6 +29,7 @@ public class LanPairingService {
 
     public enum LanCapability {
         READ,
+        UPLOAD,
         EDIT,
         PAID,
         MANAGE
@@ -42,7 +43,7 @@ public class LanPairingService {
             String remoteAddress
     ) {
         public boolean isExpired() {
-            return Instant.now().isAfter(expiresAt);
+            return !Instant.now().isBefore(expiresAt);
         }
 
         public boolean hasCapability(LanCapability capability) {
@@ -66,6 +67,7 @@ public class LanPairingService {
         }
     }
 
+    public static final String BROWSER_COOKIE = "BOOK_LAN_SESSION";
     private static final int MAX_FAILED_ATTEMPTS = 5;
     private static final Duration LOCKOUT_DURATION = Duration.ofSeconds(60);
     private static final Duration DEFAULT_PIN_TTL = Duration.ofMinutes(10);
@@ -129,7 +131,7 @@ public class LanPairingService {
      * 执行配对：校验 PIN 码并颁发具备指定能力的令牌。
      */
     public PairingResult pair(String pin, String remoteAddress) {
-        return pair(pin, remoteAddress, Set.of(LanCapability.READ, LanCapability.EDIT));
+        return pair(pin, remoteAddress, Set.of(LanCapability.READ, LanCapability.UPLOAD));
     }
 
     public synchronized PairingResult pair(String pin, String remoteAddress, Set<LanCapability> capabilities) {
@@ -163,7 +165,7 @@ public class LanPairingService {
         String token = "lan_" + UUID.randomUUID().toString().replace("-", "")
                 + Long.toHexString(random.nextLong());
         Set<LanCapability> granted = capabilities == null || capabilities.isEmpty()
-                ? Set.of(LanCapability.READ, LanCapability.EDIT)
+                ? Set.of(LanCapability.READ, LanCapability.UPLOAD)
                 : Set.copyOf(capabilities);
 
         evictExpiredTokens();
@@ -289,7 +291,7 @@ public class LanPairingService {
 
     /**
      * 从请求头或参数中提取配对令牌。
-     * 优先检查 X-Lan-Pairing-Token，其次 Authorization: Bearer，再次请求参数 lanToken。
+     * 优先检查显式请求头，其次 HttpOnly 浏览器 Cookie；不接受 URL 查询凭据。
      */
     public static String extractToken(HttpServletRequest req) {
         String header = req.getHeader("X-Lan-Pairing-Token");
@@ -301,15 +303,13 @@ public class LanPairingService {
             String candidate = auth.substring(7).strip();
             if (!candidate.isBlank()) return candidate;
         }
-        String param = req.getParameter("lanToken");
-        if (param != null && !param.isBlank()) {
-            return param.strip();
+        // Browser credentials never belong in URLs, logs, localStorage or image links.
+        String browserToken=null;
+        if(req.getCookies()!=null)for(var cookie:req.getCookies())if(BROWSER_COOKIE.equals(cookie.getName())) {
+            if(browserToken!=null) return null; // Ambiguous cookie paths must not choose a principal.
+            browserToken=cookie.getValue();
         }
-        String pairingParam = req.getParameter("pairingToken");
-        if (pairingParam != null && !pairingParam.isBlank()) {
-            return pairingParam.strip();
-        }
-        return null;
+        return browserToken;
     }
 
     public boolean isLanReadRequiresPairing() {

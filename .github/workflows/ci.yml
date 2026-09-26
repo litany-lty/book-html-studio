@@ -73,7 +73,7 @@ jobs:
           node scripts/verification/probe_page_progress.mjs
           node --test scripts/verification/probe_final_gaps.mjs scripts/verification/probe_auto_reading_policy.mjs
           node scripts/verification/probe_settings_secrets.mjs
-          node --test scripts/verification/probe_job_summary.mjs
+          node --test scripts/verification/probe_job_summary.mjs scripts/verification/probe_lan_bookshelf.mjs
           node --test scripts/verification/probe_reader_restore_scope.mjs scripts/verification/probe_reader_mode.mjs
       - name: Python verification tests
         shell: bash
@@ -113,6 +113,9 @@ jobs:
             for suite in JevBoundaryRegressionTest JevClientTest CoordinatorTest AcceptTest; do
               cp "target/surefire-reports/TEST-studio.bookhtml.decision.$suite.xml" "test-results/lifecycle-repeat-$round/"
             done
+            mvn --batch-mode -Dtest=LanReaderAccessTest,UploadedLibraryPersistenceTest test
+            cp target/surefire-reports/TEST-studio.bookhtml.config.LanReaderAccessTest.xml "test-results/lifecycle-repeat-$round/"
+            cp target/surefire-reports/TEST-studio.bookhtml.service.UploadedLibraryPersistenceTest.xml "test-results/lifecycle-repeat-$round/"
           done
       - name: Build manifest
         run: |

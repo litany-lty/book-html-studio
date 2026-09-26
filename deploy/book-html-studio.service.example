@@ -1,0 +1,28 @@
+[Unit]
+Description=Book HTML Studio shared LAN PDF library
+After=network.target
+
+[Service]
+Type=simple
+User=book-reader
+Group=book-reader
+StateDirectory=book-html-studio
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/book-html-studio
+Environment=BOOK_DATA_DIR=/var/lib/book-html-studio
+Environment=BIND=0.0.0.0
+Environment=PORT=18765
+EnvironmentFile=-/etc/book-html-studio/environment
+ExecStart=/usr/bin/java -Xms128m -Xmx1536m -jar /opt/book-html-studio/book-html-studio.jar
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=180
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/book-html-studio
+
+[Install]
+WantedBy=multi-user.target

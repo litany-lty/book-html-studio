@@ -2,7 +2,7 @@ import { api } from './api.js';
 
 const $ = selector => document.querySelector(selector);
 
-export function createLibrary({ books, currentBookId, openBook, openUsage, changed, canArchiveCurrent, processBook }) {
+export function createLibrary({ books, currentBookId, openBook, openUsage, changed, canArchiveCurrent, processBook, can = () => true }) {
   const dialog = $('#library-dialog');
   const search = $('#library-search');
   const sort = $('#library-sort');
@@ -88,7 +88,7 @@ export function createLibrary({ books, currentBookId, openBook, openUsage, chang
           if (await openBook(book.id)) dialog.close();
           else say('当前页面有未保存内容，请先保存或处理冲突后再切换书籍。', true);
         }, 'button primary'));
-        if (book.processedPages < book.totalPages) {
+        if (can('PAID') && book.processedPages < book.totalPages) {
           actions.append(button('后台处理全书', async () => {
             try {
               say(`正在启动《${book.title}》的全书处理任务…`);
@@ -111,12 +111,12 @@ export function createLibrary({ books, currentBookId, openBook, openUsage, chang
           }, 'button'));
         }
       }
-      actions.append(button('用量与费用', () => {
+      if (can('MANAGE')) actions.append(button('用量与费用', () => {
         dialog.close();
         window.setTimeout(() => openUsage(book), 0);
       }));
-      actions.append(button('改名', () => editTitle(book, body, heading)));
-      actions.append(button(archived ? '恢复到书架' : '归档', () => update(book, { archived: !archived }), archived ? 'button' : 'button quiet'));
+      if (can('MANAGE')) actions.append(button('改名', () => editTitle(book, body, heading)));
+      if (can('MANAGE')) actions.append(button(archived ? '恢复到书架' : '归档', () => update(book, { archived: !archived }), archived ? 'button' : 'button quiet'));
       body.append(heading, meta, filename, progress, actions);
       item.append(cover, body);
       list.append(item);
