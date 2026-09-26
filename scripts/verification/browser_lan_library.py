@@ -108,6 +108,10 @@ async def main():
                 check('other_device_sees_shared_uploaded_pdf',await second.locator('.shelf-book').get_attribute('data-book-id')==book)
                 check('other_device_has_its_own_reading_position',await second.locator('.shelf-book button').inner_text()=='开始阅读')
                 check('mobile_shelf_no_horizontal_overflow',await second.evaluate('document.documentElement.scrollWidth<=innerWidth'))
+                if DIRECT:
+                    await expect(second.locator('body')).to_have_attribute('data-lan-role','reader')
+                    await expect(second.locator('#more-toggle')).to_be_hidden()
+                    check('default_mobile_shelf_has_no_empty_more_menu',True)
                 await second.screenshot(path=str(OUT/'mobile-shared-shelf.png'),full_page=True)
                 for path in [f'/api/books/{book}/jobs','/api/cloud-consents']:
                     response=await reader.request.post(base+path,headers={'Origin':base,'Content-Type':'application/json'},data='{}')

@@ -1440,3 +1440,7 @@ body[data-lan-role="reader"] #library-open { display: none; }
 
 /* Ordinary shared readers do not configure conversion; keep only inline page status. */
 body[data-lan-role="reader"] #reading-window-open { display: none; }
+
+/* Do not show an empty More menu on the default shared bookshelf. Restricted
+   access still exposes its necessary authorization action. */
+body.library-home[data-lan-role="reader"]:has(#lan-reader-open[hidden]) #more-toggle { display: none; }
