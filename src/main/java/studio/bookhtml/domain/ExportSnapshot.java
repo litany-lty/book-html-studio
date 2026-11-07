@@ -30,6 +30,7 @@ public record ExportSnapshot(
         Long overrideRevision,
         int schemaVersion,
         Map<String, Object> frozenDecisions,
+        List<OutlineRef> frozenOutline,
         Instant createdAt
 ) {
     public ExportSnapshot {
@@ -39,6 +40,7 @@ public record ExportSnapshot(
         selectedPages = selectedPages == null ? List.of() : List.copyOf(selectedPages);
         pageRefs = pageRefs == null ? List.of() : List.copyOf(pageRefs);
         frozenDecisions = frozenDecisions == null ? Map.of() : Map.copyOf(frozenDecisions);
+        frozenOutline = frozenOutline == null ? null : List.copyOf(frozenOutline);
         if (schemaVersion <= 0) {
             schemaVersion = 2;
         }
@@ -52,6 +54,19 @@ public record ExportSnapshot(
             overrideRevision = 0L;
         }
     }
+
+    /** Compatibility for snapshots created before the outline was captured explicitly. */
+    public ExportSnapshot(String snapshotId, String bookId, String title, int totalPages,
+                          int sourceTotalPages, String sourcePdfSha256, long sourceSeq,
+                          List<Integer> selectedPages, List<PageRef> pageRefs, Long profileRevision,
+                          Long overrideRevision, int schemaVersion, Map<String, Object> frozenDecisions,
+                          Instant createdAt) {
+        this(snapshotId, bookId, title, totalPages, sourceTotalPages, sourcePdfSha256, sourceSeq,
+                selectedPages, pageRefs, profileRevision, overrideRevision, schemaVersion,
+                frozenDecisions, null, createdAt);
+    }
+
+    public record OutlineRef(int sourcePageNumber, String blockId, String title, int level) {}
 
     /**
      * 单页版本引用，固定特定页码在快照时刻的 revision、commitId 与 contentHash。

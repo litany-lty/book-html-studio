@@ -73,9 +73,9 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
     Number(oldPage.revision) > Number(newPage.revision);
 
   function schedulePrefetch(reset = true) {
-    if (globalThis.navigator?.connection?.saveData) return;
     if (reset) cancelReads();
     else abortPrefetch();
+    if (globalThis.navigator?.connection?.saveData) return;
     const bookId = state.book?.id;
     const center = state.currentPage;
     const total = state.book?.totalPages || 0;
@@ -293,9 +293,13 @@ export function createReadingWindow({ api, state, onStatus, onPageReady, onError
     const body = { sessionId: previous.id, sequence: stopSequence };
     if (beacon && typeof navigator !== 'undefined' && navigator.sendBeacon) {
       const url = `/api/books/${encodeURIComponent(previous.bookId)}/reading-window/stop`;
-      navigator.sendBeacon(url, new Blob([JSON.stringify(body)], { type: 'application/json' }));
-      if (currentStop()) onStatus({ enabled: false, status: 'STOP_REQUESTED', message: '已发停止请求，送达尚未确认；若未送达，后台会在租期结束后停止。', pages: [] });
-      return;
+      let queued = false;
+      try { queued = navigator.sendBeacon(url, new Blob([JSON.stringify(body)], { type: 'application/json' })); }
+      catch (_) { /* Beacon 不可用时仍尝试普通停止请求。 */ }
+      if (queued) {
+        if (currentStop()) onStatus({ enabled: false, status: 'STOP_REQUESTED', message: '已发停止请求，送达尚未确认；若未送达，后台会在租期结束后停止。', pages: [] });
+        return;
+      }
     }
     try {
       await api.stopReadingWindow(previous.bookId, body);

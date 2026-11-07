@@ -243,6 +243,8 @@ public class ReadingWindowService {
             remember(command.sessionId(), new Tombstone(bookId, stopped));
             return stopped;
         }
+        if (!session.bookId.equals(bookId))
+            throw new ApiException(HttpStatus.CONFLICT, "会话编号已用于另一书籍");
         if (command.sequence() < session.sequence) return snapshot(session);
         session.sequence = command.sequence();
         disable(session, "STOPPING", "阅读窗口已停止；已开始的页面将自然完成");

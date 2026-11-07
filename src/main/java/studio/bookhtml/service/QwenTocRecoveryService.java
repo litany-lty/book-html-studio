@@ -69,11 +69,8 @@ public class QwenTocRecoveryService {
                     JsonNode root=json.readTree(call.read(response,MAX_RESPONSE_BYTES));
                     call.captureUsage(root);
                     if(root==null || root.has("error")) throw new OcrException("目录恢复返回业务错误");
-                    JsonNode choice=root.at("/choices/0");
-                    if("length".equalsIgnoreCase(choice.path("finish_reason").asText())) throw new OcrException("目录恢复输出被截断");
-                    JsonNode content=choice.at("/message/content");
-                    if(!content.isTextual()) throw new OcrException("目录恢复返回结构无效");
-                    Map<String,RegionAnswer> answers=parse(stripFence(content.asText()),regions.stream().map(Region::id).toList());
+                    String content=ModelCompletion.singleText(root);
+                    Map<String,RegionAnswer> answers=parse(stripFence(content),regions.stream().map(Region::id).toList());
                     List<Block> merged;
                     if(SINGLE_VERTICAL.equals(plan.mode())) { validateLeaderConsistency(plan,answers); merged=mergeSinglePage(original,regions,answers); }
                     else merged=merge(original,regions,answers);

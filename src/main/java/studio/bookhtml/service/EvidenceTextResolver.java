@@ -12,6 +12,7 @@ final class EvidenceTextResolver {
         if (block == null || block.original() == null || block.original().length() > 256 * 1024)
             return Optional.empty();
         String original = block.original();
+        if (!validUtf16(original)) return Optional.empty();
         List<ContentIssue> spans = block.issues().stream().filter(Objects::nonNull)
                 .sorted(Comparator.comparingInt(ContentIssue::start).thenComparingInt(ContentIssue::end)).toList();
         int previous = 0;
@@ -41,6 +42,7 @@ final class EvidenceTextResolver {
             previous = issue.end();
         }
         text.append(original, previous, original.length());
+        if (text.length() > 256 * 1024) return Optional.empty();
         return Optional.of(new Text(text.toString(), edited, unresolved));
     }
     private static boolean validUtf16(String text) {

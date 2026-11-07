@@ -64,6 +64,7 @@ public class QwenTaskPlanner {
         int skippedAtomic = 0;
         if (blocks != null) {
             List<Block> sorted = new ArrayList<>(blocks);
+            sorted.removeIf(java.util.Objects::isNull);
             sorted.sort(java.util.Comparator.comparingInt(Block::order));
             for (Block block : sorted) {
                 if (block == null || block.id() == null) continue;
@@ -116,12 +117,17 @@ public class QwenTaskPlanner {
         if (!current.isEmpty() && (current.size() >= minBlocks || chunks.isEmpty())) {
             chunks.add(buildChunk(order++, current, currentIds, promptVersion, policyVersion));
         } else if (!current.isEmpty()) {
-            // 尾组不足最小块数：并入上一组（保持语义区域完整，不硬切）。
-            ChunkTask last = chunks.remove(chunks.size() - 1);
-            List<OwnedRange> merged = new ArrayList<>(last.ownedRanges());
-            merged.addAll(current);
-            chunks.add(new ChunkTask(last.chunkId(), last.kind(), merged,
-                    last.contextRanges(), last.plannedOrder(), promptVersion, policyVersion));
+            // A short tail may merge only while both hard budgets still hold.
+            ChunkTask last = chunks.get(chunks.size() - 1);
+            int lastChars = last.ownedRanges().stream().mapToInt(range -> range.end() - range.start()).sum();
+            if (last.ownedRanges().size() + current.size() <= maxBlocks && lastChars + currentChars <= maxChars) {
+                List<OwnedRange> merged = new ArrayList<>(last.ownedRanges());
+                merged.addAll(current);
+                chunks.set(chunks.size() - 1, new ChunkTask(last.chunkId(), last.kind(), merged,
+                        last.contextRanges(), last.plannedOrder(), promptVersion, policyVersion));
+            } else {
+                chunks.add(buildChunk(order++, current, currentIds, promptVersion, policyVersion));
+            }
         }
         // 邻接上下文：前后组边界块各 1 个只读重叠（理解用）。
         List<ChunkTask> withContext = new ArrayList<>(chunks.size());

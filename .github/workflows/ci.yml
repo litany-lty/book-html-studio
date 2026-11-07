@@ -75,6 +75,9 @@ jobs:
           node scripts/verification/probe_settings_secrets.mjs
           node --test scripts/verification/probe_job_summary.mjs scripts/verification/probe_lan_bookshelf.mjs
           node --test scripts/verification/probe_reader_restore_scope.mjs scripts/verification/probe_reader_mode.mjs
+          node --test scripts/verification/probe_startup_port.mjs
+          node --test scripts/verification/probe_reader_navigation_edges.mjs scripts/verification/probe_prefetch_cancellation.mjs scripts/verification/probe_reading_anchor.mjs scripts/verification/probe_reading_window_stop.mjs scripts/verification/probe_reader_ready_retry.mjs scripts/verification/probe_reading_preferences.mjs
+          node scripts/verification/probe_reading_window.js
       - name: Python verification tests
         shell: bash
         run: |

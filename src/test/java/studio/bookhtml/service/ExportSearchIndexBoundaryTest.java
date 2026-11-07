@@ -150,6 +150,22 @@ class ExportSearchIndexBoundaryTest {
         assertTrue(text(entries, "assets/book.js").contains("\"pageCount\":3"));
     }
 
+    @Test void textByteLimitMarksSearchIncompleteWithoutDroppingPageContent() throws Exception {
+        Book book = book("e01g", 1);
+        String oversized = "字".repeat((int)(ExportService.SEARCH_INDEX_TEXT_BYTES / 3 + 1));
+        ExportService service = service(book, Map.of(1, readyPage(1, List.of(
+                textBlock("large", 0, oversized), textBlock("small", 1, "仍然可搜")))));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        service.writeZip(book.id(), output);
+        Map<String, byte[]> entries = unzip(output.toByteArray());
+        String data = text(entries, "assets/book.js");
+        assertTrue(data.contains("\"searchIndexComplete\":false"));
+        assertTrue(data.contains("\"searchIndexCount\":1"));
+        assertTrue(data.contains("\"searchIndexTotal\":2"));
+        assertTrue(data.contains("仍然可搜"), "超长段落不能阻止后续段落入索引");
+        assertTrue(text(entries, "assets/pages-data/1.js").contains(oversized), "搜索预算不截断正文");
+    }
+
     @Test void generatedPageScriptsExecuteInNode() throws Exception {
         Book book = book("e01f", 2);
         ExportService service = service(book, Map.of(

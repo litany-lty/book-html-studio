@@ -10,6 +10,7 @@ import studio.bookhtml.api.ApiException;
 import studio.bookhtml.api.ReadingWindowCommand;
 import studio.bookhtml.api.ReadingWindowRequest;
 import studio.bookhtml.api.ReadingWindowResponse;
+import studio.bookhtml.api.PageReprocessRequest;
 import studio.bookhtml.config.AppProperties;
 import studio.bookhtml.config.DecisionProperties;
 import studio.bookhtml.config.EncryptedFileSecretStore;
@@ -204,6 +205,32 @@ class MultiReaderSessionTest {
         ReadingWindowResponse res2 = windows.update(bookA.id(), request(session2, 1, 1));
         assertTrue(res2.enabled());
         assertEquals(session2, res2.sessionId());
+    }
+
+    @Test
+    void stopCannotUseAnotherBooksSessionIdentity() {
+        UUID sessionA = UUID.randomUUID();
+        windows.update(bookA.id(), request(sessionA, 1, 1));
+        ApiException conflict = assertThrows(ApiException.class, () ->
+                windows.stop(bookB.id(), new ReadingWindowCommand(sessionA, 2L)));
+        assertEquals(HttpStatus.CONFLICT, conflict.status());
+        assertTrue(windows.get(bookA.id(), sessionA).enabled());
+        assertEquals(1L, windows.get(bookA.id(), sessionA).sequence());
+    }
+
+    @Test
+    void reprocessAcceptsItsBooksReservationAfterAnotherBookOpens() {
+        UUID sessionA = UUID.randomUUID();
+        windows.update(bookA.id(), request(sessionA, 1, 1));
+        UUID reservationA = UUID.fromString(store.readJob(bookA.id()).id().substring("reading:".length()));
+        windows.update(bookB.id(), request(UUID.randomUUID(), 1, 1));
+        var operation = new PageReprocessRequest(0, "retry-book-a", false, "paddle-aistudio", false);
+        var admitted = assertDoesNotThrow(() -> jobs.requestReprocess(reservationA, bookA.id(), 1,
+                operation, "paddle-aistudio", "auto", false, false));
+        assertNotNull(admitted);
+        assertEquals(admitted.id(), jobs.requestReprocess(reservationA, bookA.id(), 1,
+                operation, "paddle-aistudio", "auto", false, false).id());
+        assertTrue(windows.get(bookA.id(), sessionA).enabled());
     }
 
     private static final class MutableClock extends Clock {

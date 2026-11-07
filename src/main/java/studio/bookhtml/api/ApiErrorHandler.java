@@ -29,5 +29,10 @@ public class ApiErrorHandler {
     @ExceptionHandler(NoResourceFoundException.class)
     ResponseEntity<Map<String,String>> notFound() { return ResponseEntity.status(404).body(Map.of("message", "未找到该资源")); }
     @ExceptionHandler(Exception.class)
-    ResponseEntity<Map<String,String>> general(Exception e) { return ResponseEntity.internalServerError().body(Map.of("message", "服务器处理失败，请查看本地日志")); }
+    ResponseEntity<Map<String,String>> general(Exception e) {
+        if (e instanceof org.springframework.web.ErrorResponse response && response.getStatusCode().is4xxClientError())
+            return ResponseEntity.status(response.getStatusCode()).headers(response.getHeaders())
+                    .body(Map.of("message", "请求参数或访问方式无效"));
+        return ResponseEntity.internalServerError().body(Map.of("message", "服务器处理失败，请查看本地日志"));
+    }
 }

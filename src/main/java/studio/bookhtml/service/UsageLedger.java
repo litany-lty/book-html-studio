@@ -1047,7 +1047,10 @@ public class UsageLedger {
         Entry e;
         try (var parser = json.getFactory().createParser(Files.readAllBytes(path))) {
             parser.enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
-            JsonNode tree = json.readTree(parser);
+            // Numeric Instant values are decimal epoch seconds. A DoubleNode rounds
+            // nanoseconds and can move an existing call past its pagination cursor.
+            JsonNode tree = json.reader().with(com.fasterxml.jackson.databind.DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+                    .readTree(parser);
             if (tree == null || !tree.isObject() || parser.nextToken() != null)
                 throw new IOException("trailing usage record");
             for (String field : List.of("pageNumber", "inputTokens", "outputTokens", "attemptSeq")) {

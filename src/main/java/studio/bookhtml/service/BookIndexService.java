@@ -257,7 +257,7 @@ public class BookIndexService implements AutoCloseable {
                             || segment.original()!=null && segment.original().toLowerCase(Locale.ROOT).contains(needle);
                     if(matches && seen.add(post.pageNumber()+":"+segment.blockId())) {
                         hits.add(Map.of("pageNumber",post.pageNumber(),"blockId",segment.blockId(),"text",
-                                segment.text()==null?segment.original():segment.text()));
+                                segment.text()==null||segment.text().isBlank()?segment.original():segment.text()));
                         if(hits.size()==limit) break;
                     }
                 }
@@ -381,7 +381,7 @@ public class BookIndexService implements AutoCloseable {
                 if (page.blocks() != null) {
                     for (Block b : page.blocks()) {
                         if ("advertisement".equals(b.type())) continue;
-                        String text = b.simplified() != null ? b.simplified() : b.original();
+                        String text = b.simplified() != null && !b.simplified().isBlank() ? b.simplified() : b.original();
                         segments.add(new PageIndexRecord.TextSegment(b.id(), text, b.type(), b.bbox(),b.original()));
                         // Extract terms
                         textBudget+=(long)(text==null?0:text.length())+(b.original()==null?0:b.original().length());

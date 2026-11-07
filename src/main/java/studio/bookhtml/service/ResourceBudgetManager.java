@@ -48,6 +48,7 @@ public class ResourceBudgetManager {
     private final AtomicLong inFlightImageBytes = new AtomicLong();
     private final AtomicLong inFlightEncodedBytes = new AtomicLong();
     private final AtomicLong inFlightDiskBytes = new AtomicLong();
+    private final Object memoryLock = new Object();
 
     public interface Ticket extends AutoCloseable {
         long reservedBytes();
@@ -90,7 +91,14 @@ public class ResourceBudgetManager {
         while (true) {
             checkCancelled(cancelled);
             if (renderPermits.tryAcquire(100, TimeUnit.MILLISECONDS)) {
-                return new PermitTicket();
+                Ticket ticket = new PermitTicket();
+                try {
+                    checkCancelled(cancelled);
+                    return ticket;
+                } catch (Exception stopped) {
+                    ticket.close();
+                    throw stopped;
+                }
             }
             if (System.nanoTime() >= deadline) {
                 throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "系统渲染资源繁忙，请稍后重试");
@@ -106,13 +114,11 @@ public class ResourceBudgetManager {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(maxWaitMs);
         while (true) {
             checkCancelled(cancelled);
-            if (fits(bytes, inFlightImageBytes.get() + inFlightEncodedBytes.get())) {
-                long after = inFlightImageBytes.addAndGet(bytes);
-                if (after + inFlightEncodedBytes.get() <= maxInFlightBytes) {
+            synchronized (memoryLock) {
+                if (fits(bytes, inFlightImageBytes.get() + inFlightEncodedBytes.get())) {
+                    inFlightImageBytes.addAndGet(bytes);
                     return new ImageTicket(bytes);
                 }
-                // 竞争超限回退
-                inFlightImageBytes.getAndUpdate(v -> Math.max(0, v - bytes));
             }
             Thread.sleep(50);
             if (System.nanoTime() >= deadline) {
@@ -129,12 +135,11 @@ public class ResourceBudgetManager {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(maxWaitMs);
         while (true) {
             checkCancelled(cancelled);
-            if (fits(bytes, inFlightImageBytes.get() + inFlightEncodedBytes.get())) {
-                long after = inFlightEncodedBytes.addAndGet(bytes);
-                if (after + inFlightImageBytes.get() <= maxInFlightBytes) {
+            synchronized (memoryLock) {
+                if (fits(bytes, inFlightImageBytes.get() + inFlightEncodedBytes.get())) {
+                    inFlightEncodedBytes.addAndGet(bytes);
                     return new EncodedTicket(bytes);
                 }
-                inFlightEncodedBytes.getAndUpdate(v -> Math.max(0, v - bytes));
             }
             Thread.sleep(50);
             if (System.nanoTime() >= deadline) {
@@ -144,16 +149,15 @@ public class ResourceBudgetManager {
     }
 
     public boolean tryGrowEncoded(Ticket ticket, long additionalBytes) {
-        if (!(ticket instanceof EncodedTicket encTicket) || encTicket.isClosed()) {
-            return false;
+        synchronized (memoryLock) {
+            if (!(ticket instanceof EncodedTicket encTicket) || encTicket.owner() != this
+                    || encTicket.isClosed() || additionalBytes < 0) return false;
+            if (additionalBytes == 0) return true;
+            if (!fits(additionalBytes, inFlightEncodedBytes.get() + inFlightImageBytes.get())) return false;
+            inFlightEncodedBytes.addAndGet(additionalBytes);
+            encTicket.grow(additionalBytes);
+            return true;
         }
-        if (additionalBytes <= 0) return true;
-        if (inFlightEncodedBytes.get() + inFlightImageBytes.get() + additionalBytes > maxInFlightBytes) {
-            return false;
-        }
-        inFlightEncodedBytes.addAndGet(additionalBytes);
-        encTicket.grow(additionalBytes);
-        return true;
     }
 
     public ImageArtifact wrapImage(BufferedImage image) {
@@ -249,8 +253,8 @@ public class ResourceBudgetManager {
         @Override public long reservedBytes() { return bytes; }
         @Override public boolean isClosed() { return closed.get(); }
         @Override public void close() {
-            if (closed.compareAndSet(false, true)) {
-                inFlightImageBytes.getAndUpdate(v -> Math.max(0, v - bytes));
+            synchronized (memoryLock) {
+                if (closed.compareAndSet(false, true)) inFlightImageBytes.addAndGet(-bytes);
             }
         }
     }
@@ -259,20 +263,20 @@ public class ResourceBudgetManager {
         private final AtomicBoolean closed = new AtomicBoolean();
         private final AtomicLong bytes;
         EncodedTicket(long initialBytes) { this.bytes = new AtomicLong(initialBytes); }
+        ResourceBudgetManager owner() { return ResourceBudgetManager.this; }
         void grow(long additional) { bytes.addAndGet(additional); }
         @Override public long reservedBytes() { return bytes.get(); }
         @Override public boolean isClosed() { return closed.get(); }
         @Override public void close() {
-            if (closed.compareAndSet(false, true)) {
-                long current = bytes.get();
-                inFlightEncodedBytes.getAndUpdate(v -> Math.max(0, v - current));
+            synchronized (memoryLock) {
+                if (closed.compareAndSet(false, true)) inFlightEncodedBytes.addAndGet(-bytes.get());
             }
         }
     }
 
     /** 底层光栅持有者，维护原子引用计数。 */
     private static final class RasterHolder {
-        private final BufferedImage rootImage;
+        private BufferedImage rootImage;
         private final Ticket ticket;
         private final AtomicInteger refCount = new AtomicInteger(1);
 
@@ -287,8 +291,10 @@ public class ResourceBudgetManager {
 
         void release() {
             if (refCount.decrementAndGet() == 0) {
+                BufferedImage released = rootImage;
+                rootImage = null;
                 try {
-                    rootImage.flush();
+                    released.flush();
                 } catch (Exception ignored) { }
                 ticket.close();
             }
@@ -297,7 +303,7 @@ public class ResourceBudgetManager {
 
     private static final class DefaultImageArtifact implements ImageArtifact {
         private final RasterHolder holder;
-        private final BufferedImage image;
+        private BufferedImage image;
         private final AtomicBoolean closed = new AtomicBoolean();
 
         DefaultImageArtifact(RasterHolder holder, BufferedImage image) {
@@ -306,7 +312,7 @@ public class ResourceBudgetManager {
         }
 
         @Override
-        public BufferedImage image() {
+        public synchronized BufferedImage image() {
             if (closed.get()) {
                 throw new IllegalStateException("ImageArtifact 已被关闭，无法访问底图");
             }
@@ -319,7 +325,7 @@ public class ResourceBudgetManager {
         }
 
         @Override
-        public ImageArtifact retain() {
+        public synchronized ImageArtifact retain() {
             if (closed.get()) {
                 throw new IllegalStateException("ImageArtifact 已关闭，不能 retain");
             }
@@ -328,7 +334,7 @@ public class ResourceBudgetManager {
         }
 
         @Override
-        public ImageArtifact subImage(int x, int y, int w, int h) {
+        public synchronized ImageArtifact subImage(int x, int y, int w, int h) {
             if (closed.get()) {
                 throw new IllegalStateException("ImageArtifact 已关闭，不能创建子图");
             }
@@ -343,36 +349,53 @@ public class ResourceBudgetManager {
         }
 
         @Override
-        public void close() {
+        public synchronized void close() {
             if (closed.compareAndSet(false, true)) {
+                image = null;
                 holder.release();
             }
         }
     }
 
     private static final class DefaultEncodedImageArtifact implements EncodedImageArtifact {
-        private final byte[] data;
+        private byte[] data;
+        private final int byteLength;
         private final String sha256;
         private final Ticket ticket;
         private final AtomicBoolean closed = new AtomicBoolean();
+        private int readers;
 
         DefaultEncodedImageArtifact(byte[] data, String sha256, Ticket ticket) {
             this.data = data;
+            this.byteLength = data.length;
             this.sha256 = sha256;
             this.ticket = ticket;
         }
 
         @Override
-        public InputStream openStream() {
+        public synchronized InputStream openStream() {
             if (closed.get()) {
                 throw new IllegalStateException("EncodedImageArtifact 已关闭");
             }
-            return new ByteArrayInputStream(data);
+            readers++;
+            return new ByteArrayInputStream(data) {
+                private boolean released;
+                @Override public synchronized void close() {
+                    if (released) return;
+                    released = true;
+                    buf = new byte[0];
+                    pos = count = mark = 0;
+                    synchronized (DefaultEncodedImageArtifact.this) {
+                        readers--;
+                        if (closed.get() && readers == 0) ticket.close();
+                    }
+                }
+            };
         }
 
         @Override
         public long byteLength() {
-            return data.length;
+            return byteLength;
         }
 
         @Override
@@ -381,7 +404,7 @@ public class ResourceBudgetManager {
         }
 
         @Override
-        public byte[] toByteArray() {
+        public synchronized byte[] toByteArray() {
             if (closed.get()) {
                 throw new IllegalStateException("EncodedImageArtifact 已关闭");
             }
@@ -394,9 +417,10 @@ public class ResourceBudgetManager {
         }
 
         @Override
-        public void close() {
+        public synchronized void close() {
             if (closed.compareAndSet(false, true)) {
-                ticket.close();
+                data = null;
+                if (readers == 0) ticket.close();
             }
         }
     }

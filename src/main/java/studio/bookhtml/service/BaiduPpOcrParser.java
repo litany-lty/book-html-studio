@@ -39,7 +39,7 @@ public class BaiduPpOcrParser {
                 String id = "ppocr-" + base;
                 int duplicate = 2;
                 while (!ids.add(id)) id = "ppocr-" + base + "-" + (duplicate++);
-                String mode = writingMode(requestedLayout, bbox);
+                String mode = writingMode(requestedLayout, raw);
                 blocks.add(new Block(id, "text", order++, bbox, mode, text, text, confidence,
                         true, false, null, "ppocr", List.of(id), null, raw));
             }
