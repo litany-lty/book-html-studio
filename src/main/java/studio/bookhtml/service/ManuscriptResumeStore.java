@@ -22,6 +22,8 @@ public final class ManuscriptResumeStore {
     static final int MAX_REGIONS=6, MAX_RESPONSE_CHARS=24576, MAX_BYTES=1024*1024, MAX_PAGE_RECORDS=64;
     static final Duration RETENTION=Duration.ofDays(7);
     private static final Object[] LOCKS=java.util.stream.IntStream.range(0,64).mapToObj(i->new Object()).toArray();
+    private static final int MAX_CURSORS=128, MAINTENANCE_BATCH=4;
+    private static final Map<Path,String> MAINTENANCE_CURSORS=new LinkedHashMap<>(16,.75f,true);
     private final BookStore store;
     private final ObjectMapper json;
     private final Clock clock;
@@ -78,15 +80,29 @@ public final class ManuscriptResumeStore {
         Path directory=target.getParent();DurableJson.rejectLinks(directory);
         if(!Files.exists(directory,LinkOption.NOFOLLOW_LINKS))return;
         List<Path> candidates;
-        try(var paths=Files.list(directory)){candidates=paths.sorted().limit(MAX_PAGE_RECORDS+1L).toList();}
+        try(var paths=Files.list(directory)){candidates=paths.limit(MAX_PAGE_RECORDS+1L).sorted().toList();}
         if(candidates.size()<MAX_PAGE_RECORDS)return;
-        int checked=0;
-        for(Path candidate:candidates) {
-            if(checked++>=4)break;
+        if(candidates.size()>MAX_PAGE_RECORDS)throw new IOException("manuscript resume directory exceeds capacity");
+        Path directoryKey=directory.toAbsolutePath().normalize();
+        String after;
+        synchronized(MAINTENANCE_CURSORS){after=MAINTENANCE_CURSORS.get(directoryKey);}
+        int start=0;
+        if(after!=null){
+            while(start<candidates.size()&&candidates.get(start).getFileName().toString().compareTo(after)<=0)start++;
+            if(start==candidates.size())start=0;
+        }
+        for(int checked=0;checked<Math.min(MAINTENANCE_BATCH,candidates.size());checked++) {
+            Path candidate=candidates.get((start+checked)%candidates.size());
+            synchronized(MAINTENANCE_CURSORS){
+                MAINTENANCE_CURSORS.put(directoryKey,candidate.getFileName().toString());
+                while(MAINTENANCE_CURSORS.size()>MAX_CURSORS)
+                    MAINTENANCE_CURSORS.remove(MAINTENANCE_CURSORS.keySet().iterator().next());
+            }
             String name=candidate.getFileName().toString();if(!name.matches("[1-9][0-9]{0,8}\\.json"))continue;
             try {
                 int page=Integer.parseInt(name.substring(0,name.length()-5));Snapshot old=read(candidate,book,page);
                 if(old==null)continue;
+                if(old.startedAt().isAfter(now)||old.updatedAt().isAfter(now))continue;
                 boolean expired=!old.startedAt().plus(RETENTION).isAfter(now);
                 if(!expired&&old.completeSourcesHash()!=null) {
                     Page published=store.readPage(book,page);

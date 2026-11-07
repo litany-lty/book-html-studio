@@ -158,6 +158,25 @@ class ExportSnapshotConcurrencyTest {
     }
 
     @Test
+    void outlineRetainsTheSnapshotWhenManualPresentationChanges() throws Exception {
+        Block heading = new Block("chapter", "heading", 0, new double[]{.1,.3,.8,.08}, "horizontal-tb",
+                "第一章 原始章节", "第一章 原始章节", .99, false, false, 1, "test", List.of("chapter"), null, null);
+        Page page = new Page(1, 600, 800, "READY", "test", List.of(heading, textBlock("body", "正文内容。".repeat(20))), List.of(), false, null);
+        store.writePage(bookId, page, false);
+        assertEquals(1, presentation.outline(bookId).size());
+        ExportSnapshot snapshot = exportService.createSnapshot(bookId, "1");
+        presentation.overrides().apply(bookId, 1, new studio.bookhtml.api.PresentationOverrideRequest(
+                BookStore.revisionOrZero(store.readPage(bookId, 1)), heading.id(), null,
+                studio.bookhtml.api.PresentationOverrideRequest.OverrideAction.EXCLUDE_FROM_OUTLINE, null), "test");
+        assertTrue(presentation.outline(bookId).isEmpty());
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        exportService.writeZip(snapshot, out);
+        String script = new String(unzip(out.toByteArray()).get("assets/book.js"), StandardCharsets.UTF_8);
+        var payload = json.readTree(script.substring(script.indexOf('=') + 1, script.lastIndexOf(';')));
+        assertEquals("第一章 原始章节", payload.path("outline").path(0).path("title").asText());
+    }
+
+    @Test
     void snapshotExpiredWhenReferencedRevisionIsPurgedOrCorrupted() throws Exception {
         Block b1 = textBlock("b1", "原始内容");
         Page p1 = new Page(1, 600.0, 800.0, "READY", "test", List.of(b1), List.of(), false, null, List.of(b1));

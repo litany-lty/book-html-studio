@@ -12,6 +12,12 @@ public class VerticalLayoutNormalizer {
     private static final Set<String> FIGURE_TYPES=Set.of("figure","table","formula");
 
     public List<Block> normalize(List<Block> input,List<Block> sourceRecords){
+        // Rebuilding or merging changes text ranges. Without a reliable annotation remap,
+        // keep reviewed/annotated pages intact, including their simplified text and order.
+        if(input.stream().anyMatch(b->b.reviewed()||"manual".equals(b.source())||!b.issues().isEmpty())){
+            BlockValidator.validate(input);
+            return List.copyOf(input);
+        }
         Map<String,Block> sources=new LinkedHashMap<>();Map<String,Integer> sourceOrder=new HashMap<>();
         for(int i=0;i<sourceRecords.size();i++){Block source=sourceRecords.get(i);sources.put(source.id(),source);sourceOrder.put(source.id(),source.order());}
         Set<String> globallyUsed=new HashSet<>();List<Block> blocks=new ArrayList<>();

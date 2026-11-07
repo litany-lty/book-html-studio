@@ -144,13 +144,17 @@ public class BookService {
             List<Map<String,Object>> indexed = store.indexService().search(store.bookDir(id), id, q, null, 500);
             if(indexed != null) return indexed;
         }
+        String needle=q.toLowerCase(Locale.ROOT);
         List<Map<String,Object>> result=new ArrayList<>();
         for(int n=1;n<=b.totalPages()&&result.size()<500;n++){
             Page p=requirePage(id,n);
             for(Block block:p.blocks()){
                 if("advertisement".equals(block.type()))continue;
-                if(contains(block.original(),q)||contains(block.simplified(),q))
-                    result.add(Map.of("pageNumber",n,"blockId",block.id(),"text",Optional.ofNullable(block.simplified()).orElse(block.original())));
+                if(contains(block.original(),needle)||contains(block.simplified(),needle)) {
+                    String text=block.simplified()==null||block.simplified().isBlank()?block.original():block.simplified();
+                    result.add(Map.of("pageNumber",n,"blockId",block.id(),"text",text));
+                    if(result.size()==500)break;
+                }
             }
         }
         if(store.indexService()!=null) store.indexService().warm(store,b);
@@ -180,8 +184,13 @@ public class BookService {
     }
     private Page requirePage(String id,int n){Page p=store.readPage(id,n);if(p==null)throw new ApiException(HttpStatus.NOT_FOUND,"页码不存在");return p;}
     static PageSummary summary(Page p){String title=HeadingText.pageTitle(p);List<Block>reading=p.blocks().stream().filter(b->!"advertisement".equals(b.type())).toList();int uncertain=(int)reading.stream().filter(Block::uncertain).count();return new PageSummary(p.pageNumber(),p.status(),reading.size(),uncertain,p.width(),p.height(),title,p.reviewed());}
-    private static boolean contains(String value,String q){return value!=null&&value.toLowerCase(Locale.ROOT).contains(q.toLowerCase(Locale.ROOT));}
+    private static boolean contains(String value,String needle){return value!=null&&value.toLowerCase(Locale.ROOT).contains(needle);}
     private static void validatePage(int n,int total){if(n<1||n>total)throw new ApiException(HttpStatus.NOT_FOUND,"页码不存在");}
-    private static String safeFilename(String s){String v=Paths.get(s).getFileName().toString().replaceAll("[\\p{Cntrl}]","_");return v.length()>200?v.substring(v.length()-200):v;}
+    private static String safeFilename(String s){
+        String normalized=s.replace('\\','/');
+        String v=normalized.substring(normalized.lastIndexOf('/')+1).replaceAll("[\\p{Cntrl}]","_");
+        int count=v.codePointCount(0,v.length());
+        return count>200?v.substring(v.offsetByCodePoints(0,count-200)):v;
+    }
     private static void cleanup(Path dir){if(dir==null)return;try(var paths=Files.walk(dir)){paths.sorted(Comparator.reverseOrder()).forEach(p->{try{Files.deleteIfExists(p);}catch(IOException ignored){}});}catch(IOException ignored){}}
 }

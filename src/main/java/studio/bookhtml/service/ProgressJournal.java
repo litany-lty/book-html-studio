@@ -173,7 +173,8 @@ public class ProgressJournal {
                 // If attempt sequence is older, drop event
                 if (record.attemptSeq() > attemptSeq) return;
 
-                if (record.attemptSeq() < attemptSeq || !Objects.equals(record.attemptId(), attemptId)) {
+                if (record.attemptSeq() == attemptSeq && !Objects.equals(record.attemptId(), attemptId)) return;
+                if (record.attemptSeq() < attemptSeq) {
                     // Newer attempt, start fresh
                     events = new ArrayList<>();
                 } else {
@@ -182,6 +183,7 @@ public class ProgressJournal {
                         // Monotonic eventSeq violation or duplicate
                         return;
                     }
+                    if (events.stream().anyMatch(previous -> "FINISHED".equals(previous.eventType()))) return;
                 }
             } else {
                 events = new ArrayList<>();
@@ -225,7 +227,9 @@ public class ProgressJournal {
         JournalRecord record = readRecord(path);
         if (record == null || record.events().isEmpty()) return null;
 
-        WorkPlan plan = null;
+        String contextHash = record.events().stream().filter(ev -> "PLAN_FROZEN".equals(ev.eventType()))
+                .map(JournalEvent::contextHash).filter(Objects::nonNull).reduce((previous, latest) -> latest).orElse(null);
+        WorkPlan plan = WorkPlan.createDefault(bookId, pageNumber, 0, record.attemptSeq(), contextHash);
         String stage = "PREPARING";
         String lifecycle = "RUNNING";
         String messageCode = "RECOVERED_FROM_JOURNAL";
@@ -233,8 +237,10 @@ public class ProgressJournal {
         Instant startedAt = null;
         Instant lastProgressAt = null;
         long lastSeq = 0;
+        Set<String> endedUnits = new HashSet<>();
 
         for (JournalEvent ev : record.events()) {
+            if (ev.eventSeq() <= lastSeq) continue;
             if (startedAt == null) startedAt = ev.timestamp();
             lastProgressAt = ev.timestamp();
             lastSeq = ev.eventSeq();
@@ -242,8 +248,9 @@ public class ProgressJournal {
             switch (ev.eventType()) {
                 case "PLAN_FROZEN" -> {
                     total = ev.totalUnits();
-                    plan = WorkPlan.createDefault(bookId, pageNumber, 0, record.attemptSeq(), ev.contextHash());
-                    if (ev.totalUnits() > 0) {
+                    // A review denominator freezes after OCR/structure have finished.
+                    // Preserve those completed stages, and never treat a PAGE plan as review units.
+                    if (ev.reviewPlanHash() != null) {
                         plan = plan.freezeReviewSubPlan(ev.totalUnits(), null);
                     }
                     if (ev.parentPlanHash() != null || ev.reviewPlanHash() != null) {
@@ -257,6 +264,7 @@ public class ProgressJournal {
                     }
                 }
                 case "UNIT_DONE" -> {
+                    if (ev.unitId() == null || !endedUnits.add(ev.unitId())) continue;
                     switch (ev.outcome() != null ? ev.outcome() : "") {
                         case "SUCCEEDED" -> succeeded++;
                         case "FAILED" -> failed++;
@@ -265,7 +273,7 @@ public class ProgressJournal {
                     }
                     if (plan != null && ev.unitId() != null && ev.outcome() != null) {
                         try {
-                            plan = plan.recordUnitDone(stage, ev.unitId(), ev.outcome());
+                            plan = plan.recordUnitDone(plan.reviewSubPlan() == null ? stage : "REVIEW", ev.unitId(), ev.outcome());
                         } catch (Exception ignore) {}
                     }
                 }
@@ -278,6 +286,7 @@ public class ProgressJournal {
                 }
                 default -> {}
             }
+            if ("FINISHED".equals(ev.eventType())) break;
         }
 
         // If crashed before normal terminal completion, settle as INTERRUPTED

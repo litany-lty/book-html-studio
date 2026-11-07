@@ -1,0 +1,353 @@
+{
+  "rounds": 25,
+  "fixed_rounds": 11,
+  "retained_rounds": 14,
+  "maven_batches": [
+    {
+      "log": "../scheduler-verification/batch1-maven.log",
+      "classes": 10,
+      "executions": 44,
+      "results": [
+        {
+          "class": "studio.bookhtml.service.V3ProgressApiTest",
+          "displayName": "G09: V3 进度 API、持久 Journal 重放与 V2 兼容性专项测试",
+          "tests": 5,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.ProgressReducerRegressionTest",
+          "tests": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.OptimizationProgressJournalTest",
+          "tests": 3,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.ProcessingProgressServiceTest",
+          "tests": 5,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.DelayedRetryOwnershipTest",
+          "tests": 4,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.OptimizationDelayedCallQueueTest",
+          "tests": 4,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.CrossEntrySchedulerTest",
+          "tests": 4,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.ProgressPlanAuthorityTest",
+          "tests": 8,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.PriorityTaskSchedulerTest",
+          "tests": 6,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.PageWorkSchedulerOwnershipTest",
+          "tests": 3,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        }
+      ]
+    },
+    {
+      "log": "../scheduler-verification/batch2-maven.log",
+      "classes": 11,
+      "executions": 77,
+      "results": [
+        {
+          "class": "studio.bookhtml.service.JobPersistenceAndCancellationTest",
+          "tests": 10,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.MultiReaderSessionTest",
+          "tests": 7,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.OptimizationResourceOwnershipTest",
+          "tests": 4,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.AuthorizedAutoReadingTest",
+          "tests": 4,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.RemoteJobStaleReclaimTest",
+          "tests": 9,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.EncodedRequestBudgetTest",
+          "tests": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.RemoteJobRecoveryTest",
+          "tests": 3,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.RenderBudgetTest",
+          "tests": 5,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.ResidentImageBudgetTest",
+          "tests": 5,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.JobPhase1SafetyTest",
+          "tests": 9,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.ReadingWindowServiceTest",
+          "tests": 19,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        }
+      ]
+    },
+    {
+      "log": "../scheduler-verification/batch3-maven.log",
+      "classes": 24,
+      "executions": 164,
+      "results": [
+        {
+          "class": "studio.bookhtml.service.OptimizationOcrCancellationTest",
+          "tests": 3,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.QwenPhysicalCallTest",
+          "tests": 17,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.QwenLedgerIntegrationTest",
+          "tests": 9,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.OptimizationUsageLedgerPaginationTest",
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.ManuscriptResumeTest",
+          "tests": 20,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.OptimizationResourceOwnershipTest",
+          "tests": 4,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.ManuscriptResumeStoreTest",
+          "tests": 14,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.PageStatisticsCacheTest",
+          "tests": 7,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.OptimizationArtifactOwnershipTest",
+          "tests": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.EncodedRequestBudgetTest",
+          "tests": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.MixedProviderBudgetTest",
+          "tests": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.LedgerCheckpointRecoveryTest",
+          "tests": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.PaddleOcrPipelineRoutingTest",
+          "tests": 6,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.LedgerArchiveTest",
+          "tests": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.LegacyLedgerMigrationTest",
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.ResidentImageBudgetTest",
+          "tests": 5,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.ComprehensibilityResumeTest",
+          "tests": 20,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.QwenRequestGateTest",
+          "tests": 7,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.UxU5QwenBoundedTest",
+          "tests": 5,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.BoundedHttpTest",
+          "tests": 3,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.CloudOcrPipelineTest",
+          "tests": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.UsageLedgerTest",
+          "tests": 4,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.QwenAssistCoordinatorTest",
+          "tests": 6,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "class": "studio.bookhtml.service.ComprehensibilityResumeStoreTest",
+          "tests": 20,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        }
+      ]
+    }
+  ],
+  "maven_executions": 285,
+  "distinct_test_classes": 42,
+  "distinct_maven_tests": 274,
+  "review_followup": {
+    "test": "OptimizationProgressJournalTest.replacingAnUnfrozenPlanRestoresTheLatestContextIdentity",
+    "red": "expected ctx-v2, actual empty context",
+    "green": "isolated compilation and execution: 4 methods passed",
+    "maven_after_followup": "root final verification passed: OptimizationProgressJournalTest 4 tests, 0 failures, 0 errors; included in full coverage"
+  }
+}

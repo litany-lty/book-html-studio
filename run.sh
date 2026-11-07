@@ -77,7 +77,14 @@ while (($#)); do
     *) BOOK_APP_ARGS+=("$1"); shift ;;
   esac
 done
-if [[ ! "$BOOK_PORT" =~ ^[0-9]+$ ]] || ((BOOK_PORT < 1 || BOOK_PORT > 65535)); then
+if [[ ! "$BOOK_PORT" =~ ^[0-9]+$ ]]; then
+  printf '%s\n' "端口无效：${BOOK_PORT}" >&2
+  exit 2
+fi
+# Strip leading zeroes before bounded decimal arithmetic (Bash otherwise treats them as octal).
+BOOK_PORT="${BOOK_PORT#"${BOOK_PORT%%[!0]*}"}"
+BOOK_PORT="${BOOK_PORT:-0}"
+if ((${#BOOK_PORT} > 5)) || ((10#$BOOK_PORT < 1 || 10#$BOOK_PORT > 65535)); then
   printf '%s\n' "端口无效：${BOOK_PORT}" >&2
   exit 2
 fi

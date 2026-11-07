@@ -770,13 +770,17 @@ async function refreshOutline(bookId = state.book?.id) {
 }
 
 async function goToOutlineEntry(entry) {
+  const bookId = state.book?.id, bookScope = bookRequest;
   const pageNumber = Number(entry?.pageNumber);
   const navigated = await goToPage(pageNumber, { outlineBlockId: entry?.blockId });
-  if (!navigated || state.currentPage !== pageNumber || !state.page) return;
+  if (!navigated || bookScope !== bookRequest || state.book?.id !== bookId || state.currentPage !== pageNumber || !state.page) return;
+  const requestId = pageRequest, editorEpoch = state.editorEpoch;
   state.activeOutlineBlockId = entry?.blockId || null;
   if (state.view !== 'reading') state.view = 'reading';
   renderCurrent(false); saveReadingPosition(); closeDrawers();
   requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (bookScope !== bookRequest || state.book?.id !== bookId || requestId !== pageRequest ||
+        state.currentPage !== pageNumber || editorEpoch !== state.editorEpoch || state.activeOutlineBlockId !== (entry?.blockId || null)) return;
     const target = [...$('#paper').querySelectorAll('[data-block-id]')].find(node => node.dataset.blockId === entry?.blockId);
     if (target) {
       target.tabIndex = -1;
@@ -1224,6 +1228,8 @@ function syncOverlays() {
 
 function renderCurrent(full = true) {
   if (!state.page || !state.book) return;
+  const bookId = state.book.id, pageNumber = state.currentPage, editorEpoch = state.editorEpoch;
+  const current = () => state.book?.id === bookId && state.currentPage === pageNumber && state.editorEpoch === editorEpoch;
   pageProgress.setPage(state.book.id, state.currentPage, state.page);
   const paper = $('#paper');
   const message = renderPaper(paper, {
@@ -1239,8 +1245,10 @@ function renderCurrent(full = true) {
     onRetry: retryCurrentPage,
     onReload: reloadCurrentPage,
     onIssueSelect(blockId, issueId) {
+      if (!current()) return;
       state.selectedBlockId = blockId; state.selectedIssueId = issueId; renderReview(); syncOverlays(); openDrawer('review');
       requestAnimationFrame(() => {
+        if (!current() || state.selectedBlockId !== blockId || state.selectedIssueId !== issueId) return;
         const workbench = $('#issue-workbench');
         const target = workbench.querySelector('.issue-edit textarea') || workbench;
         if (target === workbench) target.tabIndex = -1;
@@ -1249,9 +1257,11 @@ function renderCurrent(full = true) {
       });
     },
     onAdvertisementLocate(blockId) {
+      if (!current()) return;
       state.selectedBlockId = blockId;
       state.view = 'original'; renderCurrent(); saveReadingPosition();
       requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (!current() || state.view !== 'original' || state.selectedBlockId !== blockId) return;
         const target = [...$('#paper').querySelectorAll('.edit-overlay')].find(node => node.dataset.blockId === blockId);
         target?.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
         target?.focus({ preventScroll: true });
@@ -1330,13 +1340,17 @@ async function goToPage(n, options = {}) {
   if (options.force && n === state.currentPage && state.page) return refreshVisiblePage(n);
   if (!options.force && n === state.currentPage && state.page) {
     const bookId = state.book.id;
-    const requestId = pageRequest, editorEpoch = state.editorEpoch;
-    void api.page(bookId, n).then(fresh => {
-      if (state.book?.id === bookId && state.currentPage === n && requestId === pageRequest && editorEpoch === state.editorEpoch &&
+    const requestId = ++pageRequest, editorEpoch = state.editorEpoch;
+    pageFetchController?.abort(); pageFetchController = new AbortController();
+    const signal = pageFetchController.signal;
+    const current = () => !signal.aborted && state.book?.id === bookId && state.currentPage === n &&
+      requestId === pageRequest && editorEpoch === state.editorEpoch;
+    void api.page(bookId, n, signal).then(fresh => {
+      if (current() &&
           !olderRevision(fresh, state.page) &&
           (fresh.revision !== state.page?.revision || fresh.status !== state.page?.status) && fresh.status === 'READY')
         acceptReadyPage(n, fresh);
-    }).catch(error => { if (state.book?.id === bookId && state.currentPage === n) showError(error); });
+    }).catch(error => { if (current() && error?.name !== 'StaleRequest') showError(error); });
     state.activeOutlineBlockId = options.outlineBlockId || null; renderToc(); renderReadingProgress(); $('#page-jump').value = state.currentPage; return true;
   }
   if (!options.force && hasDirtyChanges()) { renderReadingProgress(); $('#page-jump').value = state.currentPage; return false; }
@@ -1997,7 +2011,6 @@ const commitProgressRange = () => {
 };
 $('#reading-progress-range').addEventListener('input', event => renderReadingProgress(Number(event.target.value)));
 $('#reading-progress-range').addEventListener('change', commitProgressRange);
-$('#reading-progress-range').addEventListener('pointerup', commitProgressRange);
 $('#reading-progress')?.addEventListener('click', event => {
   if (event.defaultPrevented || event.target.closest?.('button, a, input, select, textarea, summary, [role=button], [contenteditable]')) return;
   const range = $('#reading-progress-range');

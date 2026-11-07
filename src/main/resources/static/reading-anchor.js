@@ -8,34 +8,48 @@ export function recordAnchor(root) {
   const viewportHeight = root ? root.clientHeight : window.innerHeight;
   let blockId = null;
   let textOffset = 0;
+  let viewportOffset = null;
+  const rootTop = root?.getBoundingClientRect?.().top || 0;
   try {
     const node = selection?.anchorNode;
     const el = node instanceof Element ? node : node?.parentElement;
     const holder = el?.closest?.('[data-block-id]');
-    blockId = holder?.dataset.blockId || null;
-    textOffset = selection?.anchorOffset || 0;
+    if (holder && root?.contains(holder)) {
+      blockId = holder.dataset.blockId || null;
+      textOffset = selection?.anchorOffset || 0;
+      viewportOffset = holder.getBoundingClientRect().top - rootTop;
+    }
   } catch (_) {}
   // 视口中部第一个带 blockId 的元素作为稳定回退
   let fallbackId = null;
+  let fallbackViewportOffset = null;
   try {
     const elements = root?.querySelectorAll?.('[data-block-id]') || [];
-    const mid = viewportTop + viewportHeight / 2;
+    const mid = rootTop + viewportHeight / 2;
     for (const el of elements) {
-      const top = el.offsetTop;
-      if (top >= viewportTop && top <= mid) { fallbackId = el.dataset.blockId; break; }
+      const rect = el.getBoundingClientRect();
+      if (rect.bottom > rootTop && rect.top <= mid) {
+        fallbackId = el.dataset.blockId;
+        fallbackViewportOffset = rect.top - rootTop;
+        break;
+      }
     }
-    if (!fallbackId && elements.length) fallbackId = elements[0].dataset.blockId;
+    if (!fallbackId && elements.length) {
+      fallbackId = elements[0].dataset.blockId;
+      fallbackViewportOffset = elements[0].getBoundingClientRect().top - rootTop;
+    }
   } catch (_) {}
-  return { blockId, textOffset, selectedText, viewportTop, viewportHeight, fallbackId, at: Date.now() };
+  return { blockId, textOffset, selectedText, viewportTop, viewportHeight, viewportOffset, fallbackId, fallbackViewportOffset, at: Date.now() };
 }
 
 export function restoreAnchor(root, anchor) {
   if (!root || !anchor) return false;
-  const target = (anchor.blockId && root.querySelector(`[data-block-id="${CSS.escape(anchor.blockId)}"]`))
-    || (anchor.fallbackId && root.querySelector(`[data-block-id="${CSS.escape(anchor.fallbackId)}"]`));
+  const selected = anchor.blockId && root.querySelector(`[data-block-id="${CSS.escape(anchor.blockId)}"]`);
+  const target = selected || (anchor.fallbackId && root.querySelector(`[data-block-id="${CSS.escape(anchor.fallbackId)}"]`));
   if (target) {
-    const top = target.offsetTop - (anchor.viewportHeight || root.clientHeight) / 3;
-    root.scrollTop = Math.max(0, top);
+    const offset = selected ? anchor.viewportOffset : anchor.fallbackViewportOffset;
+    const delta = target.getBoundingClientRect().top - root.getBoundingClientRect().top;
+    root.scrollTop = Math.max(0, root.scrollTop + delta - (Number.isFinite(offset) ? offset : 0));
     return true;
   }
   if (Number.isFinite(anchor.viewportTop)) { root.scrollTop = anchor.viewportTop; return true; }

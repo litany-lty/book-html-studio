@@ -82,15 +82,13 @@ public class RenderBudget {
          * 释放渲染并发槽许可，但分离并保留底层图像字节租约供 ImageArtifact 持有。
          */
         public ResourceBudgetManager.Ticket detachImageByteTicket() {
-            if (closed.get()) {
+            if (!closed.compareAndSet(false, true)) {
                 throw new IllegalStateException("Lease 已关闭");
             }
             // 立即释放渲染槽
             if (permitTicket != null) {
                 permitTicket.close();
             }
-            // 标记 Lease 本身已释放（不再重复释放字节）
-            closed.set(true);
             return imageByteTicket;
         }
 

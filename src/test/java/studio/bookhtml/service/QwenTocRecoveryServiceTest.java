@@ -61,6 +61,26 @@ class QwenTocRecoveryServiceTest {
         assertFalse(result.recovered());assertEquals(List.of("wide"),result.blocks().stream().map(Block::id).toList());assertTrue(result.warning().contains("保留 PaddleOCR-VL"));
     }
 
+    @Test void rejectsIncompleteAmbiguousAndRefusedCompletionsWithoutReplacingEvidence()throws Exception{
+        BufferedImage image=image();
+        List<Block>source=List.of(block("toc",new double[]{.55,.08,.35,.30},directory("原條目"),"paddle","text"));
+        try{
+            for(String mode:List.of("content_filter","tool_calls","missing-reason","multiple-choices","refusal")){
+                var root=(com.fasterxml.jackson.databind.node.ObjectNode)json.readTree(envelope(regions("right-top",true,directory("恢復條目"))));
+                var choice=(com.fasterxml.jackson.databind.node.ObjectNode)root.at("/choices/0");
+                if("missing-reason".equals(mode))choice.remove("finish_reason");
+                else if("multiple-choices".equals(mode))((com.fasterxml.jackson.databind.node.ArrayNode)root.get("choices")).add(choice.deepCopy());
+                else if("refusal".equals(mode))((com.fasterxml.jackson.databind.node.ObjectNode)choice.get("message")).put("refusal","declined");
+                else choice.put("finish_reason",mode);
+                String payload=json.writeValueAsString(root);
+                QwenTocRecoveryService service=new QwenTocRecoveryService(config(),json,request->response(200,payload));
+                var result=service.recover(image,source,()->false);
+                assertFalse(result.recovered(),mode);
+                assertEquals(source,result.blocks(),mode);
+            }
+        }finally{image.flush();}
+    }
+
     @Test void realDirectoryFixturesHaveIndependentDividersWhenAvailable()throws Exception{
         List<Path>images=List.of(Path.of("verification/first20-source/page-002.png"),Path.of("verification/first20-source/page-003.png"),Path.of("verification/first20-source/page-004.png"));Assumptions.assumeTrue(images.stream().allMatch(Files::isRegularFile));
         for(Path path:images){BufferedImage image=ImageIO.read(path.toFile());QwenTocRecoveryService.PageSplits splits=QwenTocRecoveryService.findHorizontalDividers(image).orElseThrow();System.out.printf("%s left=%.4f right=%.4f%n",path.getFileName(),splits.left(),splits.right());assertTrue(splits.left()>=.4&&splits.left()<=.65);assertTrue(splits.right()>=.4&&splits.right()<=.65);image.flush();}

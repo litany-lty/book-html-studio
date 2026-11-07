@@ -78,6 +78,13 @@ class IndexReadIntegrityTest {
         assertEquals(1,index.search(store.bookDir(book),book,"汉字",null,500).size());
         assertEquals(1,index.search(store.bookDir(book),book,"𠮷",null,500).size());
     }
+    @Test void indexedSearchDisplaysOriginalWhenSimplifiedTextIsBlank() throws Exception {
+        Page base=page(1,"原文詞條");Block b=base.blocks().get(0);
+        var changed=new Block(b.id(),b.type(),b.order(),b.bbox(),b.writingMode(),b.original()," ",.99,false,false,null,"test",b.sourceIds(),null,null);
+        store.commitPage(book,new Page(1,600,800,"READY","test",List.of(changed),List.of(),false,null,List.of(b)),0,CommitActor.MANUAL,null,CommitOp.MANUAL_SAVE);
+        build();
+        assertEquals("原文詞條",index.search(store.bookDir(book),book,"詞條",null,500).get(0).get("text"));
+    }
     @Test void missingPartitionIsUnavailableNotAnEmptyAnswer() throws Exception {
         var m=build();String anchor="old";int part=(anchor.hashCode()&0x7fffffff)%256;
         Files.delete(BookIndexService.termPartPath(BookIndexService.generationDir(store.bookDir(book),m.generationId()),part));

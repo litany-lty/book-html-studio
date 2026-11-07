@@ -5,7 +5,6 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
-import java.time.temporal.TemporalAccessor;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.*;
@@ -36,7 +35,10 @@ public class DelayedCallQueue implements AutoCloseable {
     }
 
     private final ScheduledExecutorService scheduler;
-    private final Map<String, ScheduledFuture<?>> scheduledTasks = new ConcurrentHashMap<>();
+    private static final class PendingTask {
+        ScheduledFuture<?> future;
+    }
+    private final Map<String, PendingTask> scheduledTasks = new ConcurrentHashMap<>();
     private final AtomicBoolean closed = new AtomicBoolean();
 
     public DelayedCallQueue() {
@@ -69,7 +71,7 @@ public class DelayedCallQueue implements AutoCloseable {
         } catch(Exception invalid){return DEFAULT_BACKOFF_SECONDS;}
     }
 
-    public boolean schedule(DelayedCallDescriptor descriptor, Runnable onReady) {
+    public synchronized boolean schedule(DelayedCallDescriptor descriptor, Runnable onReady) {
         if (closed.get() || descriptor == null || descriptor.isExpired()) {
             return false;
         }
@@ -79,21 +81,28 @@ public class DelayedCallQueue implements AutoCloseable {
             return false; // Deadline will expire before retry becomes eligible
         }
 
-        ScheduledFuture<?> future = scheduler.schedule(() -> {
-            scheduledTasks.remove(descriptor.logicalCallId());
-            if (!closed.get() && !descriptor.isExpired()) {
+        Objects.requireNonNull(onReady);
+        PendingTask pending = new PendingTask();
+        if (scheduledTasks.putIfAbsent(descriptor.logicalCallId(), pending) != null) return false;
+        try {
+            pending.future = scheduler.schedule(() -> {
+                synchronized (this) {
+                    if (!scheduledTasks.remove(descriptor.logicalCallId(), pending)
+                            || closed.get() || descriptor.isExpired()) return;
+                }
                 onReady.run();
-            }
-        }, delayMillis, TimeUnit.MILLISECONDS);
-
-        scheduledTasks.put(descriptor.logicalCallId(), future);
-        return true;
+            }, delayMillis, TimeUnit.MILLISECONDS);
+            return true;
+        } catch (RejectedExecutionException rejected) {
+            scheduledTasks.remove(descriptor.logicalCallId(), pending);
+            return false;
+        }
     }
 
-    public void cancel(String logicalCallId) {
-        ScheduledFuture<?> future = scheduledTasks.remove(logicalCallId);
-        if (future != null) {
-            future.cancel(true);
+    public synchronized void cancel(String logicalCallId) {
+        PendingTask pending = scheduledTasks.remove(logicalCallId);
+        if (pending != null && pending.future != null) {
+            pending.future.cancel(true);
         }
     }
 
@@ -102,10 +111,10 @@ public class DelayedCallQueue implements AutoCloseable {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         if (closed.compareAndSet(false, true)) {
-            for (ScheduledFuture<?> future : scheduledTasks.values()) {
-                future.cancel(true);
+            for (PendingTask pending : scheduledTasks.values()) {
+                if (pending.future != null) pending.future.cancel(true);
             }
             scheduledTasks.clear();
             scheduler.shutdownNow();

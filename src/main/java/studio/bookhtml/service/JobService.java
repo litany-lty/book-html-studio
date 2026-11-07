@@ -303,8 +303,10 @@ public class JobService {
                                              String provider, String layout,
                                              boolean splitSpreads, boolean assist) {
         requireOpen();
-        if (readingReservation == null || !readingReservation.equals(reservation)
-                || !Objects.equals(readingReservationBookId, bookId))
+        UUID expectedReservation = readingReservations.get(bookId);
+        if (expectedReservation == null && Objects.equals(readingReservationBookId, bookId))
+            expectedReservation = readingReservation;
+        if (reservation == null || !reservation.equals(expectedReservation))
             throw new ApiException(HttpStatus.CONFLICT, "阅读窗口预约已失效");
         Book book = store.readBook(bookId);
         if (book.archived()) throw new ApiException(HttpStatus.CONFLICT, "本书已归档，请先恢复后再识别");

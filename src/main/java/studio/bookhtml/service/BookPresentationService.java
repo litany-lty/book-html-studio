@@ -97,7 +97,7 @@ public class BookPresentationService {
 
     /** 边缘带：TOP（页眉）/ BOTTOM（页脚），厚度超过上限则不算边缘。 */
     public static String edgeZoneOf(Block block) {
-        if (block == null || block.bbox() == null || block.bbox().length < 4) return null;
+        if (block == null || !validBbox(block.bbox())) return null;
         double y = block.bbox()[1], h = block.bbox()[3];
         if (h <= 0 || h > EDGE_THICKNESS) return null;
         if (y <= EDGE_BAND) return "TOP";

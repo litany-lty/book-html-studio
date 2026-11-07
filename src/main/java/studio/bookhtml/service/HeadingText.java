@@ -75,7 +75,8 @@ public final class HeadingText {
             ContentIssue issue = positioned.issue();
             String source = text.substring(positioned.start(), positioned.end());
             if (issue.resolved()) {
-                output.append(issue.replacement() == null ? source : issue.replacement());
+                String replacement = confirmedReplacement(issue, useSimplified);
+                output.append(replacement == null ? source : replacement);
             } else if (mode == EvidenceMode.ASSISTED
                     && issue.inferredText() != null && !issue.inferredText().isBlank()) {
                 output.append(issue.inferredText());
@@ -115,8 +116,8 @@ public final class HeadingText {
             output.append(text, cursor, positioned.start());
             String source = text.substring(positioned.start(), positioned.end());
             if (positioned.issue().resolved()) {
-                output.append(positioned.issue().replacement() == null
-                        ? source : positioned.issue().replacement());
+                String replacement = confirmedReplacement(positioned.issue(), false);
+                output.append(replacement == null ? source : replacement);
             } else if ("unreadable".equals(positioned.issue().kind())) {
                 output.append(UNREADABLE_PLACEHOLDER);
             } else {
@@ -126,6 +127,11 @@ public final class HeadingText {
         }
         output.append(text, cursor, text.length());
         return output.toString();
+    }
+
+    private static String confirmedReplacement(ContentIssue issue, boolean simplified) {
+        return !simplified && issue.resolution() != null
+                ? issue.resolution().originalReplacement() : issue.replacement();
     }
 
     private record PositionedIssue(ContentIssue issue, int start, int end) {}

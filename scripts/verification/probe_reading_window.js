@@ -47,12 +47,11 @@ const deferred = () => {
   await delay(0);
   assert.deepEqual(ready, [], 'old center response cannot update new view');
   await delay(1050);
-  assert.equal(pageCalls.length, 4, 'at most three neighbor JSON reads start together');
+  assert.equal(pageCalls.length, 3, 'two neighbor JSON reads start together after the prior READY read');
   state.currentPage = 50;
   controller.navigated();
   pageCalls[1].resolve({ pageNumber: 41, revision: 1, status: 'PENDING' });
   pageCalls[2].resolve({ pageNumber: 43, revision: 1, status: 'PENDING' });
-  pageCalls[3].resolve({ pageNumber: 40, revision: 1, status: 'PENDING' });
   await delay(0);
   assert.equal(state.pageCache.size, 0, 'old-window prefetch cannot pollute new cache');
   await controller.stop();
@@ -172,7 +171,7 @@ const deferred = () => {
   const renders = { book: 0, toc: 0 };
   const metadataContext = vm.createContext({ state: metadataState, Map, Number, JSON,
     renderBookMeta: () => { renders.book++; }, renderToc: () => { renders.toc++; } });
-  vm.runInContext(`const readingMetadataSignatures = new Map(); const readingMetadataVersions = new Map();
+  vm.runInContext(`let metadataEpoch = 0; const readingMetadataSignatures = new Map(); const readingMetadataVersions = new Map(); const readingMetadataProfiles = new Map();
     ${extract('olderRevision')} ${extract('sameOutline')} ${extract('mergeReadingMetadata')}`, metadataContext);
   const ready42 = { pageNumber: 42, status: 'READY', revision: 1,
     summary: { ...initial(42), status: 'READY', blockCount: 1, title: '章节' },

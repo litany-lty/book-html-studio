@@ -27,7 +27,7 @@ public class PaddleOcrParser {
                 String remoteId=layout.path("layout_id").asText("").strip();
                 String base=remoteId.isBlank()?"layout-"+(order+1):remoteId.replaceAll("[^A-Za-z0-9._-]","-");
                 if(base.length()>96)base=base.substring(0,96);String id="paddle-"+base;int duplicate=2;while(!ids.add(id))id="paddle-"+base+"-"+(duplicate++);
-                String mode=writingMode(remoteType,requestedLayout,bbox);
+                String mode=writingMode(remoteType,requestedLayout,raw);
                 String suggestion=unknown?"PaddleOCR-VL 返回未知布局类型 "+safeLabel(remoteType)+"，已保守保留为正文块":null;
                 boolean uncertain=unknown||text.isBlank();
                 blocks.add(new Block(id,type,order++,bbox,mode,text,text,null,uncertain,false,null,fromDirectorySpans?"paddle-span":"paddle",List.of(id),suggestion,raw));

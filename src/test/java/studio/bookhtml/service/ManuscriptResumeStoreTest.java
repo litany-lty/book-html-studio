@@ -92,6 +92,21 @@ class ManuscriptResumeStoreTest {
         try(var files=Files.list(file().getParent())){assertEquals(64,files.count());}
     }
 
+    @Test void boundedMaintenanceEventuallyReachesExpiredEvidenceBeyondFreshPrefix() throws Exception {
+        var old = new ManuscriptResumeStore(store, json, Clock.fixed(now.minus(Duration.ofDays(8)), ZoneOffset.UTC));
+        for (int page = 1; page <= 65; page++) {
+            if (page > 1) store.writePage(book, Page.pending(page, 600, 800), false);
+            if (page <= 64) (page == 63 ? old : cache).open(book, page, source, contract).put(0, input, result);
+        }
+        boolean admitted = false;
+        for (int pass = 0; pass < 16 && !admitted; pass++)
+            admitted = cache.open(book, 65, source, contract).available();
+        assertTrue(admitted, "bounded passes must eventually examine records beyond the same first four");
+        assertFalse(Files.exists(cache.path(book, 63)));
+        assertEquals(result, start().get(0, input), "fresh unfinished evidence stays intact");
+        try (var files = Files.list(file().getParent())) { assertEquals(64, files.count()); }
+    }
+
     @Test void newJvmCanResumeForcedRegionEvidenceAfterWriterHalts()throws Exception {
         store.close();
         try {
